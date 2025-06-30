@@ -1,0 +1,66 @@
+
+#include "replace_token_tiling.h"
+#include "register/op_def_registry.h"
+#include "tiling/platform/platform_ascendc.h"
+
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+  ReplaceTokenTilingData tiling;
+  auto aShape = context->GetInputShape(0)->GetOriginShape();
+  size_t aDim = aShape.GetDimNum();
+  int32_t sequenceLength = aShape.GetDim(0);
+  tiling.set_sequenceLength(sequenceLength);
+
+  context->SetBlockDim(1);
+  tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
+                      context->GetRawTilingData()->GetCapacity());
+  context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+  return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class ReplaceToken : public OpDef {
+public:
+    explicit ReplaceToken(const char* name) : OpDef(name)
+    {
+        this->Input("forkedTokenIds")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("lastStepOutPutTokenIds")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT64})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("Out")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->SetInferShape(ge::InferShape);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(ReplaceToken);
+}

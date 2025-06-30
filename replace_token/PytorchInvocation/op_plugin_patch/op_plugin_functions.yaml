@@ -1,0 +1,2 @@
+  - func: npu_replace_token(Tensor x, Tensor y) -> Tensor
+    op_api: all_version
