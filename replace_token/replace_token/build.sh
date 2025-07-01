@@ -62,6 +62,7 @@ else
   cmake --build "$BUILD_DIR" --target binary -j$(nproc)
   cmake --build "$BUILD_DIR" --target $target -j$(nproc)
 fi
+build_out/custom_opp_openEuler_x86_64.run
 
 
 # for debug
