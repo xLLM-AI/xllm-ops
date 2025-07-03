@@ -11,7 +11,7 @@
             "displayName": "Default Config",
             "description": "Default build using Unix Makefiles generator",
             "generator": "Unix Makefiles",
-            "binaryDir": "${sourceDir}/build_out",
+            "binaryDir": "${sourceDir}/build",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": {
                     "type": "STRING",
@@ -35,7 +35,7 @@
                 },
                 "vendor_name": {
                     "type": "STRING",
-                    "value": "customize"
+                    "value": "xllm"
                 },
                 "ASCEND_CANN_PACKAGE_PATH": {
                     "type": "PATH",
@@ -47,7 +47,7 @@
                 },
                 "CMAKE_INSTALL_PREFIX": {
                     "type": "PATH",
-                    "value": "${sourceDir}/build_out"
+                    "value": "${sourceDir}/build"
                 },
                 "ENABLE_CROSS_COMPILE": {
                     "type": "BOOL",

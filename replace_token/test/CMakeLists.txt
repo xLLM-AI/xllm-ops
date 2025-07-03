@@ -23,13 +23,13 @@ else()
     set(ASCEND_PATH "/usr/local/Ascend/ascend-toolkit/latest")
 endif()
 set(INCLUDE_BASE_DIR "${ASCEND_PATH}/include")
-set(OP_API_PATH "/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api")
+set(OP_API_PATH "/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/xllm/op_api")
 include_directories(
     ${INCLUDE_BASE_DIR}
     ${INCLUDE_BASE_DIR}/aclnn
     ${OP_API_PATH}/include
 )
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/xllm/op_api/lib/")
 # 设置链接的库文件路径
 target_link_libraries(test_replace_token PRIVATE
                       ${ASCEND_PATH}/lib64/libascendcl.so

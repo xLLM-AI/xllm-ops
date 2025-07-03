@@ -7,7 +7,7 @@ This sample introduces the high-performance implementation of the replace token 
 ```
 ├──replace_token     // Call the ReplaceToken custom operator using kernel function direct tuning
 │   └── replace_token       // Operator Engineering
-│   └── replace_test            // This directory is the unit test of replace token, including accuracy test and performance test
+│   └── test            // This directory is the unit test of replace token, including accuracy test and performance test
 ```
 
 ## Operator Description

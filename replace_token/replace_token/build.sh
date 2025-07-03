@@ -18,10 +18,10 @@ fi
 echo "using ASCEND_HOME_PATH: $ASCEND_HOME_PATH"
 script_path=$(realpath $(dirname $0))
 
-BUILD_DIR="build_out"
+BUILD_DIR="build"
 HOST_NATIVE_DIR="host_native_tiling"
-mkdir -p build_out
-rm -rf build_out/*
+mkdir -p build
+rm -rf build/*
 
 opts=$(python3 $script_path/cmake/util/preset_parse.py $script_path/CMakePresets.json)
 ENABLE_CROSS="-DENABLE_CROSS_COMPILE=True"
@@ -62,11 +62,11 @@ else
   cmake --build "$BUILD_DIR" --target binary -j$(nproc)
   cmake --build "$BUILD_DIR" --target $target -j$(nproc)
 fi
-build_out/custom_opp_openEuler_x86_64.run
-
+# ${script_path}/build/xllm_op.run --install-path=${script_path}/build
+${script_path}/build/xllm_op.run
 
 # for debug
-# cd build_out
+# cd build
 # make
 # cpack
 # verbose append -v

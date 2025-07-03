@@ -1,7 +1,7 @@
 #!/bin/bash
 # Copyright (c) Huawei Technologies Co., Ltd. 2023-2024. All rights reserved.
 
-vendor_name=customize
+vendor_name=xllm
 targetdir=/usr/local/Ascend/opp
 target_custom=0
 
