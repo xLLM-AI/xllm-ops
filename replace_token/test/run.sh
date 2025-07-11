@@ -11,11 +11,15 @@ last_step_out_put_token_ids_path="${CURRENT_DIR}/input/last_step_out_put_token_i
 output_out_file_path="${CURRENT_DIR}/input/output_out.bin"
 acl_output_out_file_path="${CURRENT_DIR}/output/output_out.bin"
 log_file_path="${CURRENT_DIR}/log"
-for m in 4 8 16 32 64 128 256 512 1024
+mkdir -p ${log_file_path}
+mkdir -p ${CURRENT_DIR}/output
+mkdir -p ${CURRENT_DIR}/input
+# for m in 4 8 16 32 64 128 256 512 1024
+for m in 15008
 do  
     echo "m: $m start process"
-    python3 scripts/gen_data.py $m
-    ./build/bin/test_replace_token $m $forked_token_ids_path $last_step_out_put_token_ids_path
+    python3 scripts/gen_data.py $m 1
+    ./build/bin/test_replace_token $m 1 $forked_token_ids_path $last_step_out_put_token_ids_path
     md5sum $output_out_file_path $acl_output_out_file_path >> ${log_file_path}/log_${m}.txt
     # python3 scripts/read_file.py
 done

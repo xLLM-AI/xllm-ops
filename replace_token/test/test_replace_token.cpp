@@ -187,22 +187,26 @@ int main(int argc, char **argv) {
   std::string input_forked_token_ids_path = "";
   std::string input_last_step_out_put_token_ids_path = "";
   int64_t sequenceLength=5;
+  int64_t blength = 4;
   if(argc<3){
     input_forked_token_ids_path = "./input/forked_token_ids.bin";
     input_last_step_out_put_token_ids_path = "./input/last_step_out_put_token_ids.bin";
     std::cout<<"use default input path"<<std::endl;
   }else{
     sequenceLength = std::stoi(argv[1]);
-    input_forked_token_ids_path = argv[2];
-    input_last_step_out_put_token_ids_path = argv[3];
+    blength = std::stoi(argv[2]);
+    input_forked_token_ids_path = argv[3];
+    input_last_step_out_put_token_ids_path = argv[4];
     std::cout<<"use custom input path"<<std::endl;
+    std::cout<<"sequenceLength: "<<sequenceLength<<std::endl;
+    std::cout<<"blength: "<<blength<<std::endl;
   }
   
   std::cout<<input_forked_token_ids_path<<std::endl;
   std::cout<<input_last_step_out_put_token_ids_path<<std::endl;
   // "416,7168;256,7168,256;;256,256;;;;256;416"
   std::vector<std::vector<int64_t>> forkedTokenIdsShape = {{sequenceLength}};
-  std::vector<std::vector<int64_t>> lastStepOutPutTokenIdsShape= {{sequenceLength}};
+  std::vector<std::vector<int64_t>> lastStepOutPutTokenIdsShape= {{blength}};
   std::vector<std::vector<int64_t>> outShape = {{sequenceLength}};
   void* forkedTokenIdsDeviceAddr[1];
   void* lastStepOutPutTokenIdsDeviceAddr[1];

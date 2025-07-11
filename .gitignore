@@ -9,13 +9,4 @@ replace_token/test/output
 replace_token/test/mindstudio_sanitizer_log
 replace_token/test/core*
 replace_token/test/test.log
-replace_token/PytorchInvocation/build
-replace_token/CppExtensionInvocation/build
-replace_token/CppExtensionInvocation/custom_ops.egg-info
-replace_token/CppExtensionInvocation/dist
-replace_token/PytorchInvocation/pytorch
 replace_token/replace_token/cmake/util/__pycache__
-replace_token/test/run_10_times.sh
-replace_token/test/run_copy.sh
-replace_token/CppExtensionInvocation
-replace_token/PytorchInvocation

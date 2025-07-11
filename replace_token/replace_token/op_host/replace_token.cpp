@@ -9,10 +9,15 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
   ReplaceTokenTilingData tiling;
   auto aShape = context->GetInputShape(0)->GetOriginShape();
+  auto bShape = context->GetInputShape(1)->GetOriginShape();
   size_t aDim = aShape.GetDimNum();
+  size_t bDim = bShape.GetDimNum();
+  uint32_t max_tokens = 10000;
   int32_t sequenceLength = aShape.GetDim(0);
+  int32_t blength = bShape.GetDim(0);
   tiling.set_sequenceLength(sequenceLength);
-
+  tiling.set_max_tokens(max_tokens);
+  tiling.set_blength(blength);
   context->SetBlockDim(1);
   tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
                       context->GetRawTilingData()->GetCapacity());
