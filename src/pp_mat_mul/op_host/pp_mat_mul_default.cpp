@@ -250,8 +250,7 @@ bool PpMatMulDefault::GetTilingKey() {
         {platform_ascendc::SocVersion::ASCEND310P, 0},
         {platform_ascendc::SocVersion::ASCEND910, 0},
         {platform_ascendc::SocVersion::ASCEND310B, 0},
-        {platform_ascendc::SocVersion::ASCEND910B, 1},
-        {platform_ascendc::SocVersion::ASCEND910_93, 1}
+        {platform_ascendc::SocVersion::ASCEND910B, 1}
     };
 
     std::unordered_map<ge::Format, uint32_t> formatMap = {
