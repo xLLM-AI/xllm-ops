@@ -1,0 +1,11 @@
+# pre-commit install
+# pre-commit run --all-files
+
+repos:
+-   repo: git@coding.jd.com:9n_thirdparty/mirrors-clang-format.git
+    rev: v20.1.6
+    hooks:
+      - id: clang-format
+        types_or: [c++, c, cuda]
+        exclude: ^(xllm_ops/|test/|.*\.ptx\.h$)
+

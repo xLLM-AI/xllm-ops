@@ -224,10 +224,9 @@ if (BUILD_OPEN_PROJECT)
                 --op_debug_config ${OP_DEBUG_CONFIG}
                 RESULT_VARIABLE result
                 OUTPUT_STRIP_TRAILING_WHITESPACE
-                ERROR_VARIABLE PREPARE_BUILD_ERROR_VARIABLE
                 OUTPUT_VARIABLE PREPARE_BUILD_OUTPUT_VARIABLE)
         message(STATUS "result---lmx ------ : ${result}")
-        message(STATUS "PREPARE_BUILD_ERROR_VARIABLE": ${PREPARE_BUILD_ERROR_VARIABLE})
+        # message(STATUS "PREPARE_BUILD_ERROR_VARIABLE": ${PREPARE_BUILD_ERROR_VARIABLE})
         message(STATUS "hello xllm----------------")
         if (result)
             message(FATAL_ERROR "Error: ops prepare build failed.")

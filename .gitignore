@@ -2,10 +2,14 @@
 build
 build_out
 output
-test
+log
 src/math/*/tests/st/[0-9]*/
 src/math/*/examples/CppExtensions/*/test/*.json
 src/math/*/examples/PytorchInvocation/pytorch
+test/build
+test/bin
+test/kernel_meta
+test/fusion_result.json
 
 
 # Cmake files
