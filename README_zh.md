@@ -12,7 +12,7 @@ limitations under the License. -->
 [English](./README.md) | [中文](./README_zh.md)
 
 <div align="center">
-<img src="docs/assets/logo_with_llm.png" alt="xLLM" style="width:50%; height:auto;">
+<img src="docs/xllm_ops_log.png" alt="xLLM" style="width:50%; height:auto;">
     
 [![Document](https://img.shields.io/badge/Document-black?logo=html5&labelColor=grey&color=red)](https://xllm.readthedocs.io/zh-cn/latest/) [![Docker](https://img.shields.io/badge/Docker-black?logo=docker&labelColor=grey&color=%231E90FF)](https://hub.docker.com/r/xllm/xllm-ai) [![License](https://img.shields.io/badge/license-Apache%202.0-brightgreen?labelColor=grey)](https://opensource.org/licenses/Apache-2.0) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/jd-opensource/xllm) 
     
