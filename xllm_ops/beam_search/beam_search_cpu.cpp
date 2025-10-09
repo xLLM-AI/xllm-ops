@@ -33,14 +33,15 @@ class TilingBeamSearchFunc {
   uint32_t core_num_ = 0;
   uint32_t request_num_ = 0;
   uint32_t min_size_ = 0;
+  uint32_t step_size_ = 0;
   size_t sync_workspace_size_ = 0;
 };
 
 ge::graphStatus TilingBeamSearchFunc::Init() {
   auto platform_info =
       platform_ascendc::PlatformAscendC(tiling_context_->GetPlatformInfo());
-  //    uint32_t aiv_num = platform_info.GetCoreNumAiv();
-  uint32_t aiv_num = 1;
+     uint32_t aiv_num = platform_info.GetCoreNumAiv();
+  // uint32_t aiv_num = 1;
 
   // check input shape
   auto token_ids_shape = tiling_context_->GetInputShape(0)->GetOriginShape();
@@ -54,8 +55,11 @@ ge::graphStatus TilingBeamSearchFunc::Init() {
   core_num_ = aiv_num;
   int32_t block_size1 = 32/sizeof(float);
   int32_t align_top_k = (top_k_+block_size1-1)/block_size1*block_size1;
-  int32_t round_length = beam_width_ /48 == 0 ? beam_width_%48 : 48;
-  int32_t block_size = (round_length * align_top_k + 31)/32*32;
+  // int32_t step_size = beam_width_ /48 == 0 ? beam_width_%48 : 48;
+  int32_t align_beam_width = (beam_width_+31)/32*32;
+  // step_size_ =1024/align_beam_width;
+  step_size_ = 8;
+  int32_t block_size = (step_size_ * align_top_k + 31)/32*32;
   uint32_t max_size = 0;
   uint32_t min_size0 = 0;
   uint32_t min_size1 = 0;
@@ -80,9 +84,9 @@ ge::graphStatus TilingBeamSearchFunc::Init() {
                                 max_size,
                                 min_size0);
 //   tiling.set_tmpsize(minsize);
-
+int32_t block_size2 = (2 * align_top_k + 31)/32*32;
   AscendC::TopKTilingFunc(platform_info,
-                          32, // inner
+                          block_size2, // inner
                           1, // outter
                           top_k_, // k
                           dtype_size,// dtype
@@ -91,7 +95,7 @@ ge::graphStatus TilingBeamSearchFunc::Init() {
                           true,
                           tiling_data_.topKTilingData1);
   AscendC::GetTopKMaxMinTmpSize(platform_info,
-                                32,
+                                block_size2,
                                 1,
                                 false,
                                 true,
@@ -101,6 +105,7 @@ ge::graphStatus TilingBeamSearchFunc::Init() {
                                 max_size,
                                 min_size1);
   min_size_ = static_cast<int32_t>(std::max(min_size0, min_size1));
+
   sync_workspace_size_ =
       static_cast<size_t>(platform_info.GetLibApiWorkSpaceSize());
   return ge::GRAPH_SUCCESS;
@@ -116,6 +121,7 @@ void TilingBeamSearchFunc::FillTilingData() {
   tiling_data_.set_request_num(request_num_);
   tiling_data_.set_core_num(core_num_);
   tiling_data_.set_min_size(min_size_);
+  tiling_data_.set_step_size(step_size_);
 }
 
 ge::graphStatus TilingBeamSearchFunc::RunKernelTiling() {
@@ -157,11 +163,6 @@ namespace ops {
 class BeamSearch : public OpDef {
  public:
   explicit BeamSearch(const char* name) : OpDef(name) {
-    this->Input("token_ids")
-        .ParamType(REQUIRED)
-        .DataType({ge::DT_INT32})
-        .Format({ge::FORMAT_ND})
-        .UnknownShapeFormat({ge::FORMAT_ND});
     this->Input("log_probs")
         .ParamType(REQUIRED)
         .DataType({ge::DT_FLOAT})
@@ -182,8 +183,17 @@ class BeamSearch : public OpDef {
         .DataType({ge::DT_INT32})
         .Format({ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND});
+    this->Output("out_token_index")
+        .ParamType(REQUIRED)
+        .DataType({ge::DT_INT32})
+        .Format({ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND});
+    this->Output("out_log_probs")
+        .ParamType(REQUIRED)
+        .DataType({ge::DT_FLOAT})
+        .Format({ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND});
     this->SetInferShape(ge::InferShape);
-
     this->AICore().SetTiling(optiling::TilingForBeamSearchFunc);
     this->AICore().AddConfig("ascend910b");
     this->AICore().AddConfig("ascend910_93");

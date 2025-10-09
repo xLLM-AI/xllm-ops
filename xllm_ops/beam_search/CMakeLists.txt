@@ -29,4 +29,3 @@ install(FILES beam_search.cpp
 
 install(FILES beam_search.h
         DESTINATION ${ASCEND_IMPL_OUT_DIR}/dynamic)
-

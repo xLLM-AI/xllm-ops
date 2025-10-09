@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <string>
 #include <vector>
 #include "base/utils_tensor.h"
 #include "aclnn_beam_search.h"
@@ -20,22 +21,50 @@ struct TensorShapes {
 };
 class BeamSearchBase {
  public:
-  BeamSearchBase(int64_t beam_width,
+ /*
+ BeamSearchBase(int64_t beam_width,
                  int64_t top_k,
                  int64_t request_num,
-                 int64_t sequence_length)
+                 int64_t sequence_length,
+                 int64_t device_id = 0)
       : beam_width_(beam_width),
         top_k_(top_k),
         request_num_(request_num),
-        sequence_length_(sequence_length) {
+        sequence_length_(sequence_length),
+        n_sequences_(0),
+        device_id_(static_cast<int32_t>(device_id)),
+        device_(std::string("npu:") + std::to_string(static_cast<int>(device_id_))) {
     n_sequences_ = request_num_ * beam_width_;
     shapes.token_ids_shape = {{n_sequences_, sequence_length_}};
     shapes.log_probs_shape = {{n_sequences_, 1}};
     shapes.top_tokens_shape = {{n_sequences_, top_k_}};
     shapes.top_probs_shape = {{n_sequences_, top_k_}};
-    shapes.output_shape = {{n_sequences_, sequence_length_ + 1}};
+    shapes.output_shape = {{n_sequences_, 1}};
+  }
+*/
+  BeamSearchBase(int64_t beam_width,
+                 int64_t top_k,
+                 int64_t request_num,
+                 int64_t sequence_length
+                 )
+      : beam_width_(beam_width),
+        top_k_(top_k),
+        request_num_(request_num),
+        sequence_length_(sequence_length),
+        n_sequences_(0)
+    {
+    n_sequences_ = request_num_ * beam_width_;
+    shapes.token_ids_shape = {{n_sequences_, sequence_length_}};
+    shapes.log_probs_shape = {{n_sequences_, 1}};
+    shapes.top_tokens_shape = {{n_sequences_, top_k_}};
+    shapes.top_probs_shape = {{n_sequences_, top_k_}};
+    shapes.output_shape = {{n_sequences_, 1}};
   }
   void create_torch_tensors() {
+    /*
+    auto opt_i32 = torch::TensorOptions().dtype(torch::kInt32).device(device_);
+    auto opt_f32 = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+    */
     auto opt_i32 = torch::TensorOptions().dtype(torch::kInt32);
     auto opt_f32 = torch::TensorOptions().dtype(torch::kFloat32);
     token_ids = torch::randint(
@@ -45,21 +74,32 @@ class BeamSearchBase {
         torch::randint(/*low=*/4, /*high=*/10, {n_sequences_, top_k_}, opt_i32);
     top_probs = torch::rand({n_sequences_, top_k_}, opt_f32);
     output_token_ids_torch =
-        torch::zeros({n_sequences_, sequence_length_ + 1}, opt_i32);
+        torch::zeros({n_sequences_, 1}, opt_i32);
     output_token_ids_op =
-        torch::zeros({n_sequences_, sequence_length_ + 1}, opt_i32);
+        torch::zeros({n_sequences_, 1}, opt_i32);
+    output_log_probs_op = torch::zeros({n_sequences_, 1}, opt_f32);
+    output_log_probs_torch = torch::zeros({n_sequences_, 1}, opt_f32);
+    output_token_index_op = torch::zeros({n_sequences_, 1}, opt_i32);
+    output_token_index_torch = torch::zeros({n_sequences_, 1}, opt_i32);
   }
   int32_t beam_width_;
   int32_t top_k_;
   int32_t request_num_;
   int32_t sequence_length_;
   int32_t n_sequences_;
+//   int32_t device_id_;
+//   torch::Device device_;
   torch::Tensor token_ids;
   torch::Tensor log_probs;
   torch::Tensor top_tokens;
   torch::Tensor top_probs;
   torch::Tensor output_token_ids_torch;
+  torch::Tensor output_token_index_torch;
+  torch::Tensor output_log_probs_torch;
   torch::Tensor output_token_ids_op;
+  torch::Tensor output_token_index_op;
+  torch::Tensor output_log_probs_op;
+  
   TensorShapes shapes;
 };
 class BeamSearchTorch {
@@ -70,37 +110,21 @@ class BeamSearchTorch {
     torch::Tensor candidate_scores = (expanded_log_probs + base.top_probs);
     candidate_scores = candidate_scores.view(
         {base.request_num_, base.beam_width_ * base.top_k_});
-    // std::cout << "[BeamSearchTorch] expanded_log_probs:\n" <<
-    // expanded_log_probs << std::endl; std::cout << "[BeamSearchTorch]
-    // top_probs:\n" << base.top_probs << std::endl; std::cout <<
-    // "[BeamSearchTorch] candidate_scores (reshaped):\n" << candidate_scores <<
-    // std::endl;
     auto topk_result = at::topk(candidate_scores, base.top_k_, 1, true, true);
     torch::Tensor topk_scores = std::get<0>(topk_result);
     torch::Tensor topk_indices = std::get<1>(topk_result);
-    // std::cout << "[BeamSearchTorch] topk_scores:\n" << topk_scores <<
-    // std::endl; std::cout << "[BeamSearchTorch] topk_indices:\n" <<
-    // topk_indices << std::endl;
 
     torch::Tensor selected_beam = at::floor_divide(topk_indices, base.top_k_);
     torch::Tensor selected_within_top =
         at::remainder(topk_indices, base.top_k_);
-    // std::cout << "[BeamSearchTorch] selected_beam:\n" << selected_beam <<
-    // std::endl; std::cout << "[BeamSearchTorch] selected_within_top:\n" <<
-    // selected_within_top << std::endl;
-
     auto device = base.token_ids.device();
     auto options_long =
-        torch::TensorOptions().dtype(torch::kLong);
+        torch::TensorOptions().dtype(torch::kLong).device(device);
     torch::Tensor request_ids =
         torch::arange(base.request_num_, options_long).view({-1, 1});
     torch::Tensor base_indices = (request_ids * base.beam_width_);
     torch::Tensor orig_seq_indices =
         (base_indices + selected_beam).reshape({-1});
-    // std::cout << "[BeamSearchTorch] request_ids:\n" << request_ids <<
-    // std::endl; std::cout << "[BeamSearchTorch] base_indices:\n" <<
-    // base_indices << std::endl; std::cout << "[BeamSearchTorch]
-    // orig_seq_indices (flattened):\n" << orig_seq_indices << std::endl;
 
     torch::Tensor selected_token_ids =
         base.token_ids.index_select(0, orig_seq_indices);
@@ -110,18 +134,27 @@ class BeamSearchTorch {
         selected_within_top.reshape({-1}).to(torch::kLong);
     torch::Tensor next_tokens =
         selected_top.gather(1, selected_within_top_flat.unsqueeze(1));
-    // std::cout << "[BeamSearchTorch] selected_token_ids:\n" <<
-    // selected_token_ids << std::endl; std::cout << "[BeamSearchTorch]
-    // selected_top:\n" << selected_top << std::endl; std::cout <<
-    // "[BeamSearchTorch] selected_within_top_flat:\n" <<
-    // selected_within_top_flat << std::endl; std::cout << "[BeamSearchTorch]
-    // next_tokens:\n" << next_tokens << std::endl;
+    base.output_token_ids_torch = next_tokens;
+    base.output_token_index_torch = orig_seq_indices.view({-1,1});
+    base.output_log_probs_torch = topk_scores;
+    /* 
+    // old version
+    torch::Tensor orig_seq_indices =
+        (base_indices + selected_beam).reshape({-1});
 
+    torch::Tensor selected_token_ids =
+        base.token_ids.index_select(0, orig_seq_indices);
+    torch::Tensor selected_top =
+        base.top_tokens.index_select(0, orig_seq_indices);
+    torch::Tensor selected_within_top_flat =
+        selected_within_top.reshape({-1}).to(torch::kLong);
+    torch::Tensor next_tokens =
+        selected_top.gather(1, selected_within_top_flat.unsqueeze(1));
     torch::Tensor new_token_ids =
         torch::cat({selected_token_ids, next_tokens}, 1);
     base.output_token_ids_torch = new_token_ids;
-    std::cout << "[BeamSearchTorch] new_token_ids (output):\n" <<
-    new_token_ids << std::endl;
+    */
+    
   }
 
  private:
@@ -138,6 +171,8 @@ class BeamSearchOp {
                                                    top_tokens,
                                                    top_probs,
                                                    output_token_ids,
+                                                   output_token_index,
+                                                   output_log_probs,
                                                    stream),
                       "execute_beam_search_operator failed");
   }
@@ -146,6 +181,8 @@ class BeamSearchOp {
                                    aclTensor* top_tokens,
                                    aclTensor* top_probs,
                                    aclTensor* output_token_ids,
+                                   aclTensor* output_token_index,
+                                   aclTensor* output_log_probs,
                                    aclrtStream stream);
   void destroy_tensors() {
     aclDestroyTensor(token_ids);
@@ -178,12 +215,24 @@ class BeamSearchOp {
                                         base.output_token_ids_op,
                                         &output_token_ids),
         "create output_token_ids_op Tensor failed");
+    CHECK_ACL_SUCCESS(
+        utils::create_tensor_from_torch(base.shapes.output_shape[0],
+                                        base.output_token_index_op,
+                                        &output_token_index),
+        "create output_token_index_op Tensor failed");
+    CHECK_ACL_SUCCESS(
+        utils::create_tensor_from_torch(base.shapes.output_shape[0],
+                                        base.output_log_probs_op,
+                                        &output_log_probs),
+        "create output_log_probs_op Tensor failed");
   }
   aclTensor* token_ids = nullptr;
   aclTensor* log_probs = nullptr;
   aclTensor* top_tokens = nullptr;
   aclTensor* top_probs = nullptr;
   aclTensor* output_token_ids = nullptr;
+  aclTensor* output_token_index = nullptr;
+  aclTensor* output_log_probs = nullptr;
   BeamSearchBase& base;
 };
 int BeamSearchOp::execute_beam_search_operator(aclTensor* token_ids,
@@ -191,11 +240,13 @@ int BeamSearchOp::execute_beam_search_operator(aclTensor* token_ids,
                                                aclTensor* top_tokens,
                                                aclTensor* top_probs,
                                                aclTensor* output_token_ids,
+                                               aclTensor* output_token_index,
+                                               aclTensor* output_log_probs,
                                                aclrtStream stream) {
   uint64_t workspaceSize = 0;
   aclOpExecutor* executor;
   auto ret = aclnnBeamSearchGetWorkspaceSize(
-      token_ids, log_probs, top_tokens, top_probs, output_token_ids, &workspaceSize, &executor);
+      log_probs, top_tokens, top_probs, output_token_ids,output_token_index, output_log_probs,&workspaceSize, &executor);
   CHECK_ACL_SUCCESS(ret, "aclnn_beam_search_operator failed");
   void* workspaceAddr = nullptr;
   if (workspaceSize > 0) {
