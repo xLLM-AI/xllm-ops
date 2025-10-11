@@ -69,7 +69,7 @@ __aicore__ inline void BeamSearch<TokenIdType, LogProbType>::Process() {
   for (int32_t request_idx = 0; request_idx < this->request_num; request_idx++) {
     if(request_idx % 24 == block_idx){
       LocalTensor<LogProbType> prefix_top_probs = prefix_probs_buf.Get<LogProbType>();
-      AscendC::Duplicate<LogProbType>(prefix_top_probs, static_cast<LogProbType>(0),this->align_beam_width);
+      AscendC::Duplicate<LogProbType>(prefix_top_probs, static_cast<LogProbType>(-1.0f / 0.0f),this->align_beam_width);
       LocalTensor<int32_t> prefix_top_index = prefix_index_buf.GetWithOffset<int32_t>(this->align_beam_width, 0);
       AscendC::Duplicate<int32_t>(prefix_top_index, static_cast<int32_t>(0),this->align_beam_width);
       Psum(request_idx, prefix_top_probs, prefix_top_index);
@@ -267,14 +267,14 @@ __aicore__ inline void BeamSearch<TokenIdType, LogProbType>::TopKWithSorted(
   this->beam_width);
   */ 
   LocalTensor<LogProbType> merge_top_probs = merge_probs_buf.Get<LogProbType>();
-  AscendC::Duplicate<LogProbType>(merge_top_probs, static_cast<LogProbType>(0),2*this->align_beam_width);
+  AscendC::Duplicate<LogProbType>(merge_top_probs, static_cast<LogProbType>(-1.0f / 0.0f),2*this->align_beam_width);
   AscendC::DataCopy(merge_top_probs, dst_local_value, this->align_top_k);
   AscendC::DataCopy(merge_top_probs[this->align_top_k], prefix_top_probs, this->align_top_k);
   LocalTensor<int32_t> merge_index = merge_index_buf.Get<int32_t>();
   AscendC::DataCopy(merge_index,dst_local_index,this->align_top_k);
   AscendC::DataCopy(merge_index[this->align_top_k], prefix_top_index, this->align_top_k);
   LocalTensor<LogProbType> dst_merge_probs = top_k_second_res_buf.Get<LogProbType>();
-  AscendC::Duplicate<LogProbType>(dst_merge_probs, static_cast<LogProbType>(0),
+  AscendC::Duplicate<LogProbType>(dst_merge_probs, static_cast<LogProbType>(-1.0f / 0.0f),
                               this->align_top_k);
   LocalTensor<int32_t> dst_merge_index = top_k_second_res_index_buf.Get<int32_t>();
   AscendC::Duplicate<int32_t>(dst_merge_index, static_cast<int32_t>(0),
