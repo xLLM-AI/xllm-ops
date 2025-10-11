@@ -1,12 +1,3 @@
-/*
-* Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-* This file is a part of the CANN Open Software.
-* Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
-* Please refer to the License for details. You may not use this file except in compliance with the License.
-* THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-* INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-* See LICENSE in the root of the software repository for the full text of the License.
-*/
 #include <numeric>
 #include <algorithm>
 #include "multi_latent_attention_tiling_impl.h"
@@ -51,7 +42,6 @@ ge::graphStatus GetMLANdInfo(gert::TilingContext *context, MLAInfo &mmInfo,
     mmInfo.numBlocks = static_cast<int32_t>(kcacheShape.GetDim(DIM_0));
     mmInfo.maxNumBlocksPerQuery = static_cast<int32_t>(tableShape.GetDim(DIM_1));
     mmInfo.tor = param.tor;
-    // kvSeqLen和qSeqLen为空时，.data()方法返回的并不是nullptr
     if (param.kvSeqLen.size() > 0) {
         mmInfo.kvSeqLen = param.kvSeqLen.data();
     }
@@ -59,17 +49,11 @@ ge::graphStatus GetMLANdInfo(gert::TilingContext *context, MLAInfo &mmInfo,
         mmInfo.qSeqLen = param.qSeqLen.data();
     }
     param.kvHead = param.kvHead <= 0 ? param.headSize : param.kvHead;
-    // std::cout << "mmInfo.kvSeqLen=" << mmInfo.kvSeqLen << std::endl;
-    // std::cout << "mmInfo param.kvSeqLen.size()=" << param.kvSeqLen.size() << std::endl;
     mmInfo.batch = static_cast<int32_t>(param.kvSeqLen.size());
-    // std::cout << "mmInfo.batch=" << mmInfo.batch << std::endl;
     mmInfo.kvHeads = param.kvHead;
     mmInfo.numHeads = static_cast<int32_t>(param.headSize);
     mmInfo.maskType = static_cast<int32_t>(param.maskType);
-    // std::cout << "mmInfo.type=" <<  static_cast<int>(mmInfo.type) << std::endl;
-    // std::cout << "mmInfo.numHeads=" << mmInfo.numHeads << std::endl;
     mmInfo.mtpTp1Flag = (mmInfo.numHeads == M_LIMIT) && (static_cast<int32_t>(mmInfo.type) < NUM2); // quant not support
-    // std::cout << "mmInfo.mtpTp1Flag=" << mmInfo.mtpTp1Flag << std::endl;
     if (mmInfo.mtpTp1Flag) {
         mmInfo.maskType = 0;
     }
@@ -82,8 +66,6 @@ ge::graphStatus GetMLANdInfo(gert::TilingContext *context, MLAInfo &mmInfo,
     } else {
             mmInfo.totalTaskNum = mmInfo.batch;
     }
-    // std::cout << "mmInfo.qSeqLen != nullptr=" << (mmInfo.qSeqLen != nullptr) << std::endl;
-    // std::cout << "mmInfo.totalTaskNum=" << mmInfo.totalTaskNum << std::endl;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -111,7 +93,6 @@ ge::graphStatus GenTilingKey(gert::TilingContext *context, MLAInfo &mmInfo, OpPa
 {
     uint32_t dataType = static_cast<int32_t>(mmInfo.type);
     uint32_t tilingKey = dataType + (mmInfo.kNz << NUM4) + (mmInfo.mtpTp1Flag << NUM2) + (param.isRing << NUM5);
-    // printf("TILING KEY IS = %u\n", tilingKey);
     context->SetTilingKey(tilingKey);
     return ge::GRAPH_SUCCESS;
 }
@@ -124,50 +105,27 @@ OpParam::MLA GetParamFromTilingContext(gert::TilingContext *context) {
     param.kvHead = static_cast<int32_t>(*(context->GetAttrs()->GetInt(3)));
     param.maskType = static_cast<AtbOps::OpParam::MLA::MaskType>(*(context->GetAttrs()->GetInt(4)));
     param.isRing = static_cast<int32_t>(*(context->GetAttrs()->GetInt(7)));
-    // printf("TestHala param.type=%d, param.headSize=%d, param.tor=%f, param.kvHead=%d\n", param.type, param.headSize,
-    //        param.tor, param.kvHead);
-    // printf("TestHala param.maskType=%d, param.isRing=%d\n", param.maskType, param.isRing);
     auto qSeqLen = context->GetAttrs()->GetListInt(5)->GetData();
     size_t arraySize = context->GetAttrs()->GetListInt(5)->GetSize();
-    // std::cout << "qSeqLen arraySize=" << arraySize << std::endl;
-    // 预留空间（可选，提升效率）
     param.qSeqLen.reserve(arraySize);
     if (arraySize >= 1 && reinterpret_cast<const int32_t *>(qSeqLen)[0] >= 0) {
         for (size_t i = 0; i < arraySize; ++i) {
-            // 显式转换为int32_t并添加到vector
             param.qSeqLen.push_back(reinterpret_cast<const int32_t *>(qSeqLen)[i]);
-            // std::cout << "TestHala qSeqLen[" << i << "]=" << param.qSeqLen[i] << std::endl;
         }
-    } else {
-        // printf("no valid data in qSeqLen\n");
     }
-    // printf("param.qSeqLen.size=%zu, param.qSeqLen[0]=%d\n", param.qSeqLen.size(), param.qSeqLen[0]);
 
     auto kvSeqLenAttr = context->GetAttrs()->GetListInt(6)->GetData();
     arraySize = context->GetAttrs()->GetListInt(6)->GetSize();
-    // std::cout << "kvSeqLenAttr arraySize=" << arraySize << std::endl;
-    // 预留空间（可选，提升效率）
     param.kvSeqLen.reserve(arraySize);
     if (arraySize >= 1 && reinterpret_cast<const int32_t *>(kvSeqLenAttr)[0] >= 0) {
         for (size_t i = 0; i < arraySize; ++i) {
-            // 显式转换为int32_t并添加到vector
             param.kvSeqLen.push_back(reinterpret_cast<const int32_t *>(kvSeqLenAttr)[i]);
-            // std::cout << "TestHala kvSeqLen[" << i << "]=" << param.kvSeqLen[i] << std::endl;
         }
-    } else {
-        // printf("no valid data in kvSeqLen\n");
     }
     return param;
 }
 
-/**
- * 从ATB继承过来的计算TilingData总字节数的方法
- *
- * @param param 从TilingContext中获取的属性信息
- * @return TilingData的总长度
- */
 uint64_t GetTilingSize(OpParam::MLA param) {
-    // 从ATB继承过来的常量
     int32_t TILING_PARA_SIZE = 8;
     int32_t TILING_HEAD_SIZE = 15;
     int32_t TILING_PARA_SIZE_TP1 = 4;
@@ -203,28 +161,14 @@ ge::graphStatus MLATiling(gert::TilingContext *context)
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     
-    // 获取硬件平台cube核的个数
     auto blockDim = ascendcPlatform.GetCoreNumAic();
-    uint64_t tilingSizeWithoutWorkspaceParam = GetTilingSize(param);
-    // 开头增加5个uint64_t的长度，用于存储5个workspace的大小
-    // 在头部增加，是因为如果在尾部追加的话，无法将原始tilingData的长度信息传递到kernel侧，会导致
-    // kernel侧无法分隔出来原始的tilingData和workspace长度数据
-    uint64_t tilingSizeWithWorkSpace = sizeof(uint64_t) * 5 + tilingSizeWithoutWorkspaceParam;
-    // printf("TestHala tilingSize=%lu\n", tilingSizeWithoutWorkspaceParam);
 
-    // 获取TilingContext中的TilingData地址，并设置TilingData长度
-    // std::cout << "context->GetRawTilingData()->GetData()=" << context->GetRawTilingData()->GetData() << std::endl;
-    // printf("context->GetRawTilingData()->GetData() = %ld\n", context->GetRawTilingData()->GetData());
+    uint64_t tilingSizeWithoutWorkspaceParam = GetTilingSize(param);
+    uint64_t tilingSizeWithWorkSpace = sizeof(uint64_t) * 6 + tilingSizeWithoutWorkspaceParam;
     uint32_t *tilingParam = static_cast<uint32_t *>(context->GetRawTilingData()->GetData());
-    context->GetRawTilingData()->SetDataSize(tilingSizeWithWorkSpace);
-    // tilingParam指针是32位的，而前5个workspace大小数值是64位的
-    // printf("TestHala tilingParam start addr = %ld\n", tilingParam);
-    // printf("TestHala tilingParam real start addr = %ld\n", tilingParam + 5*2);
-    // std::cout << "tilingParam=" << tilingParam << std::endl;
-    // std::cout << "tilingParam + 5*2=" << tilingParam + 5*2 << std::endl;
+    context->GetRawTilingData()->SetDataSize(tilingSizeWithWorkSpace);    
     
-    
-    ge::graphStatus ret = GetMLATilingParam(param, mmInfo, blockDim, tilingParam + 5*2, tilingSizeWithoutWorkspaceParam);
+    ge::graphStatus ret = GetMLATilingParam(param, mmInfo, blockDim, tilingParam + 6*2, tilingSizeWithWorkSpace);
     if (ret != ge::GRAPH_SUCCESS) {
         printf("GetMLATilingParam failed: %d\n", ret);
         return ret;
@@ -239,7 +183,7 @@ ge::graphStatus MLATiling(gert::TilingContext *context)
     bool isQuant = (static_cast<int32_t>(mmInfo.type) < NUM2) ? 0 : 1;
     uint64_t pWorkSpaceSize = isQuant ? basicWorkSpaceInt8 : basicWorkSpaceHalf * 2;
     uint64_t oTempWorkSpcaceSize = isQuant ? basicWorkSpaceInt8 * 2 : basicWorkSpaceFloat * 2;
-    // workspace的起始位置，从workspace开始，workspace参数是uint64_t的
+    uint64_t tailWorkSpaceFloat = blockDim * 128 * 2 * dataLenFloat;
     uint64_t *workspaceParam = reinterpret_cast<uint64_t *>(tilingParam);
     if (isQuant) {
         workspaceParam[0] = basicWorkSpaceFloat;
@@ -247,32 +191,20 @@ ge::graphStatus MLATiling(gert::TilingContext *context)
         workspaceParam[2] = pWorkSpaceSize;
         workspaceParam[3] = oTempWorkSpcaceSize;
         workspaceParam[4] = basicWorkSpaceFloat;
+        workspaceParam[5] = tailWorkSpaceFloat;
     } else {
         workspaceParam[0] = basicWorkSpaceFloat * 2;
         workspaceParam[1] = NUM512;
         workspaceParam[2] = pWorkSpaceSize;
         workspaceParam[3] = oTempWorkSpcaceSize;
         workspaceParam[4] = basicWorkSpaceFloat;
+        workspaceParam[5] = tailWorkSpaceFloat;
     }
-    // std::cout << "workspaceParam[0]=" << workspaceParam[0] << std::endl;
-    // std::cout << "workspaceParam[1]=" << workspaceParam[1] << std::endl;
-    // std::cout << "workspaceParam[2]=" << workspaceParam[2] << std::endl;
-    // std::cout << "workspaceParam[3]=" << workspaceParam[3] << std::endl;
-    // std::cout << "workspaceParam[4]=" << workspaceParam[4] << std::endl;
-    
-    // uint64_t usrSize = workspaceParam[0] + workspaceParam[1] + workspaceParam[2] +
-    //                    workspaceParam[3] + workspaceParam[4];
-    // size_t systemWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
-    // size_t *currentWorkspace = context->GetWorkspaceSizes(1);
-    // currentWorkspace[0] = systemWorkspaceSize + usrSize;
 
     uint64_t usrSize =
-            workspaceParam[0] + workspaceParam[1] + workspaceParam[2] + workspaceParam[3] + workspaceParam[4];
-    // 获取当前系统workspace的大小
+            workspaceParam[0] + workspaceParam[1] + workspaceParam[2] + workspaceParam[3] + workspaceParam[4] + workspaceParam[5];
     uint32_t sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
-    // 通过框架获取workspace的指针，GetWorkspaceSizes入参为所需workspace的块数。当前限制使用一块。
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
-    // 设置总的workspace的数值大小，总的workspace空间由框架来申请并管理。
     currentWorkspace[0] = usrSize + sysWorkspaceSize;
 
     ge::graphStatus ret2 = GenTilingKey(context, mmInfo, param);
@@ -282,7 +214,6 @@ ge::graphStatus MLATiling(gert::TilingContext *context)
     }
 
     context->SetBlockDim(blockDim);
-    // printf("launchBufferSize = %lu, block dim = %u\n", tilingSizeWithWorkSpace, blockDim);
     return ge::GRAPH_SUCCESS;
 }
 

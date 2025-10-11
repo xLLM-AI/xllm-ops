@@ -183,11 +183,23 @@ target_link_libraries(beam_search_test PRIVATE
   GTest::gtest_main
 )
 
+# Group MLA GTest version
+add_executable(multi_latent_attention_gtest
+  multi_latent_attention_test.cpp
+)
+target_link_libraries(multi_latent_attention_gtest PRIVATE 
+  aclnn_common
+  GTest::gtest 
+  GTest::gtest_main
+)
+
 # Add tests
 add_test(AllTestsInPPMatmul pp_matmul_test)
 add_test(AllTestsInGroupGemm group_gemm_gtest)
+add_test(AllTestsInMultiLatentAttention multi_latent_attention_gtest)
 
 # GoogleTest automatic discovery
 include(GoogleTest)
 gtest_discover_tests(pp_matmul_test)
 gtest_discover_tests(group_gemm_gtest)
+gtest_discover_tests(multi_latent_attention_gtest)

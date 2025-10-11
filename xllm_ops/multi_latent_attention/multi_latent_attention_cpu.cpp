@@ -213,7 +213,6 @@ namespace ops {
             this->Attr("kvHead").Int();
             this->Attr("maskType").Int();
 
-            // 为qSeqLen设置默认值为1个元素的集合，且元素值为-1，标志该集合无有效数据，因为ascendc要求可选参数必须由默认值
             std::vector<int64_t> defaultEmptyVector = {-1};
             this->Attr("qSeqLen").AttrType(OPTIONAL).ListInt(defaultEmptyVector);
             this->Attr("kvSeqLen").ListInt();

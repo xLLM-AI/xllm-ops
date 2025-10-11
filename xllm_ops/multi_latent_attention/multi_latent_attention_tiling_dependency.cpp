@@ -1,12 +1,3 @@
-/*
-* Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-* This file is a part of the CANN Open Software.
-* Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
-* Please refer to the License for details. You may not use this file except in compliance with the License.
-* THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-* INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-* See LICENSE in the root of the software repository for the full text of the License.
-*/
 #include <array>
 #include <chrono>
 #include <vector>
@@ -100,13 +91,6 @@ void GetAddrOffsetMLA(uint32_t *tilingParam, const AddrOffsets addrOffsets, cons
     // mask offset
     tilingParam[tilingOffset + NUM6] = GetHigh32Bit(addrOffsets.addrMaskOffset);
     tilingParam[tilingOffset + NUM7] = GetLoww32Bit(addrOffsets.addrMaskOffset);
-
-    // printf("tilingParam[%d] = %d\n", tilingOffset + NUM2, tilingParam[tilingOffset + NUM2]);
-    // printf("tilingParam[%d] = %d\n", tilingOffset + NUM3, tilingParam[tilingOffset + NUM3]);
-    // printf("tilingParam[%d] = %d\n", tilingOffset + NUM4, tilingParam[tilingOffset + NUM4]);
-    // printf("tilingParam[%d] = %d\n", tilingOffset + NUM5, tilingParam[tilingOffset + NUM5]);
-    // printf("tilingParam[%d] = %d\n", tilingOffset + NUM6, tilingParam[tilingOffset + NUM6]);
-    // printf("tilingParam[%d] = %d\n", tilingOffset + NUM7, tilingParam[tilingOffset + NUM7]);
 }
 
 int32_t GetQNBlockTile(const MLAInfo &mmInfo, int32_t qSeqLen)
@@ -123,12 +107,8 @@ int32_t GetQNBlockTile(const MLAInfo &mmInfo, int32_t qSeqLen)
 int32_t GetMaxQseqlen(const OpParam::MLA &param)
 {
     auto qSeqLen = param.qSeqLen;
-    // printf("qSeqLen.begin() = %d\n", qSeqLen.begin());
-    // printf("qSeqLen.end() = %d\n", qSeqLen.end());
     auto maxQSeqlenIter = std::max_element(qSeqLen.begin(), qSeqLen.end());
-    // printf("maxQSeqlenIter = %d\n", maxQSeqlenIter);
     auto maxQseqlen = maxQSeqlenIter != qSeqLen.end() ? *maxQSeqlenIter : 1;
-    // printf("maxQseqlen = %d\n", maxQseqlen);
     return maxQseqlen;
 }
 
@@ -137,7 +117,6 @@ int32_t GetMaxKVseqlen(const OpParam::MLA &param)
     auto kvSeqLen = param.kvSeqLen;
     auto maxKVSeqlenIter = std::max_element(kvSeqLen.begin(), kvSeqLen.end());
     auto maxKVseqlen = maxKVSeqlenIter != kvSeqLen.end() ? *maxKVSeqlenIter : 1;
-    // printf("maxKVseqlen = %d\n", maxKVseqlen);
     return maxKVseqlen;
 }
 
@@ -172,9 +151,6 @@ ge::graphStatus GetNdMLATiling(const MLAInfo &mmInfo, uint32_t &blockDim, uint32
         tilingParam[tilingOffset] = static_cast<uint32_t>(qSeqLen);
         tilingParam[tilingOffset + 1] = static_cast<uint32_t>(kvSeqlen);
 
-        // printf("tilingParam[%d] = %d\n", tilingOffset, tilingParam[tilingOffset]);
-        // printf("tilingParam[%d] = %d\n", tilingOffset + 1, tilingParam[tilingOffset + 1]);
-
         GetAddrOffsetMLA(tilingParam, addrOffsets, tilingOffset);
         uint64_t addressQffset = static_cast<uint64_t>(mmInfo.numHeads * qSeqLen);
         uint64_t addressOffset = static_cast<uint64_t>(mmInfo.numHeads * mmInfo.embeddingSize * qSeqLen);
@@ -186,8 +162,6 @@ ge::graphStatus GetNdMLATiling(const MLAInfo &mmInfo, uint32_t &blockDim, uint32
 
     tilingParam[TILING_MTP_HEAD_SPLIT_SIZE] = static_cast<uint32_t>(curQNBlockTile);
     tilingParam[TILING_MAX_KV_SEQ_LEN] = static_cast<uint32_t>(maxKVseqlen);
-    // printf("tilingParam[%d] = %d\n", TILING_MTP_HEAD_SPLIT_SIZE, tilingParam[TILING_MTP_HEAD_SPLIT_SIZE]);
-    // printf("tilingParam[%d] = %d\n", TILING_MAX_KV_SEQ_LEN, tilingParam[TILING_MAX_KV_SEQ_LEN]);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -204,9 +178,6 @@ void GetNdMLAMtpTilingTP1(const MLAInfo &mmInfo, uint32_t &blockDim, uint32_t *t
             tilingParam[tilingOffset + NUM1] = prevTaskNum;
             tilingParam[tilingOffset + NUM2] = kvSeqlen - qSeqLen + qSeq + 1;
             prevTaskNum++;
-            // printf("tilingParam[%d] = %d\n", tilingOffset, tilingParam[tilingOffset]);
-            // printf("tilingParam[%d] = %u\n", tilingOffset + NUM1, tilingParam[tilingOffset + NUM1]);
-            // printf("tilingParam[%d] = %u\n", tilingOffset + NUM2, tilingParam[tilingOffset + NUM2]);
         }
     }
 }
@@ -229,18 +200,6 @@ void GetTilingHead(const MLAInfo &mmInfo, const OpParam::MLA &param, uint32_t *t
     tilingParam[TILING_MASK_TYPE_ND] = static_cast<uint32_t>(mmInfo.maskType);
     tilingParam[TILING_TASK_NUM] = static_cast<uint32_t>(mmInfo.totalTaskNum);
 
-    // printf("tilingParam[%d] = %u\n", TILING_BATCH, tilingParam[TILING_BATCH]);
-    // printf("tilingParam[%d] = %u\n", TILING_HEADSIZE, tilingParam[TILING_HEADSIZE]);
-    // printf("tilingParam[%d] = %u\n", TILING_PARASIZE, tilingParam[TILING_PARASIZE]);
-    // printf("tilingParam[%d] = %u\n", TILING_NUMHEADS, tilingParam[TILING_NUMHEADS]);
-    // printf("tilingParam[%d] = %u\n", TILING_HEADDIM, tilingParam[TILING_HEADDIM]);
-    // printf("tilingParam[%d] = %u\n", TILING_NUMBLOKS, tilingParam[TILING_NUMBLOKS]);
-    // printf("tilingParam[%d] = %u\n", TILING_BLOCKSIZE, tilingParam[TILING_BLOCKSIZE]);
-    // printf("tilingParam[%d] = %u\n", TILING_MAXBLOCKS, tilingParam[TILING_MAXBLOCKS]);
-    // printf("tilingParam[%d] = %f\n", TILING_TOR, tilingParam[TILING_TOR]);
-    // printf("tilingParam[%d] = %u\n", TILING_KVHEADS, tilingParam[TILING_KVHEADS]);
-    // printf("tilingParam[%d] = %d\n", TILING_MASK_TYPE_ND, tilingParam[TILING_MASK_TYPE_ND]);
-    // printf("tilingParam[%d] = %u\n", TILING_TASK_NUM, tilingParam[TILING_TASK_NUM]);
 }
 
 ge::graphStatus GetMLATilingParam(OpParam::MLA param, const MLAInfo &mmInfo,
@@ -252,18 +211,7 @@ ge::graphStatus GetMLATilingParam(OpParam::MLA param, const MLAInfo &mmInfo,
     uint64_t curTilingParamSize = mmInfo.mtpTp1Flag ?
                                   (TILING_HEAD_SIZE + TILING_PARA_SIZE_TP1 * mmInfo.totalTaskNum) * sizeof(uint32_t) :
                                   (TILING_HEAD_SIZE + TILING_PARA_SIZE * mmInfo.batch) * sizeof(uint32_t);
-    // printf("--mmInfo.mtpTp1Flag=%s\n", mmInfo.mtpTp1Flag ? "true" : "false");
-    // printf("--mmInfo.batch=%d\n", mmInfo.batch);
-    // printf("--mmInfo.totalTaskNum=%d\n", mmInfo.totalTaskNum);
-    // std::cout << "----TestHala GetMLATilingParam tilingParamSize=" << tilingParamSize << ", curTilingParamSize="
-    //           << curTilingParamSize << std::endl;
-    /*auto ret = memset_s(tilingParam, tilingParamSize, 0, curTilingParamSize);
-    if (ret == EOK) {
-        std::cout << "init tiling failed:" << ret << std::endl;
-        return ge::GRAPH_FAILED;
-    }*/
 
-    // printf("--mmInfo.mtpTp1Flag=%s\n", mmInfo.mtpTp1Flag ? "true" : "false");
     if (mmInfo.mtpTp1Flag) {
         GetNdMLAMtpTilingTP1(mmInfo, blockDim, tilingParam, param);
     } else {
@@ -277,4 +225,4 @@ ge::graphStatus GetMLATilingParam(OpParam::MLA param, const MLAInfo &mmInfo,
     GetTilingHead(mmInfo, param, tilingParam, torPtr);
     return ge::GRAPH_SUCCESS;
 }
-} // end paged_attention namespace
+}

@@ -1,12 +1,3 @@
-/*
-* Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-* This file is a part of the CANN Open Software.
-* Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
-* Please refer to the License for details. You may not use this file except in compliance with the License.
-* THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-* INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-* See LICENSE in the root of the software repository for the full text of the License.
-*/
 #include "mixkernels/include/common.h"
 #include "mixkernels/include/common_func.h"
 #include "mixkernels/include/simd.h"
@@ -30,13 +21,8 @@ constexpr int32_t UPDATE_READY = 2;
 constexpr int32_t QK_READY_DECODER = 3;
 constexpr int32_t SOFTMAX_READY_DECODER = 4;
 constexpr int32_t UPDATE_READY_DECODER = 5;
-constexpr int32_t QK_READY_STAGE2 = 6;
-constexpr int32_t SOFTMAX_READY_STAGE2 = 7;
-constexpr int32_t UPDATE_READY_STAGE2 = 8;
-constexpr uint32_t VEC_DEQ_K0_READY = 9;
-constexpr uint32_t VEC_DEQ_K1_READY = 10;
-constexpr uint32_t VEC_DEQ_V0_READY = 11;
-constexpr uint32_t VEC_DEQ_V1_READY = 12;
+constexpr int32_t TAIL_OPTIMIZATION_SYNC = 6;
+constexpr int32_t TAIL_OPTIMIZATION_SYNC2 = 7;
 
 constexpr int32_t BLOCK_SIZE_32 = 32;
 constexpr int64_t TMP_SIZE = 65536;              // 256 * 256
@@ -167,9 +153,9 @@ constexpr uint32_t HALF_VECTOR_SIZE = 128;
 constexpr uint32_t UB_ALIGN_BYTE = 32;
 constexpr int64_t UB_UINT8_BLOCK_SIZE_MLA = 16384;      // 96 * 128 * 2B // prefill/decoder diff
 constexpr int64_t UB_UINT8_BLOCK_SIZE_NORM = 24576;
-constexpr int64_t UB_UINT8_LINE_SIZE = 512;         // 64 * 4B，申请两倍空间防踩踏。
+constexpr int64_t UB_UINT8_LINE_SIZE = 512;         // 64 * 4B，double buffer
 constexpr int64_t UB_HALF_LINE_SIZE = 256;          // UB_FLOAT_LINE_SIZE * 2
-constexpr int64_t UB_FLOAT_LINE_SIZE = 64;         // 64，申请两倍空间防踩踏。
+constexpr int64_t UB_FLOAT_LINE_SIZE = 64;         // 64，double buffer
 
 constexpr int64_t PRE_UB_UINT8_BLOCK_SIZE = 16384;  // 64 * 128 * 2B
 constexpr int32_t UB_HALF_BUF_SIZE = 8192;          // 64 * 128
@@ -267,7 +253,7 @@ struct UbufAlloc<BlockStack::FOUR_FLOW>
 #endif
 
 #ifdef __DAV_C220_CUBE__
-template <TilingKeyType tilingKeyType = TilingKeyType::TILING_HALF_DATA, typename IN_DTYPE = half, typename IN_ROPE_DTYPE = half,  typename OUT_DTYPE = half, typename IN_KVDTYPE = half, InputFormat KInputType = InputFormat::ND_FORMAT>
+template <TilingKeyType tilingKeyType = TilingKeyType::TILING_HALF_DATA, typename IN_DTYPE = half, typename IN_ROPE_DTYPE = half,  typename OUT_DTYPE = half, typename IN_KVDTYPE = half, InputFormat KInputType = InputFormat::ND_FORMAT, bool EnableOptimization = false>
 class MLAttentionDecoderAic {
     // define dtype
     using mm1OutputType = typename AttentionType<tilingKeyType>::mm1OutputType;
@@ -299,7 +285,6 @@ public:
         __gm__ uint8_t *__restrict__ o_temp_gm,
         __gm__ uint8_t *__restrict__ tiling_para_gm)
     {
-        AscendC::printf("-----TestHala entering MLAttentionDecoderAic SetArgs 1000----\n");
         SetPadding<uint64_t>(0);
         SetAtomicnone();
         SetNdpara(1, 0, 0);
@@ -338,31 +323,18 @@ public:
         }
 
         num_batches = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm));
-        AscendC::printf("-----TestHala tiling_para_gm[0]=num_batches=%u----\n", num_batches);
         q_heads = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_NUMHEADS));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=q_heads=%u----\n", TILING_NUMHEADS, q_heads);
         embedding_size = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_HEADDIM));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=embedding_size=%u----\n", TILING_HEADDIM, embedding_size);
         block_size = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_BLOCKSIZE));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=block_size=%u----\n", TILING_BLOCKSIZE, block_size);
         max_num_blocks_per_query = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_MAXBLOCKS));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=max_num_blocks_per_query=%u----\n",TILING_MAXBLOCKS, max_num_blocks_per_query);
         kv_heads = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_KVHEADS));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=kv_heads=%u----\n",TILING_KVHEADS, kv_heads);
         tiling_head_size = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_HEADSIZE));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=tiling_head_size=%u----\n",TILING_HEADSIZE, tiling_head_size);
         tiling_para_size = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_PARASIZE));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=tiling_para_size=%u----\n",TILING_PARASIZE, tiling_para_size);
         cur_qn_blk_size = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_MTP_HEAD_SPLIT_SIZE));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=cur_qn_blk_size=%u----\n",TILING_MTP_HEAD_SPLIT_SIZE, cur_qn_blk_size);
         block_size_calc = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_BLOCKSIZE_CALC));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=block_size_calc=%u----\n",TILING_BLOCKSIZE_CALC, block_size_calc);
         mask_type = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_MASK_TYPE_ND));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=mask_type=%u----\n",TILING_MASK_TYPE_ND, mask_type);
         totalTaskNum = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + 13));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=totalTaskNum=%u----\n",13, totalTaskNum);
         maxKVSeqLen = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_MAX_KV_SEQ_LEN));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=maxKVSeqLen=%u----\n",TILING_MAX_KV_SEQ_LEN, maxKVSeqLen);
 
         num_batches_pad = RoundUp<16>(num_batches);
 
@@ -492,8 +464,16 @@ public:
         SET_FLAG(FIX, MTE1, EVENT_ID5);
         SET_FLAG(MTE2, FIX, EVENT_ID0);
 
+        uint32_t tail = totalTaskNum % block_num;
+        if constexpr (EnableOptimization) {
 
-        for (uint32_t process = block_idx; process < totalTaskNum; process += (uint32_t)block_num) {  // for task
+        } else{
+            tail = 0; // control whether to run tail optimization
+        }
+        uint32_t totalTaskNumRound = totalTaskNum - tail;
+        
+        
+        for (uint32_t process = block_idx; process < totalTaskNumRound; process += (uint32_t)block_num) {  // for task
             uint32_t offset_tiling = tiling_head_size + tiling_para_size * process;
             uint32_t cur_batch = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
 
@@ -512,6 +492,160 @@ public:
 
             InnerRunCubeMLATP1(cur_batch, start_head, cur_head_num, start_kv, cur_q_seq_len, cur_kv_seqlen, offset_tiling);
         }
+
+        // suppose all seqs have same length
+        if (tail > 0){
+            uint32_t sample_kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + tiling_head_size + 2));
+            bool enableExtraOptimization = true;
+            if (block_num % 4 == 3) {
+                // cannot optimize this situation due to math problem
+                enableExtraOptimization = false;
+            }
+            if (sample_kv_seqlen <= 2048){
+                // Too Short to benefit from optimization
+                enableExtraOptimization = false;
+            }
+            if (!enableExtraOptimization || tail <= block_num / 2) {
+                // collect all metadata
+                uint32_t cores_per_seq = 1;
+                if (0 < tail && tail <= block_num / 4) {// 6 tasks left, each works with 4 cores
+                    cores_per_seq = 4;
+                    if (tail == 1){
+                        cores_per_seq = block_num;
+                    }
+                    else if (tail == 2){
+                        cores_per_seq = block_num / 2;
+                    }
+                    else if(tail == 3){
+                        cores_per_seq = block_num / 3;
+                    }
+                    else if(tail == 4){
+                        cores_per_seq = block_num / 4;
+                    }
+                }
+                else if(block_num / 4 < tail && tail <= block_num / 3) { // 8 tasks left, each works with 3 cores
+                    cores_per_seq = 3;
+    
+                }
+                else if(block_num / 3 < tail && tail <= block_num / 2) { // 12 tasks left, each works with 2 cores
+                    cores_per_seq = 2;
+                }
+                else {
+                    // no extra optimization for tail > 12
+                    cores_per_seq = 1;
+                }
+
+                if(!enableExtraOptimization){
+                    cores_per_seq = 1;
+                }
+    
+                uint32_t process = totalTaskNumRound + block_idx / cores_per_seq;
+                if (process < totalTaskNum) {
+                    uint32_t offset_tiling = tiling_head_size + tiling_para_size * process;
+                    uint32_t cur_batch = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
+        
+                    uint32_t q_seqlen = 1;
+                    uint32_t kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 2 + offset_tiling));
+                    uint32_t kv_seqlen_each = kv_seqlen / cores_per_seq;
+                    uint32_t kv_seqlen_align = (kv_seqlen_each + block_size - 1) / block_size * block_size;
+                    uint32_t actual_work_cores = kv_seqlen / kv_seqlen_align + (kv_seqlen % kv_seqlen_align != 0);
+                    // cores_per_seq = actual_work_cores;
+                    uint32_t kv_seqlen_process = 0;
+                    if (block_idx < block_idx / cores_per_seq * cores_per_seq + actual_work_cores){
+                        kv_seqlen_process = (block_idx % cores_per_seq == actual_work_cores - 1) ? 
+                            (kv_seqlen - kv_seqlen_align * (actual_work_cores - 1)) : kv_seqlen_align;
+                    }
+                        
+                    if (kv_seqlen > 0 && kv_seqlen_process > 0) {
+                        uint32_t start_head = 0;
+                        uint32_t start_kv = (block_idx % cores_per_seq) * kv_seqlen_align;
+                        uint32_t cur_q_seq_len = q_seqlen;
+                        uint32_t cur_kv_seqlen = kv_seqlen_process;
+                        uint32_t cur_head_num = q_heads;
+            
+                        // no need to modify anything in cube kernel, just call the same kernel
+                        InnerRunCubeMLATP1(cur_batch, start_head, cur_head_num, start_kv, cur_q_seq_len, cur_kv_seqlen, offset_tiling);
+                    }
+                }
+            }
+            else if (tail > 3 * block_num / 4){
+                // no benefit for optimizing this situation
+                uint32_t process = totalTaskNumRound + block_idx;
+                if (process < totalTaskNum) {
+                    uint32_t offset_tiling = tiling_head_size + tiling_para_size * process;
+                    uint32_t cur_batch = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
+
+                    uint32_t q_seqlen = 1;
+                    uint32_t kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 2 + offset_tiling));
+                    if (kv_seqlen > 0) {
+                        uint32_t kv_seqlen_align = (kv_seqlen + block_size - 1) / block_size * block_size;
+    
+                        uint32_t start_head = 0;
+                        uint32_t start_kv = 0;
+                        uint32_t cur_q_seq_len = q_seqlen;
+                        uint32_t cur_kv_seqlen = kv_seqlen;
+                        uint32_t cur_head_num = q_heads;
+    
+                        InnerRunCubeMLATP1(cur_batch, start_head, cur_head_num, start_kv, cur_q_seq_len, cur_kv_seqlen, offset_tiling);
+                    }
+                }
+            }
+            else {
+                // 18 >= tail >= 12 
+                // first 12 tasks, two cores per task
+                {
+                    uint32_t cores_per_seq = 2;
+                    uint32_t process = totalTaskNumRound + block_idx / cores_per_seq;
+                    uint32_t offset_tiling = tiling_head_size + tiling_para_size * process;
+                    uint32_t cur_batch = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
+        
+                    uint32_t q_seqlen = 1;
+                    uint32_t kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 2 + offset_tiling));
+                    uint32_t kv_seqlen_each = kv_seqlen / cores_per_seq;
+                    uint32_t kv_seqlen_align = (kv_seqlen_each + block_size - 1) / block_size * block_size;
+                    uint32_t kv_seqlen_process = (block_idx % cores_per_seq == cores_per_seq - 1) ? 
+                    (kv_seqlen - kv_seqlen_align * (cores_per_seq - 1)) : kv_seqlen_align;
+                    
+                    if (kv_seqlen > 0 && kv_seqlen_process > 0) {
+                        uint32_t start_head = 0;
+                        uint32_t start_kv = (block_idx % cores_per_seq) * kv_seqlen_align;
+                        uint32_t cur_q_seq_len = q_seqlen;
+                        uint32_t cur_kv_seqlen = kv_seqlen_process;
+                        uint32_t cur_head_num = q_heads;
+            
+                        // no need to modify anything in cube kernel, just call the same kernel
+                        InnerRunCubeMLATP1(cur_batch, start_head, cur_head_num, start_kv, cur_q_seq_len, cur_kv_seqlen, offset_tiling);
+                    }
+                }
+                {
+                    uint32_t cores_per_seq = 4;
+                    uint32_t process = totalTaskNumRound + block_num / 2 + block_idx / cores_per_seq;
+                    if (process < totalTaskNum) {
+                        uint32_t offset_tiling = tiling_head_size + tiling_para_size * process;
+                        uint32_t cur_batch = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
+            
+                        uint32_t q_seqlen = 1;
+                        uint32_t kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 2 + offset_tiling));
+                        uint32_t kv_seqlen_each = kv_seqlen / cores_per_seq;
+                        uint32_t kv_seqlen_align = (kv_seqlen_each + block_size - 1) / block_size * block_size;
+                        uint32_t kv_seqlen_process = (block_idx % cores_per_seq == cores_per_seq - 1) ? 
+                        (kv_seqlen - kv_seqlen_align * (cores_per_seq - 1)) : kv_seqlen_align;
+                        
+                        if (kv_seqlen > 0 && kv_seqlen_process > 0) {
+                            uint32_t start_head = 0;
+                            uint32_t start_kv = (block_idx % cores_per_seq) * kv_seqlen_align;
+                            uint32_t cur_q_seq_len = q_seqlen;
+                            uint32_t cur_kv_seqlen = kv_seqlen_process;
+                            uint32_t cur_head_num = q_heads;
+                
+                            // no need to modify anything in cube kernel, just call the same kernel
+                            InnerRunCubeMLATP1(cur_batch, start_head, cur_head_num, start_kv, cur_q_seq_len, cur_kv_seqlen, offset_tiling);
+                        }
+                    }
+                }
+            }
+        }
+
         WAIT_FLAG(M, MTE1, EVENT_ID0);
         WAIT_FLAG(M, MTE1, EVENT_ID1);
         WAIT_FLAG(M, MTE1, EVENT_ID2);
@@ -671,7 +805,7 @@ private:
                 int64_t kv_offset_rope = (int64_t)block_table_id * block_size * stride_kv_rope;
                 uint32_t q_load_coeff = 1;
                 q_load_coeff = m;
-                WAIT_FLAG(MTE1, MTE2, l1_kv_pingpong_flag);  // 等待V全部搬入L0B
+                WAIT_FLAG(MTE1, MTE2, l1_kv_pingpong_flag);  // wait for v -> L0B
                 if constexpr(KInputType == InputFormat::ND_FORMAT) {
                     gm_to_l1<ArchType::ASCEND_V220, IN_KVDTYPE, DataFormat::ND, DataFormat::NZ>(
                         l1kv_buf_addr_tensor[l1_kv_pingpong_flag * 128 * 576],
@@ -684,7 +818,7 @@ private:
                         stride_kv            // srcDValue
                     );
                     SET_FLAG(MTE2, MTE1, l1_kv_pingpong_flag);
-                    WAIT_FLAG(MTE1, MTE2, l1_kv_pingpong_flag + 2);  // 等待V全部搬入L0B
+                    WAIT_FLAG(MTE1, MTE2, l1_kv_pingpong_flag + 2);  // wait for v -> L0B
                     gm_to_l1<ArchType::ASCEND_V220, IN_KVDTYPE, DataFormat::ND, DataFormat::NZ>(
                         l1kv_buf_addr_tensor[l1_kv_pingpong_flag * 128 * 576 + 512 * qk_round_n],
                         k_rope_gm_tensor[kv_offset_rope],
@@ -707,7 +841,7 @@ private:
                         0            // srcDValue
                     );
                     SET_FLAG(MTE2, MTE1, l1_kv_pingpong_flag);
-                    WAIT_FLAG(MTE1, MTE2, l1_kv_pingpong_flag + 2);  // 等待V全部搬入L0B
+                    WAIT_FLAG(MTE1, MTE2, l1_kv_pingpong_flag + 2);  // wait for v -> L0B
                     gm_to_l1<ArchType::ASCEND_V220, IN_ROPE_DTYPE, DataFormat::NZ, DataFormat::NZ>(
                         l1kv_rope_buf_addr_tensor[l1_kv_pingpong_flag * 128 * 64],
                         k_rope_gm_tensor[kv_offset_rope],
@@ -731,7 +865,7 @@ private:
                     );
 
                     SET_FLAG(MTE2, MTE1, l1_kv_pingpong_flag);
-                    WAIT_FLAG(MTE1, MTE2, l1_kv_pingpong_flag + 2);  // 等待V全部搬入L0B
+                    WAIT_FLAG(MTE1, MTE2, l1_kv_pingpong_flag + 2);  // wait for v -> L0B
                     gm_to_l1<ArchType::ASCEND_V220, IN_KVDTYPE, DataFormat::NZ, DataFormat::NZ>(
                         l1kv_buf_addr_tensor[l1_kv_pingpong_flag * 128 * 576 + 512 * qk_round_n],
                         k_rope_gm_tensor[kv_offset_rope],
@@ -960,7 +1094,7 @@ private:
                         uint16_t dstGap = sizeof(IN_DTYPE) == 1 ? 1 : 0;
                         loadDataParams.dstGap = dstGap;
                         for (uint32_t l0b_load_idx = 0; l0b_load_idx < k_round_n / T_BLOCK_SIZE; ++l0b_load_idx) {
-                            // 沿 embd 方向搬
+                            // along embd dim
                             AscendC::LoadDataWithTranspose(
                                     l0b_buf_tensor[l0b_pingpong_flag * 16384 + l0b_load_idx * RoundUp<16>(embed_split_size) * T_BLOCK_SIZE],
                                     l1kv_buf_addr_tensor[l1_kv_pingpong_flag * 128 * hidden_size + l1kv_offset + l0b_load_idx * T_BLOCK_SIZE * T_BLOCK_SIZE],
@@ -968,7 +1102,7 @@ private:
                         }
                     } else {
                         for (uint32_t l0b_load_idx = 0; l0b_load_idx < round_embed_split_size / T_BLOCK_SIZE; ++l0b_load_idx) {
-                            // 沿 kv_len_blk方向搬
+                            // along kv_len_blk dim
                             loadDataParams.repeatTimes = qk_round_n_2 / T_BLOCK_SIZE;
                             loadDataParams.srcStride = 1;
                             loadDataParams.dstGap = round_embed_split_size / BLOCK_SIZE - 1;
@@ -1051,7 +1185,7 @@ private:
                         o_tmp_gm_tensor[(uint64_t)block_idx * TMP_SIZE * 2 + embed_split_idx * round_embed_split_size + ((n_idx - 1) % 2) * TMP_SIZE],
                         mm2_l0c_buf_tensor[l0c_pingpong_flag * 16384],
                         m,        // MSize
-                        RoundUp<16>(embed_split_size),  // NSize 32B对齐，防止workspace补齐的位置中有脏数据
+                        RoundUp<16>(embed_split_size),  // NSize 32B align
                         RoundUp<16>(m),       // srcStride
                         round_v  // dstStride_dst_D
                     );
@@ -1378,7 +1512,7 @@ private:
                         uint16_t dstGap = sizeof(IN_DTYPE) == 1 ? 1 : 0;
                         loadDataParams.dstGap = dstGap;
                         for (uint32_t l0b_load_idx = 0; l0b_load_idx < qk_round_n_2 / T_BLOCK_SIZE; ++l0b_load_idx) {
-                            // 沿 embd 方向搬
+                            // along embd dim
                             AscendC::LoadDataWithTranspose(
                                     l0b_buf_tensor[l0b_pingpong_flag * 16384 + l0b_load_idx * RoundUp<16>(embed_split_size) * T_BLOCK_SIZE],
                                     l1kv_buf_addr_tensor[128 * 576 + 128 * 64 + l1_kv_pingpong_flag * 128 * 128 + l0b_load_idx * T_BLOCK_SIZE * T_BLOCK_SIZE],
@@ -1448,7 +1582,7 @@ private:
                         o_tmp_gm_tensor[(uint64_t)block_idx * TMP_SIZE * 2 + embed_split_idx * round_embed_split_size + ((n_idx / s_block_stack - 1) % 2) * TMP_SIZE],
                         mm2_l0c_buf_tensor[l0c_pingpong_flag * 16384],
                         m,        // MSize
-                        RoundUp<16>(embed_split_size),  // NSize 32B对齐，防止workspace补齐的位置中有脏数据
+                        RoundUp<16>(embed_split_size),  // NSize 32B align
                         RoundUp<16>(m),       // srcStride
                         round_v  // dstStride_dst_D
                     );
@@ -1557,7 +1691,7 @@ private:
 
 #endif
 #ifdef __DAV_C220_VEC__
-template <TilingKeyType tilingKeyType = TilingKeyType::TILING_HALF_DATA, typename IN_DTYPE = half, typename OUT_DTYPE = half, bool IS_RING = false, BlockStack blockStack = BlockStack::ONE_FLOW>
+template <TilingKeyType tilingKeyType = TilingKeyType::TILING_HALF_DATA, typename IN_DTYPE = half, typename OUT_DTYPE = half, bool IS_RING = false, BlockStack blockStack = BlockStack::ONE_FLOW, bool EnableOptimization = false>
 class MLADecoderAiv{
 public:
     using mm1OutputType = typename AttentionType<tilingKeyType>::mm1OutputType;
@@ -1580,10 +1714,10 @@ public:
         __gm__ uint8_t *__restrict__ p_out_gm,
         __gm__ uint8_t *__restrict__ o_temp_gm,
         __gm__ uint8_t *__restrict__ globalo_gm,
+        __gm__ uint8_t *__restrict__ tmp_gm,
         __gm__ uint8_t *__restrict__ tiling_para_gm,
         __gm__ uint8_t *__restrict__ mask_input_gm)
     {
-        AscendC::printf("-----TestHala entering MLADecoderAiv SetArgs 2000----\n");
         sub_block_idx = static_cast<uint64_t>(GetSubBlockidx());
         SetAtomicnone();
         SetMasknorm();
@@ -1602,6 +1736,7 @@ public:
         p_gm_tensor.SetGlobalBuffer(reinterpret_cast<__gm__ IN_DTYPE *>(p_gm));
         o_tmp_gm_tensor.SetGlobalBuffer(reinterpret_cast<__gm__ mm2CopyType *>(o_tmp_gm));
         go_gm_tensor.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(go_gm));
+        tmp_gm_tensor.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(tmp_gm));
         if constexpr (tilingKeyType == TilingKeyType::TILING_INT8_DATA) {
             deq_scale_gm_tensor_q1.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(deq_qk_in_gm));
             deq_scale_gm_tensor_k1.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(deq_pv_in_gm));
@@ -1614,19 +1749,15 @@ public:
         block_size = (int32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_BLOCKSIZE));
         max_num_blocks_per_query = (uint32_t)(*((__gm__ uint32_t*)tiling_para_gm + TILING_MAXBLOCKS));
         tor = (float)(*((__gm__ float *)tiling_para_gm + TILING_TOR));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=tor=%f----\n",TILING_TOR, tor);
         num_kv_heads = (uint32_t)(*((__gm__ uint32_t*)tiling_para_gm + TILING_KVHEADS));
         tiling_head_size = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_HEADSIZE));
         tiling_para_size = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_PARASIZE));
         totalTaskNum = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + 13));
         maxKVSeqLen = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_MAX_KV_SEQ_LEN));
 
-        cur_qn_blk_size = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_MTP_HEAD_SPLIT_SIZE)); // 32
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=cur_qn_blk_size=%d----\n",TILING_MTP_HEAD_SPLIT_SIZE, cur_qn_blk_size);
+        cur_qn_blk_size = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_MTP_HEAD_SPLIT_SIZE));
         block_size_calc = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_BLOCKSIZE_CALC));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=block_size_calc=%d----\n",TILING_BLOCKSIZE_CALC, block_size_calc);
         mask_type = (uint32_t)(*((__gm__ uint32_t *)tiling_para_gm + TILING_MASK_TYPE_ND));
-        AscendC::printf("-----TestHala tiling_para_gm[%d]=mask_type=%d----\n",TILING_MASK_TYPE_ND, mask_type);
 
         go_flag_scalar = 1;
         gl_flag_scalar = 1;
@@ -1710,7 +1841,15 @@ public:
         SET_FLAG(MTE3, V, EVENT_ID2);
         SET_FLAG(V, MTE2, EVENT_ID2);
 
-        for (uint32_t process = block_idx; process < totalTaskNum; process += (uint32_t)block_num) {  // for task
+        uint32_t tail = totalTaskNum % block_num;
+        if constexpr (EnableOptimization) {
+
+        } else{
+            tail = 0; // control whether to run tail optimization
+        }
+        uint32_t totalTaskNumRound = totalTaskNum - tail;
+        
+        for (uint32_t process = block_idx; process < totalTaskNumRound; process += (uint32_t)block_num) {  // for task
             uint32_t offset_tiling = tiling_head_size + tiling_para_size * process;
             uint32_t cur_batch = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
 
@@ -1729,6 +1868,223 @@ public:
             uint32_t cur_nIndx = 0;
 
             InnerRunVectorChangeTP1(cur_batch, start_head, cur_nIndx, cur_q_seq_len, cur_kv_seqlen, cur_head_num, offset_tiling, 512, embed_split_loop_v_former);
+        }
+        
+        // suppose all seqs have same length
+        if (tail > 0){
+            uint32_t sample_kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + tiling_head_size + 2));
+            bool enableExtraOptimization = true;
+            if (block_num % 4 == 3) {
+                // cannot optimize this situation due to math problem
+                enableExtraOptimization = false;
+            }
+            if (sample_kv_seqlen <= 2048){
+                // Too Short to benefit from optimization
+                enableExtraOptimization = false;
+            }
+            if (!enableExtraOptimization || tail <= block_num / 2) {
+                // collect all metadata 
+                uint32_t cores_per_seq = 1;
+                // potential optimization space which not in the following branches, e.g. 1 seq with 24 cores, 2 seq with 12 cores, 3 seq with 8 cores
+                if (0 < tail && tail <= block_num / 4) {// 6 tasks left, each works with 4 cores
+                    cores_per_seq = 4;
+                    if (tail == 1){
+                        cores_per_seq = block_num;
+                    }
+                    else if (tail == 2){
+                        cores_per_seq = block_num / 2;
+                    }
+                    else if(tail == 3){
+                        cores_per_seq = block_num / 3;
+                    }
+                    else if(tail == 4){
+                        cores_per_seq = block_num / 4;
+                    }
+                }
+                else if(block_num / 4 < tail && tail <= block_num / 3) { // 8 tasks left, each works with 3 cores
+                    cores_per_seq = 3;
+                }
+                else if(block_num / 3 < tail && tail <= block_num / 2) { // 12 tasks left, each works with 2 cores
+                    cores_per_seq = 2;
+                }
+                else {
+                    // no extra optimization for tail > 12
+                    cores_per_seq = 1;
+                }
+                if (!enableExtraOptimization) {
+                    cores_per_seq = 1;
+                }
+                uint32_t process = totalTaskNumRound + block_idx / cores_per_seq;
+                if (process < totalTaskNum) {
+                    uint32_t offset_tiling = tiling_head_size + tiling_para_size * process;
+                    uint32_t cur_batch = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
+                    
+                    uint32_t q_seqlen = 1;
+                    uint32_t kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 2 + offset_tiling));
+                    uint32_t kv_seqlen_each = kv_seqlen / cores_per_seq;
+                    uint32_t kv_seqlen_align = (kv_seqlen_each + block_size - 1) / block_size * block_size;
+                    uint32_t actual_work_cores = kv_seqlen / kv_seqlen_align + (kv_seqlen % kv_seqlen_align != 0);
+                   
+                    // cores_per_seq = actual_work_cores;
+                    uint32_t kv_seqlen_process = 0;
+                    if (block_idx < block_idx / cores_per_seq * cores_per_seq + actual_work_cores){
+                        kv_seqlen_process = (block_idx % cores_per_seq == actual_work_cores - 1) ? 
+                            (kv_seqlen - kv_seqlen_align * (actual_work_cores - 1)) : kv_seqlen_align;
+                    }
+                    uint32_t start_head = 0;
+                    uint32_t start_kv = (block_idx % cores_per_seq) * kv_seqlen_align;
+                    uint32_t cur_q_seq_len = q_seqlen;
+                    uint32_t cur_kv_seqlen = kv_seqlen_process;
+                    uint32_t cur_head_num = q_heads;
+                    uint32_t cur_nIndx = 0; // no use, follow the previous code
+        
+                    if (cores_per_seq == 1 || actual_work_cores == 1){ // no optimization for tail
+                        if (kv_seqlen > 0 && kv_seqlen_process > 0) {
+                            InnerRunVectorChangeTP1(cur_batch, start_head, cur_nIndx, cur_q_seq_len, cur_kv_seqlen, cur_head_num, offset_tiling, 512, embed_split_loop_v_former);
+                        }
+                    }
+                    else {
+                        // customized InnerRunVectorChange for tail processing
+                        if (kv_seqlen > 0 && kv_seqlen_process > 0) {
+                            TailInnerRunVectorChangeTP1(start_head, cur_q_seq_len, cur_kv_seqlen, cur_head_num, offset_tiling, 512, embed_split_loop_v_former);
+                        }
+                        // Sync all vector cores 
+                        AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                        AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                        
+                        // cores_per_seq >= 2
+                        if (cores_per_seq >= 4){
+                            // 8 vector cores
+                            if (block_idx % cores_per_seq < 4) {
+                                TailInnerGatherVectorTP1(start_head + cur_head_num / 4 * (block_idx % cores_per_seq), cur_q_seq_len, cur_head_num / 4, block_idx - (block_idx % cores_per_seq), actual_work_cores, offset_tiling);
+                            }
+                        }
+                        else{
+                            // 4 vector cores
+                            if (block_idx % cores_per_seq < 2) {
+                                TailInnerGatherVectorTP1(start_head + cur_head_num / 2 * (block_idx % cores_per_seq), cur_q_seq_len, cur_head_num / 2, block_idx - (block_idx % cores_per_seq), actual_work_cores, offset_tiling);
+                            }
+                        }
+                    }
+
+                }
+                else{
+                    if (cores_per_seq != 1){
+                        AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                        AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                    }
+                }
+
+            }
+            else if (tail > 3 * block_num / 4){
+                // no benefit for optimizing this situation
+                uint32_t process = totalTaskNumRound + block_idx;
+                if (process < totalTaskNum) {
+                    uint32_t offset_tiling = tiling_head_size + tiling_para_size * process;
+                    uint32_t cur_batch = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
+                    
+                    uint32_t q_seqlen = 1;
+                    uint32_t kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 2 + offset_tiling));
+                    if (kv_seqlen > 0) {
+                        uint32_t kv_seqlen_align = (kv_seqlen + block_size - 1) / block_size * block_size;
+    
+                        uint32_t start_head = 0;
+                        uint32_t start_kv = 0;
+                        uint32_t cur_q_seq_len = q_seqlen;
+                        uint32_t cur_kv_seqlen = kv_seqlen;
+                        uint32_t cur_head_num = q_heads;
+                        uint32_t cur_nIndx = 0;
+    
+                        InnerRunVectorChangeTP1(cur_batch, start_head, cur_nIndx, cur_q_seq_len, cur_kv_seqlen, cur_head_num, offset_tiling, 512, embed_split_loop_v_former);
+                    }
+                }
+            }
+            else {
+                // 18 >= tail >= 12 
+                // first 12 tasks, two cores per task
+                {
+                    uint32_t cores_per_seq = 2;
+                    uint32_t process = totalTaskNumRound + block_idx / cores_per_seq;
+                    uint32_t offset_tiling = tiling_head_size + tiling_para_size * process;
+                    uint32_t cur_batch = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
+                    
+                    uint32_t q_seqlen = 1;
+                    uint32_t kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 2 + offset_tiling));
+                    uint32_t kv_seqlen_each = kv_seqlen / cores_per_seq;
+                    uint32_t kv_seqlen_align = (kv_seqlen_each + block_size - 1) / block_size * block_size;
+                    uint32_t kv_seqlen_process = (block_idx % cores_per_seq == cores_per_seq - 1) ? 
+                    (kv_seqlen - kv_seqlen_align * (cores_per_seq - 1)) : kv_seqlen_align;
+                    
+                    if (kv_seqlen > 0 && kv_seqlen_process > 0) {
+                        uint32_t start_head = 0;
+                        uint32_t start_kv = (block_idx % cores_per_seq) * kv_seqlen_align;
+                        uint32_t cur_q_seq_len = q_seqlen;
+                        uint32_t cur_kv_seqlen = kv_seqlen_process;
+                        uint32_t cur_head_num = q_heads;
+                        uint32_t cur_nIndx = 0; // no use, follow the previous code
+            
+                        // customized InnerRunVectorChange for tail processing
+                        TailInnerRunVectorChangeTP1(start_head, cur_q_seq_len, cur_kv_seqlen, cur_head_num, offset_tiling, 512, embed_split_loop_v_former);
+                        // Sync all vector cores 
+                        AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                        AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                        // 4 vector cores
+                        if (block_idx % cores_per_seq < 2) {
+                            TailInnerGatherVectorTP1(start_head + cur_head_num / 2 * (block_idx % cores_per_seq), cur_q_seq_len, cur_head_num / 2, block_idx - (block_idx % cores_per_seq), cores_per_seq, offset_tiling);
+                        }
+                    }
+                    else{
+                        AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                        AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                    }
+                }
+
+                // other tasks
+                {
+                    uint32_t cores_per_seq = 4;
+                    // TODO: check whether need extra sync between aic and aiv for used s_gm
+                    uint32_t process = totalTaskNumRound + block_num / 2 + block_idx / cores_per_seq;
+                    if (process < totalTaskNum) {
+                        uint32_t offset_tiling = tiling_head_size + tiling_para_size * process;
+                        uint32_t cur_batch = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
+                        
+                        uint32_t q_seqlen = 1;
+                        uint32_t kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 2 + offset_tiling));
+                        uint32_t kv_seqlen_each = kv_seqlen / cores_per_seq;
+                        uint32_t kv_seqlen_align = (kv_seqlen_each + block_size - 1) / block_size * block_size;
+                        uint32_t kv_seqlen_process = (block_idx % cores_per_seq == cores_per_seq - 1) ? 
+                        (kv_seqlen - kv_seqlen_align * (cores_per_seq - 1)) : kv_seqlen_align;
+                        
+                        if (kv_seqlen > 0 && kv_seqlen_process > 0) {
+                            uint32_t start_head = 0;
+                            uint32_t start_kv = (block_idx % cores_per_seq) * kv_seqlen_align;
+                            uint32_t cur_q_seq_len = q_seqlen;
+                            uint32_t cur_kv_seqlen = kv_seqlen_process;
+                            uint32_t cur_head_num = q_heads;
+                            uint32_t cur_nIndx = 0; // no use, follow the previous code
+                            // customized InnerRunVectorChange for tail processing
+                            TailInnerRunVectorChangeTP1(start_head, cur_q_seq_len, cur_kv_seqlen, cur_head_num, offset_tiling, 512, embed_split_loop_v_former);
+                            // Sync all vector cores 
+                            AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                            AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                            
+                            // 8 vector cores
+                            if (block_idx % cores_per_seq < 4) {
+                                TailInnerGatherVectorTP1(start_head + cur_head_num / 4 * (block_idx % cores_per_seq), cur_q_seq_len, cur_head_num / 4, block_idx - (block_idx % cores_per_seq), cores_per_seq, offset_tiling);
+                            }
+                            
+                        }
+                        else{
+                            AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                            AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                        }
+                    }
+                    else{
+                        AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                        AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE3>(TAIL_OPTIMIZATION_SYNC);
+                    }
+                }
+            }
         }
 
         WAIT_FLAG(MTE3, V, EVENT_ID0);
@@ -2072,7 +2428,7 @@ private:
                 8                             // srcRepeatStride
             );
         } else {
-            for (uint64_t vconv_idx = 0; vconv_idx < 2; ++vconv_idx) {   // 一次迭代做一半，循环防止超出 repeat 范围（<=255)
+            for (uint64_t vconv_idx = 0; vconv_idx < 2; ++vconv_idx) {
                 conv_v<ArchType::ASCEND_V220, int32_t, float>(
                     dst[vconv_idx * count / 2], // dst
                     temp[vconv_idx * count / 2], // src
@@ -2095,7 +2451,7 @@ private:
         uint32_t sub_m, uint32_t qk_n, uint32_t qk_round_n, uint32_t pQuantOnline)
     {
         if (pQuantOnline) {
-            // scr / scale 提函数
+            // scr / scale 
             TensorDivRepeatM(dst.template ReinterpretCast<float>(), src, scale, sub_m, qk_n, qk_round_n);
         } else {
             // scr * scale
@@ -2115,7 +2471,7 @@ private:
                 8                             // srcRepeatStride
             );
         } else {
-            for (uint64_t vconv_idx = 0; vconv_idx < 2; ++vconv_idx) {   // 一次迭代做一半，循环防止超出 repeat 范围（<=255)
+            for (uint64_t vconv_idx = 0; vconv_idx < 2; ++vconv_idx) {
                 conv_v<ArchType::ASCEND_V220, float, half>(
                     dst.template ReinterpretCast<half>()[vconv_idx * count / 2], // dst
                     dst.template ReinterpretCast<float>()[vconv_idx * count / 2], // src
@@ -2174,7 +2530,7 @@ private:
         WAIT_FLAG(V, MTE2, EVENT_ID2);
         if constexpr (tilingKeyType == TilingKeyType::TILING_INT8_DATA) {
             DeQuantPerHeadImpl(
-                deq_scale_gm_tensor_q1[head_idx], //这里待修改
+                deq_scale_gm_tensor_q1[head_idx],
                 s_gm_tensor,
                 ls32_quant_ubuf_tensor, ls32_quant_ubuf_tensor.template ReinterpretCast<mm2CopyType>(),
                 descale_q1_ubuf_tensor, tv32_ubuf_tensor, pm32_ubuf_tensor, sub_m, qk_n, qk_round_n, 0, 1);
@@ -2338,7 +2694,7 @@ private:
             0                          // dstGap
         );
         PIPE_BARRIER(V);
-        // *** hm_block = expand_to_block(hm), 存放于 tv
+        // *** hm_block = expand_to_block(hm)
 
         // *** ls = ls - hm_block
         TensorSubValueRepeatM(ls32_ubuf_tensor, ls32_ubuf_tensor,
@@ -2450,7 +2806,6 @@ private:
         uint32_t tail_res_row_num
         )
     {
-        AscendC::printf("-----TestHala entering SoftmaxStage2MLAHeadLoop-----\n");
         uint32_t sub_m_d64 = (sub_m + 63) / 64;     // up aligned to 64
         uint32_t round_sub_m = (sub_m + 15) / 16 * 16;
         WAIT_FLAG(V, MTE2, EVENT_ID0);
@@ -2620,7 +2975,7 @@ private:
         SET_FLAG(V, MTE2, EVENT_ID0);
 
         if (n_idx == n_loop - 1) {
-            // *** gl_block = expand_to_block(gl), 存放于 tv
+            // *** gl_block = expand_to_block(gl)
             brcb_v<ArchType::ASCEND_V220, uint32_t>(tv32_ubuf_tensor.ReinterpretCast<uint32_t>(),
                 gl32_ubuf_tensor.ReinterpretCast<uint32_t>()[head_loop_idx * 16],
                 1,               // dstBlockStride
@@ -2675,7 +3030,6 @@ private:
             uint32_t inner_o_gm_offset = 0;
             uint32_t inner_go_ubuf_offset = 0;
 
-            AscendC::printf("---TestHala copying to out 1----\n");
             if (head_res_row_num != 0) {
                 AscendC::DataCopyPad(
                     o_gm_tensor[inner_o_gm_offset + q_heads * __v * head_start_sblock_idx],
@@ -2692,7 +3046,6 @@ private:
                 inner_go_ubuf_offset += head_res_row_num * __v;
             }
 
-            AscendC::printf("---TestHala copying to out 2----\n");
             for (uint32_t i = 0; i < numhead_per_process; i++) {
                 AscendC::DataCopyPad(
                     o_gm_tensor[inner_o_gm_offset],
@@ -2709,7 +3062,6 @@ private:
                 inner_go_ubuf_offset += q_seq_len * __v;
             }
 
-            AscendC::printf("---TestHala copying to out 3----\n");
             if (tail_res_row_num != 0) {
                 AscendC::DataCopyPad(
                     o_gm_tensor[inner_o_gm_offset],
@@ -2757,7 +3109,7 @@ private:
                 );
                 SET_FLAG(V, MTE3, EVENT_ID1);
                 WAIT_FLAG(V, MTE3, EVENT_ID1);
-                // 搬出lse
+                // copyout lse
                 ub_to_gm_align<ArchType::ASCEND_V220, OUT_DTYPE>(
                     lse_gm_tensor[(int64_t)(o_offset / __k)],
                     lse_conv_ubuf_tensor,
@@ -2815,7 +3167,6 @@ private:
         uint32_t tail_res_row_num
         )
     {
-        AscendC::printf("-----TestHala entering SoftmaxStage2MLAHeadLoopTP1-----\n");
         uint32_t sub_m_d64 = (sub_m + 63) / 64;     // up aligned to 64
         uint32_t round_sub_m = (sub_m + 15) / 16 * 16;
         WAIT_FLAG(V, MTE2, EVENT_ID0);
@@ -2835,7 +3186,7 @@ private:
         SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
         WAIT_FLAG(MTE3, MTE2, EVENT_ID4);
         if (n_idx != 4) {
-            // *** dm = exp(dm)
+            // expand_to_block
             SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
             brcb_v<ArchType::ASCEND_V220, uint32_t>(tv32_ubuf_tensor.ReinterpretCast<uint32_t>(),
                 dm32_ubuf_tensor.ReinterpretCast<uint32_t>(),
@@ -2903,7 +3254,7 @@ private:
             );
             PIPE_BARRIER(V);
         } else {
-            // *** gl = ll
+            // *** go = lo
 
             gm_to_ub<ArchType::ASCEND_V220, mm2CopyType>(
                 go32_ubuf_tensor.template ReinterpretCast<mm2CopyType>(),
@@ -2975,7 +3326,6 @@ private:
             uint32_t inner_o_gm_offset = 0;
             uint32_t inner_go_ubuf_offset = 0;
 
-            AscendC::printf("---TestHala copying to out 4----\n");
             if (head_res_row_num != 0) {
                 AscendC::DataCopyPad(
                     o_gm_tensor[inner_o_gm_offset + q_heads * __v * head_start_sblock_idx],
@@ -2992,7 +3342,6 @@ private:
                 inner_go_ubuf_offset += head_res_row_num * __v;
             }
 
-            AscendC::printf("---TestHala copying to out 5----\n");
             for (uint32_t i = 0; i < numhead_per_process; i++) {
                 AscendC::DataCopyPad(
                     o_gm_tensor[inner_o_gm_offset],
@@ -3009,7 +3358,6 @@ private:
                 inner_go_ubuf_offset += q_seq_len * __v;
             }
 
-            AscendC::printf("---TestHala copying to out 6----\n");
             if (tail_res_row_num != 0) {
                 AscendC::DataCopyPad(
                     o_gm_tensor[inner_o_gm_offset],
@@ -3057,7 +3405,7 @@ private:
                 );
                 SET_FLAG(V, MTE3, EVENT_ID1);
                 WAIT_FLAG(V, MTE3, EVENT_ID1);
-                // 搬出lse
+                // copyout lse
                 ub_to_gm_align<ArchType::ASCEND_V220, OUT_DTYPE>(
                     lse_gm_tensor[(int64_t)(o_offset / __k)],
                     lse_conv_ubuf_tensor,
@@ -3089,22 +3437,200 @@ private:
         SET_FLAG(MTE3, MTE2, EVENT_ID4);
     }
 
+    __aicore__ __attribute__((always_inline)) inline void TailSoftmaxStage2MLAHeadLoopTP1(
+        AscendC::GlobalTensor<mm2CopyType> o_tmp_gm_tensor,
+        AscendC::GlobalTensor<float> go_gm_tensor,
+        AscendC::GlobalTensor<float> gl_gm_tensor,
+        AscendC::GlobalTensor<float> gm_gm_tensor,
+        AscendC::LocalTensor<float> dm32_ubuf_tensor,
+        AscendC::LocalTensor<float> go32_ubuf_tensor,
+        AscendC::LocalTensor<float> gl32_ubuf_tensor,
+        AscendC::LocalTensor<float> gm32_ubuf_tensor,
+        uint32_t n_idx,
+        uint32_t n_loop,
+        uint32_t qk_n,
+        uint32_t qk_round_n,
+        uint32_t sub_m,
+        uint64_t o_offset,
+        uint32_t head_idx,
+        uint32_t head_loop,
+        uint32_t head_loop_idx,
+        uint32_t q_seq_len,
+        uint32_t sub_head_num,
+        uint32_t cur_head_num,
+        uint32_t numhead_per_process
+        )
+    {
+        uint32_t sub_m_d64 = (sub_m + 63) / 64;     // up aligned to 64
+        uint32_t round_sub_m = (sub_m + 15) / 16 * 16;
+        WAIT_FLAG(V, MTE2, EVENT_ID0);
+        if (n_idx != 4) {
+            gm_to_ub<ArchType::ASCEND_V220, mm2CopyType>(
+                lo_ubuf_tensor.template ReinterpretCast<mm2CopyType>(),
+                o_tmp_gm_tensor,
+                0,                    // sid
+                1,                    // nBurst
+                sub_m * round_v / FLOAT_BLOCK_SIZE,  // lenBurst
+                0,                    // srcGap
+                0                     // dstGap
+            );
+            SET_FLAG(MTE2, V, EVENT_ID0);
+            WAIT_FLAG(MTE2, V, EVENT_ID0);
+        }
+        SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
+        WAIT_FLAG(MTE3, MTE2, EVENT_ID4);
+        if (n_idx != 4) {
+            // expand_to_block
+            SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
+            brcb_v<ArchType::ASCEND_V220, uint32_t>(tv32_ubuf_tensor.ReinterpretCast<uint32_t>(),
+                dm32_ubuf_tensor.ReinterpretCast<uint32_t>(),
+                1,               // dstBlockStride
+                8,               // dstRepeatStride
+                round_sub_m / FLOAT_BLOCK_SIZE  // repeat
+            );
+            PIPE_BARRIER(V);
+            if (head_loop > 1) {
+                gm_to_ub<ArchType::ASCEND_V220, float>(
+                    go32_ubuf_tensor,
+                    go_gm_tensor,
+                    0,
+                    1,
+                    sub_m * round_v / FLOAT_BLOCK_SIZE,
+                    0,
+                    0
+                );
+                SET_FLAG(MTE2, V, EVENT_ID0);
+                WAIT_FLAG(MTE2, V, EVENT_ID0);
+            }
+
+            // *** go = go * dm_block
+            SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
+            for (uint32_t vmul_idx = 0; vmul_idx < __v / FLOAT_VECTOR_SIZE; ++vmul_idx) {
+                mul_v<ArchType::ASCEND_V220, float>(go32_ubuf_tensor[vmul_idx * FLOAT_VECTOR_SIZE],
+                    go32_ubuf_tensor[vmul_idx * FLOAT_VECTOR_SIZE],
+                    tv32_ubuf_tensor,
+                    sub_m,        // repeat
+                    1,            // dstBlockStride
+                    1,            // src0BlockStride
+                    0,            // src1BlockStride
+                    round_v / FLOAT_BLOCK_SIZE,  // dstRepeatStride
+                    round_v / FLOAT_BLOCK_SIZE,  // src0RepeatStride
+                    1             // src1RepeatStride
+                );
+            }
+            if (__v % FLOAT_VECTOR_SIZE > 0) {
+                __set_mask(__v % FLOAT_VECTOR_SIZE);
+                mul_v<ArchType::ASCEND_V220, float>(go32_ubuf_tensor[__v / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE],
+                    go32_ubuf_tensor[__v / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE],
+                    tv32_ubuf_tensor,
+                    sub_m,        // repeat
+                    1,            // dstBlockStride
+                    1,            // src0BlockStride
+                    0,            // src1BlockStride
+                    round_v / FLOAT_BLOCK_SIZE,  // dstRepeatStride
+                    round_v / FLOAT_BLOCK_SIZE,  // src0RepeatStride
+                    1             // src1RepeatStride
+                );
+                SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
+            }
+            PIPE_BARRIER(V);
+            // *** go = lo + go
+            add_v<ArchType::ASCEND_V220, float>(go32_ubuf_tensor,
+                go32_ubuf_tensor,
+                lo_ubuf_tensor,
+                (sub_m * round_v + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,  // repeat
+                1,                            // dstBlockStride
+                1,                            // src0BlockStride
+                1,                            // src1BlockStride
+                8,                            // dstRepeatStride
+                8,                            // src0RepeatStride
+                8                             // src1RepeatStride
+            );
+            PIPE_BARRIER(V);
+        } else {
+            // *** go = lo
+
+            gm_to_ub<ArchType::ASCEND_V220, mm2CopyType>(
+                go32_ubuf_tensor.template ReinterpretCast<mm2CopyType>(),
+                o_tmp_gm_tensor,
+                0,                    // sid
+                1,                    // nBurst
+                sub_m * round_v / FLOAT_BLOCK_SIZE,  // lenBurst
+                0,                    // srcGap
+                0                     // dstGap
+            );
+            SET_FLAG(MTE2, V, EVENT_ID0);
+            WAIT_FLAG(MTE2, V, EVENT_ID0);
+        }
+        SET_FLAG(V, MTE2, EVENT_ID0);
+
+        if (n_idx + 4 > n_loop + 4 - 1) {
+            // The last step to process the o with dividing and copyout
+            // TODO: Maybe the following two don't need waiting
+            // Copyout gl32_ubuf_tensor to gl_gm_tensor
+            ub_to_gm<ArchType::ASCEND_V220, float>(
+                gl_gm_tensor,
+                gl32_ubuf_tensor,
+                0,
+                1,
+                sub_m / FLOAT_BLOCK_SIZE,
+                0,
+                0
+            );
+            
+            // Copyout rowmax to global gm32_ubuf_tensor
+            ub_to_gm<ArchType::ASCEND_V220, float>(
+                gm_gm_tensor,
+                gm32_ubuf_tensor,
+                0,
+                1,
+                sub_m / FLOAT_BLOCK_SIZE,
+                0,
+                0
+            );
+            // Copyout go32_ubuf_tensor to go_gm_tensor
+            // This is needed to wait for former calculation
+            SET_FLAG(V, MTE3, EVENT_ID5);
+            WAIT_FLAG(V, MTE3, EVENT_ID5);
+            ub_to_gm<ArchType::ASCEND_V220, float>(
+                go_gm_tensor,
+                go32_ubuf_tensor,
+                0,
+                1,
+                sub_m * round_v / FLOAT_BLOCK_SIZE,
+                0,
+                0
+            );
+            
+        }
+        else if (head_loop > 1) {
+            SET_FLAG(V, MTE3, EVENT_ID5);
+            WAIT_FLAG(V, MTE3, EVENT_ID5);
+            ub_to_gm<ArchType::ASCEND_V220, float>(
+                go_gm_tensor,
+                go32_ubuf_tensor,
+                0,
+                1,
+                sub_m * round_v / FLOAT_BLOCK_SIZE,
+                0,
+                0
+            );
+        }
+        SET_FLAG(MTE3, MTE2, EVENT_ID4);
+        PIPE_BARRIER(ALL);
+    }
+
     __aicore__ __attribute__((always_inline)) inline void InnerRunVectorChange(
         uint32_t cur_batch, uint32_t start_head, uint32_t cur_nIndx,
         uint32_t cur_q_seqlen, uint32_t cur_kv_seqlen, uint32_t cur_head_num,
         uint32_t offset_tiling, uint32_t embed_split_size_v, uint32_t embed_split_loop_v)
     {
-        AscendC::printf("----TestHala entering InnerRunVectorChange-----\n");
         uint32_t addr_o_high32 = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 4 + offset_tiling));
-        AscendC::printf("----TestHala tiling_gm[%d]=addr_o_high32=%u\n",4 + offset_tiling,addr_o_high32);
         uint32_t addr_o_loww32 = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 5 + offset_tiling));
-        AscendC::printf("----TestHala tiling_gm[%d]=addr_o_loww32=%u\n",5 + offset_tiling,addr_o_loww32);
         uint64_t addr_o_scalar = (uint64_t)(((uint64_t)addr_o_high32) << 32 | addr_o_loww32);
 
         uint32_t addr_mask_high32 = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 6 + offset_tiling));
-        AscendC::printf("----TestHala tiling_gm[%d]=addr_mask_high32=%u\n",6 + offset_tiling,addr_mask_high32);
         uint32_t addr_mask_loww32 = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 7 + offset_tiling));
-        AscendC::printf("----TestHala tiling_gm[%d]=addr_mask_loww32=%u\n",7 + offset_tiling,addr_mask_loww32);
         uint64_t addr_mask_scalar = (uint64_t)(((uint64_t)addr_mask_high32) << 32 | addr_mask_loww32);
 
         uint32_t mask_offset = addr_mask_scalar;
@@ -3196,7 +3722,6 @@ private:
 
             uint32_t process_row_num = 16;
             uint32_t numhead_per_process = process_row_num / cur_q_seqlen;
-            AscendC::printf("----TestHala n_idx=%u, sub_m=%u, n_loop=%u---\n", n_idx,sub_m,n_loop);
             if (n_idx != 0) {
                 if (n_idx == n_loop) {
                     qk_n_2 = (cur_kv_seqlen - (n_idx - 1) * pp_n_scalar);
@@ -3240,18 +3765,285 @@ private:
         }
     }
 
+    __aicore__ __attribute((always_inline)) inline void SoftmaxGatherTP1(
+        AscendC::GlobalTensor<OUT_DTYPE> o_gm_tensor,
+        AscendC::GlobalTensor<float> go_gm_tensor,
+        AscendC::GlobalTensor<float> gl_gm_tensor,
+        AscendC::GlobalTensor<float> gm_gm_tensor,
+        AscendC::LocalTensor<OUT_DTYPE> go_ubuf_tensor,
+        AscendC::LocalTensor<float> go32_ubuf_tensor,
+        AscendC::LocalTensor<float> gl32_ubuf_tensor,
+        AscendC::LocalTensor<float> gm32_ubuf_tensor,
+        AscendC::LocalTensor<float> lo_ubuf_tensor,
+        AscendC::LocalTensor<float> ll_ubuf_tensor,
+        AscendC::LocalTensor<float> lm32_ubuf_tensor,
+        AscendC::LocalTensor<float> hm32_ubuf_tensor,
+        AscendC::LocalTensor<float> dm32_ubuf_tensor,
+        AscendC::LocalTensor<float> tv32_ubuf_tensor,
+        uint32_t start_core_idx,
+        uint32_t cores_process,
+        uint32_t cur_core_idx,
+        uint32_t cur_process_row
+        )
+    {
+        if (cur_core_idx == start_core_idx) {
+            // just copyin
+            gm_to_ub<ArchType::ASCEND_V220, float>(
+                go32_ubuf_tensor,
+                go_gm_tensor,
+                0,
+                1,
+                cur_process_row * round_v / FLOAT_BLOCK_SIZE,
+                0,
+                0
+            );
+            
+            gm_to_ub<ArchType::ASCEND_V220, float>(
+                gl32_ubuf_tensor,
+                gl_gm_tensor,
+                0,
+                1,
+                cur_process_row / FLOAT_BLOCK_SIZE,
+                0,
+                0
+            );
+            
+            gm_to_ub<ArchType::ASCEND_V220, float>(
+                gm32_ubuf_tensor,
+                gm_gm_tensor,
+                0,
+                1,
+                cur_process_row / FLOAT_BLOCK_SIZE,
+                0,
+                0
+            );
+            SET_FLAG(MTE2, V, EVENT_ID0);
+            WAIT_FLAG(MTE2, V, EVENT_ID0);
+        }
+        else{
+            gm_to_ub<ArchType::ASCEND_V220, float>(
+                lo_ubuf_tensor,
+                go_gm_tensor,
+                0,
+                1,
+                cur_process_row * round_v / FLOAT_BLOCK_SIZE,
+                0,
+                0
+            );
+            
+            gm_to_ub<ArchType::ASCEND_V220, float>(
+                ll_ubuf_tensor,
+                gl_gm_tensor,
+                0,
+                1,
+                cur_process_row / FLOAT_BLOCK_SIZE,
+                0,
+                0
+            );
+            
+            gm_to_ub<ArchType::ASCEND_V220, float>(
+                lm32_ubuf_tensor,
+                gm_gm_tensor,
+                0,
+                1,
+                cur_process_row / FLOAT_BLOCK_SIZE,
+                0,
+                0
+            );
+            
+            SET_FLAG(MTE2, V, EVENT_ID0);
+            WAIT_FLAG(MTE2, V, EVENT_ID0);
+        }
+        if (cur_core_idx != start_core_idx) {
+            // * update the o
+            // * hm = max(gm, lm)
+            AscendC::Max<float>(
+                hm32_ubuf_tensor,
+                lm32_ubuf_tensor,
+                gm32_ubuf_tensor,
+                cur_process_row
+            );
+            AscendC::PipeBarrier<PIPE_V>();
+
+            // ** update go with dm
+            // ** dm = gm - hm
+            AscendC::Sub<float>(
+                dm32_ubuf_tensor,
+                gm32_ubuf_tensor,
+                hm32_ubuf_tensor,
+                cur_process_row
+            );
+            // ** update lo with dm
+            // ** dm = lm - hm
+            AscendC::Sub<float>(
+                dm32_ubuf_tensor[cur_process_row],
+                lm32_ubuf_tensor,
+                hm32_ubuf_tensor,
+                cur_process_row
+            );
+            AscendC::PipeBarrier<PIPE_V>();
+
+            // ** dm = exp(dm)
+            AscendC::Exp<float>(
+                dm32_ubuf_tensor,
+                dm32_ubuf_tensor,
+                cur_process_row * 2
+            );
+            AscendC::PipeBarrier<PIPE_V>();
+
+            // ** gl = gl * dm
+            AscendC::Mul<float, true>(
+                gl32_ubuf_tensor,
+                dm32_ubuf_tensor,
+                gl32_ubuf_tensor,
+                (uint64_t)cur_process_row,
+                1,
+                AscendC::BinaryRepeatParams(1, 1, 1, 8, 8, 8)
+            );
+            // ** ll = ll * dm
+            AscendC::Mul<float, true>(
+                ll_ubuf_tensor,
+                dm32_ubuf_tensor[cur_process_row],
+                ll_ubuf_tensor,
+                (uint64_t)cur_process_row, //mask
+                1, // repeat 
+                AscendC::BinaryRepeatParams(1, 1, 1, 8, 8, 8)
+            );
+            
+            // ** dm_block = expand_to_block(dm)
+            AscendC::Brcb<float>(
+                tv32_ubuf_tensor,
+                dm32_ubuf_tensor,
+                2 * cur_process_row / FLOAT_BLOCK_SIZE,
+                AscendC::BrcbRepeatParams(1, 8)
+            );
+            AscendC::PipeBarrier<PIPE_V>();
+            
+            // * gl = gl + ll
+            AscendC::Add<float, true>(
+                gl32_ubuf_tensor,
+                ll_ubuf_tensor,
+                gl32_ubuf_tensor,
+                (uint64_t)cur_process_row,
+                1,
+                AscendC::BinaryRepeatParams(1, 1, 1, 8, 8, 8)
+            );
+
+            // ** go = go * dm_block
+            for (uint32_t vmul_idx = 0; vmul_idx < __v / FLOAT_VECTOR_SIZE; ++vmul_idx) {
+                AscendC::Mul<float, true>(
+                    go32_ubuf_tensor[vmul_idx * FLOAT_VECTOR_SIZE],
+                    go32_ubuf_tensor[vmul_idx * FLOAT_VECTOR_SIZE],
+                    tv32_ubuf_tensor,
+                    (uint64_t)FLOAT_VECTOR_SIZE,
+                    cur_process_row,
+                    AscendC::BinaryRepeatParams(1, 1, 0, round_v / FLOAT_BLOCK_SIZE, round_v / FLOAT_BLOCK_SIZE, 1)
+                );
+            }
+            // ** lo = lo * dm_block
+            for (uint32_t vmul_idx = 0; vmul_idx < __v / FLOAT_VECTOR_SIZE; ++vmul_idx) {
+                AscendC::Mul<float, true>(
+                    lo_ubuf_tensor[vmul_idx * FLOAT_VECTOR_SIZE],
+                    lo_ubuf_tensor[vmul_idx * FLOAT_VECTOR_SIZE],
+                    tv32_ubuf_tensor[cur_process_row * FLOAT_BLOCK_SIZE],
+                    (uint64_t)FLOAT_VECTOR_SIZE,
+                    cur_process_row,
+                    AscendC::BinaryRepeatParams(1, 1, 0, round_v / FLOAT_BLOCK_SIZE, round_v / FLOAT_BLOCK_SIZE, 1)
+                );
+            }
+            AscendC::PipeBarrier<PIPE_V>();
+            
+            
+            // * go = go + lo
+            AscendC::Add<float, true>(
+                go32_ubuf_tensor,
+                lo_ubuf_tensor,
+                go32_ubuf_tensor,
+                (uint64_t)FLOAT_VECTOR_SIZE,
+                cur_process_row * round_v / FLOAT_VECTOR_SIZE,
+                AscendC::BinaryRepeatParams(1, 1, 1, 8, 8, 8)
+            );
+            
+            // gm = hm
+            ub_to_ub<ArchType::ASCEND_V220, float>(
+                gm32_ubuf_tensor,
+                hm32_ubuf_tensor,
+                0,
+                1,
+                cur_process_row / FLOAT_BLOCK_SIZE,
+                0,
+                0
+            );
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+        if (cur_core_idx == start_core_idx + cores_process - 1) {
+            // gl_block = expand_to_block(gl)
+            // AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Brcb<float>(
+                tv32_ubuf_tensor,
+                gl32_ubuf_tensor,
+                cur_process_row / FLOAT_BLOCK_SIZE,
+                AscendC::BrcbRepeatParams(1, 8)
+            );
+            AscendC::PipeBarrier<PIPE_V>();
+            
+            // go = go / gl_block
+            for (uint32_t vmul_idx = 0; vmul_idx < __v / FLOAT_VECTOR_SIZE; ++vmul_idx) {
+                AscendC::Div<float, true>(
+                    go32_ubuf_tensor[vmul_idx * FLOAT_VECTOR_SIZE],
+                    go32_ubuf_tensor[vmul_idx * FLOAT_VECTOR_SIZE],
+                    tv32_ubuf_tensor,
+                    (uint64_t)FLOAT_VECTOR_SIZE,
+                    cur_process_row,
+                    AscendC::BinaryRepeatParams(1, 1, 0, round_v / FLOAT_BLOCK_SIZE, round_v / FLOAT_BLOCK_SIZE, 1)
+                );
+            }
+            AscendC::PipeBarrier<PIPE_V>();
+            
+            if constexpr (std::is_same<OUT_DTYPE, __bf16>::value) {
+                AscendC::Cast<OUT_DTYPE, float, true>(
+                    go_ubuf_tensor,
+                    go32_ubuf_tensor,
+                    AscendC::RoundMode::CAST_RINT, // not consistent with the document!
+                    (uint64_t)FLOAT_VECTOR_SIZE,
+                    cur_process_row * round_v / FLOAT_VECTOR_SIZE,
+                    AscendC::UnaryRepeatParams(1, 1, 4, 8)
+                );
+            } else {
+                AscendC::Cast<OUT_DTYPE, float, true>(
+                    go_ubuf_tensor,
+                    go32_ubuf_tensor,
+                    AscendC::RoundMode::CAST_NONE,
+                    (uint64_t)FLOAT_VECTOR_SIZE,
+                    cur_process_row * round_v / FLOAT_VECTOR_SIZE,
+                    AscendC::UnaryRepeatParams(1, 1, 4, 8)
+                );
+            }
+
+            SET_FLAG(V, MTE3, EVENT_ID0);
+            WAIT_FLAG(V, MTE3, EVENT_ID0);
+            
+            // copyout
+            ub_to_gm<ArchType::ASCEND_V220, OUT_DTYPE>(
+                o_gm_tensor,
+                go_ubuf_tensor,
+                0,
+                cur_process_row,
+                __v * sizeof(OUT_DTYPE) / BLOCK_SIZE_32,
+                0,
+                0
+            );
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+
     __aicore__ __attribute__((always_inline)) inline void InnerRunVectorChangeTP1(
         uint32_t cur_batch, uint32_t start_head, uint32_t cur_nIndx,
         uint32_t cur_q_seqlen, uint32_t cur_kv_seqlen, uint32_t cur_head_num,
         uint32_t offset_tiling, uint32_t embed_split_size_v, uint32_t embed_split_loop_v)
     {
-        AscendC::printf("----TestHala entering InnerRunVectorChangeTP1-----\n");
         uint32_t prev_task = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 1 + offset_tiling));
         uint64_t addr_o_scalar = prev_task * q_heads * embedding_size;
-
-        // uint32_t addr_mask_high32 = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 6 + offset_tiling));
-        // uint32_t addr_mask_loww32 = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 7 + offset_tiling));
-        // uint64_t addr_mask_scalar = (uint64_t)(((uint64_t)addr_mask_high32) << 32 | addr_mask_loww32);
         uint64_t addr_mask_scalar = 0;
         uint32_t mask_offset = addr_mask_scalar;
 
@@ -3336,7 +4128,6 @@ private:
             uint32_t process_row_num = 16;
             uint32_t numhead_per_process = process_row_num / cur_q_seqlen;
 
-            // stage2也被删掉 head32的时候可不改sm2
             if (n_idx >= s_block_stack) {
                 if (n_idx == n_loop) {
                     qk_n_2 = (cur_kv_seqlen - (n_idx - 1) * pp_n_scalar);
@@ -3375,6 +4166,189 @@ private:
                     }
                 }
             }
+        }
+    }
+
+    __aicore__ __attribute__((always_inline)) inline void TailInnerRunVectorChangeTP1(
+        uint32_t start_head,
+        uint32_t cur_q_seqlen, uint32_t cur_kv_seqlen, uint32_t cur_head_num,
+        uint32_t offset_tiling, uint32_t embed_split_size_v, uint32_t embed_split_loop_v)
+    {
+        uint32_t prev_task = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 1 + offset_tiling));
+        uint64_t addr_o_scalar = prev_task * q_heads * embedding_size;
+        uint64_t addr_mask_scalar = 0;
+        uint32_t mask_offset = addr_mask_scalar;
+
+        uint32_t pp_n_scalar = block_size; // 64
+        uint32_t sub_n_loop = pp_n_scalar / block_size;
+        uint32_t real_n_loop = (cur_kv_seqlen + block_size - 1) / block_size;
+
+        uint32_t n_loop = (cur_kv_seqlen + pp_n_scalar - 1) / pp_n_scalar;
+
+        uint32_t qk_n = pp_n_scalar;
+        uint32_t qk_round_n = RoundUp<BLOCK_SIZE>(qk_n);
+
+        uint32_t qk_n_2 = pp_n_scalar;
+        uint32_t qk_round_n_2 = RoundUp<BLOCK_SIZE>(qk_n_2);
+
+        // split head num to two vectors
+        uint32_t sub_head_num = (sub_block_idx == 1) ? (cur_head_num - cur_head_num / 2) : cur_head_num / 2; // 16
+        uint32_t sub_m = sub_head_num * cur_q_seqlen; // 16 * 3 = 48
+
+        uint32_t head_idx = (sub_block_idx == 0) ? start_head : start_head + cur_head_num / 2 * cur_q_seqlen; // not used
+
+        o_offset = addr_o_scalar + start_head * embedding_size + sub_block_idx * cur_head_num / 2 * embedding_size; // for NSD -> SND
+
+        uint32_t sub_m_d128 = (sub_m + 127) / 128;  // up aligned to 128
+        uint32_t sub_m_d64 = (sub_m + 63) / 64;     // up aligned to 128
+        uint32_t round_sub_m = (sub_m + 15) / 16 * 16;
+
+        uint32_t start_kv = 0;
+        uint32_t s_block_stack = 4;
+        uint32_t m_slice = FLOAT_VECTOR_SIZE / s_block_stack;
+        uint32_t m_end = (sub_m + m_slice - 1) / m_slice;
+        for (uint32_t n_idx = 0; n_idx < n_loop + s_block_stack; n_idx += s_block_stack) {
+            if (n_idx < n_loop) {
+                if (n_idx + s_block_stack > n_loop - 1) {
+                    qk_n = (cur_kv_seqlen - n_idx * pp_n_scalar);
+                } else {
+                    qk_n =  pp_n_scalar * s_block_stack;
+                }
+                qk_round_n = RoundUp<16>(qk_n);
+                if (sub_m == 0) {
+                    WaitFlagDev(QK_READY_DECODER);
+                }
+                uint32_t pingpong_flag = 0;
+                for (uint32_t m_ind = 0; m_ind < m_end; m_ind++) {
+                    uint32_t row_offset = m_ind * m_slice;
+                    uint32_t curr_m = m_ind == m_end - 1 ? sub_m - row_offset : m_slice;
+                    uint32_t s_ub_offset = pingpong_flag * 8192;
+                    uint32_t p_gm_offset = (uint64_t)block_idx * TMP_SIZE * 2 +
+                                            (uint64_t)sub_block_idx * cur_head_num * cur_q_seqlen / 2 * qk_round_n + row_offset * qk_round_n + (uint64_t)((n_idx / s_block_stack) % 2) * TMP_SIZE;
+                    uint32_t s_gm_offset = (int64_t)block_idx * TMP_SIZE_DECODER * 4 +
+                                            (int64_t)sub_block_idx * cur_head_num * cur_q_seqlen / 2 * qk_round_n + row_offset * qk_round_n + (uint64_t)((n_idx / s_block_stack) % 2) * TMP_SIZE_DECODER * 2;
+                    if (m_ind == 0) {
+                        WaitFlagDev(QK_READY_DECODER);
+                    }
+                    if (curr_m == 0) {
+                        continue;
+                    }
+                    OnlineSoftmaxStage1<float, float, IN_DTYPE, IN_DTYPE, MaskType::MASK_TYPE_NONE> (
+                        ls32_ubuf_tensor[s_ub_offset],
+                        mask_ubuf_tensor,
+                        mask_ubuf_tensor.template ReinterpretCast<float>(),
+                        lm32_ubuf_tensor[row_offset],
+                        hm32_ubuf_tensor[row_offset],
+                        gm32_ubuf_tensor[row_offset],
+                        dm32_ubuf_tensor[((n_idx / s_block_stack) % 2) * UB_FLOAT_LINE_SIZE + row_offset],
+                        ls32_ubuf_tensor[s_ub_offset],
+                        ll_ubuf_tensor[row_offset],
+                        gl32_ubuf_tensor[row_offset],
+                        lp_ubuf_tensor[s_ub_offset * 2],
+                        tv32_ubuf_tensor,
+                        s_gm_tensor[s_gm_offset],
+                        p_gm_tensor[p_gm_offset],
+                        n_idx == 0, this->tor,
+                        curr_m, qk_n, qk_round_n, pingpong_flag
+                    );
+                    pingpong_flag = 1 - pingpong_flag;
+                }
+                FftsCrossCoreSync<PIPE_MTE3, 2>(SOFTMAX_READY_DECODER);
+            }
+            /* ************ softmax2 stage1  ************* */
+            // PIPE_BARRIER(ALL);
+            uint32_t process_row_num = 16;
+            uint32_t numhead_per_process = process_row_num / cur_q_seqlen;
+
+            if (n_idx >= s_block_stack) {
+                if (n_idx == n_loop) {
+                    qk_n_2 = (cur_kv_seqlen - (n_idx - 1) * pp_n_scalar);
+                    qk_round_n_2 = RoundUp<BLOCK_SIZE>(qk_n_2);
+                }
+                WaitFlagDev(UPDATE_READY_DECODER);
+                if (sub_m > 0) {
+                    uint32_t head_loop = (sub_m + process_row_num - 1) / process_row_num;
+
+                    uint32_t head_res_row_num = 0;
+                    uint32_t head_start_sblock_idx = 0;
+                    uint32_t tail_res_row_num = 0;
+
+                    for (uint32_t head_loop_idx = 0; head_loop_idx < head_loop; ++head_loop_idx) {
+                        uint32_t head_offset = head_loop_idx * process_row_num * round_v;
+                        uint32_t cur_sub_m = head_loop_idx == (head_loop - 1) ? sub_m - head_loop_idx * process_row_num : process_row_num;
+
+                        // complete head num
+                        head_start_sblock_idx = tail_res_row_num;
+                        head_res_row_num = (cur_q_seqlen - tail_res_row_num) % cur_q_seqlen;
+                        uint32_t cur_numhead_per_process = (cur_sub_m - head_res_row_num) / cur_q_seqlen;
+                        tail_res_row_num = cur_sub_m - cur_numhead_per_process * cur_q_seqlen - head_res_row_num;
+
+                        uint32_t out_o_offset = head_loop_idx * numhead_per_process * round_v; // round_v = 512
+
+                        TailSoftmaxStage2MLAHeadLoopTP1(
+                            o_tmp_gm_tensor[(uint64_t)(block_idx * TMP_SIZE * 2 + sub_block_idx * cur_head_num * cur_q_seqlen / 2 * round_v + head_offset + ((n_idx / s_block_stack - 1) % 2) * TMP_SIZE)],
+                            go_gm_tensor[(uint64_t)(block_idx * TMP_SIZE + sub_block_idx * cur_head_num * cur_q_seqlen / 2 * round_v + head_offset)],
+                            tmp_gm_tensor[(uint64_t)(block_idx * q_heads + start_head + sub_block_idx * cur_head_num * cur_q_seqlen / 2 + head_loop_idx * process_row_num)],
+                            tmp_gm_tensor[(uint64_t)(block_num * q_heads + block_idx * q_heads + start_head + sub_block_idx * cur_head_num * cur_q_seqlen / 2 + head_loop_idx * process_row_num)],
+                            dm32_ubuf_tensor[(uint64_t)((n_idx / s_block_stack - 1) % 2 * UB_FLOAT_LINE_SIZE + head_loop_idx * process_row_num)],
+                            go32_ubuf_tensor, // no need for offset
+                            gl32_ubuf_tensor[(uint64_t)(head_loop_idx * process_row_num)],
+                            gm32_ubuf_tensor[(uint64_t)(head_loop_idx * process_row_num)],
+                            n_idx, n_loop, qk_n_2, RoundUp<T_BLOCK_SIZE>(qk_round_n_2), cur_sub_m, o_offset, head_idx,
+                            head_loop, head_loop_idx, cur_q_seqlen, sub_head_num, cur_head_num, cur_numhead_per_process
+                        );
+                    }
+                }
+            }
+        }
+
+    }
+
+    __aicore__ __attribute__((always_inline)) inline void TailInnerGatherVectorTP1(
+        uint32_t start_head, uint32_t cur_q_seqlen, uint32_t cur_head_num,
+        uint32_t start_block_idx, uint32_t cores_process, uint32_t offset_tiling)
+    {
+        uint32_t prev_task = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 1 + offset_tiling));
+        uint64_t addr_o_scalar = prev_task * q_heads * embedding_size;
+        // split head num to two vectors
+        uint32_t sub_head_num = (sub_block_idx == 1) ? (cur_head_num - cur_head_num / 2) : cur_head_num / 2; // 16
+        uint32_t sub_m = sub_head_num * cur_q_seqlen;
+        uint32_t head_idx = (sub_block_idx == 0) ? start_head : start_head + cur_head_num / 2 * cur_q_seqlen; // not used
+        
+        uint32_t process_row_num = 16;
+        uint32_t numhead_per_process = process_row_num / cur_q_seqlen;
+        uint32_t head_loop = (sub_m + process_row_num - 1) / process_row_num;
+
+        
+        o_offset = addr_o_scalar + start_head * embedding_size + sub_block_idx * cur_head_num / 2 * embedding_size;
+        
+        for (uint32_t head_loop_idx = 0; head_loop_idx < head_loop; ++head_loop_idx) {
+            uint32_t head_offset = head_loop_idx * process_row_num;
+            uint32_t cur_sub_m = head_loop_idx == (head_loop - 1) ? sub_m - head_loop_idx * process_row_num : process_row_num;
+            uint32_t out_o_offset = head_loop_idx * numhead_per_process * embedding_size;
+
+            for (uint32_t core_idx = 0; core_idx < cores_process; core_idx++) {
+                uint32_t actual_block_idx = start_block_idx + core_idx;
+
+                SoftmaxGatherTP1(
+                    o_gm_tensor[o_offset + out_o_offset],
+                    go_gm_tensor[(uint64_t)(actual_block_idx * TMP_SIZE + start_head * embedding_size + sub_block_idx * cur_head_num * cur_q_seqlen / 2 * round_v + head_offset * embedding_size)],
+                    tmp_gm_tensor[(uint64_t)(actual_block_idx * q_heads + start_head + sub_block_idx * cur_head_num * cur_q_seqlen / 2 + head_offset)],
+                    tmp_gm_tensor[(uint64_t)(block_num * q_heads + actual_block_idx * q_heads + start_head + sub_block_idx * cur_head_num * cur_q_seqlen / 2 + head_offset)],
+                    go_ubuf_tensor,
+                    go32_ubuf_tensor,
+                    gl32_ubuf_tensor,
+                    gm32_ubuf_tensor,
+                    lo_ubuf_tensor,
+                    ll_ubuf_tensor,
+                    lm32_ubuf_tensor,
+                    hm32_ubuf_tensor,
+                    dm32_ubuf_tensor,
+                    tv32_ubuf_tensor,
+                    start_block_idx, cores_process, actual_block_idx, cur_sub_m
+                );
+            }
+            
         }
     }
 
@@ -3431,6 +4405,7 @@ private:
     AscendC::GlobalTensor<IN_DTYPE> p_gm_tensor;
     AscendC::GlobalTensor<mm2OutputType> o_tmp_gm_tensor;
     AscendC::GlobalTensor<float> go_gm_tensor;
+    AscendC::GlobalTensor<float> tmp_gm_tensor;
     AscendC::GlobalTensor<float> deq_scale_gm_tensor_q1;
     AscendC::GlobalTensor<float> deq_scale_gm_tensor_k1;
 
@@ -3472,239 +4447,3 @@ private:
     uint32_t cur_qn_blk_size{0};
 };
 #endif
-
-
-__aicore__ inline void mla (
-    __gm__ uint8_t *__restrict__ q_gm,
-    __gm__ uint8_t *__restrict__ q_rope_gm,
-    __gm__ uint8_t *__restrict__ ctkv_gm,
-    __gm__ uint8_t *__restrict__ ctkv_rope_gm,
-    __gm__ uint8_t *__restrict__ block_tables_gm,
-    __gm__ uint8_t *__restrict__ mask_gm,
-    __gm__ uint8_t *__restrict__ deq_qk_gm,
-    __gm__ uint8_t *__restrict__ deq_pv_gm,
-    __gm__ uint8_t *__restrict__ o_gm,
-    __gm__ uint8_t *__restrict__ lse_gm,
-    __gm__ uint8_t *__restrict__ s_gm,
-    __gm__ uint8_t *__restrict__ s_rope_out_gm,
-    __gm__ uint8_t *__restrict__ p_gm,
-    __gm__ uint8_t *__restrict__ o_tmp_gm,
-    __gm__ uint8_t *__restrict__ go_gm,
-    __gm__ uint8_t *__restrict__ tiling_para_gm)
-{
-    SetAtomicnone();
-    SetMasknorm();
-#ifdef __DAV_C220_VEC__
-    SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
-#elif __DAV_C220_CUBE__
-    SetPadding<uint64_t>(0);
-    SetNdpara(1, 0, 0);
-#endif
-    if (TILING_KEY_IS(0)) { // fp16
-        AscendC::GlobalTensor<__fp16> q_gmTensor;
-        q_gmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ __fp16 *>(q_gm));
-        AscendC::DumpTensor(q_gmTensor, 100, 32);
-        AscendC::GlobalTensor<__fp16> q_rope_gmTensor;
-        q_rope_gmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ __fp16 *>(q_rope_gm));
-        AscendC::DumpTensor(q_rope_gmTensor, 101, 32);
-        AscendC::GlobalTensor<__fp16> ctkv_gmTensor;
-        ctkv_gmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ __fp16 *>(ctkv_gm));
-        AscendC::DumpTensor(ctkv_gmTensor, 102, 32);
-        AscendC::GlobalTensor<__fp16> ctkv_rope_gmTensor;
-        ctkv_rope_gmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ __fp16 *>(ctkv_rope_gm));
-        AscendC::DumpTensor(ctkv_rope_gmTensor, 103, 32);
-        AscendC::GlobalTensor<__int32_t> block_tables_gmTensor;
-        block_tables_gmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ __int32_t *>(block_tables_gm));
-        AscendC::DumpTensor(block_tables_gmTensor, 104, 32);
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_HALF_DATA, half, half, half, half, InputFormat::ND_FORMAT> pa_aic_fp16 {};
-        pa_aic_fp16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_fp16.Run();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_HALF_DATA, half, half> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.Run();
-#endif
-        AscendC::GlobalTensor<__fp16> o_gmTensor;
-        o_gmTensor.SetGlobalBuffer(reinterpret_cast<__gm__ __fp16 *>(o_gm));
-        AscendC::DumpTensor(o_gmTensor, 200, 32);
-    } else if (TILING_KEY_IS(1)) { // bf16
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, __bf16, __bf16, InputFormat::ND_FORMAT> pa_aic_bf16 {};
-        pa_aic_bf16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_bf16.Run();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.Run();
-#endif
-    } else if (TILING_KEY_IS(16)) { // fp16
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_HALF_DATA, half, half, half, half, InputFormat::NZ_FORMAT> pa_aic_fp16 {};
-        pa_aic_fp16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_fp16.Run();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_HALF_DATA, half, half> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.Run();
-#endif
-    } else if (TILING_KEY_IS(17)) { // bf16
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, __bf16, __bf16, InputFormat::NZ_FORMAT> pa_aic_bf16 {};
-        pa_aic_bf16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_bf16.Run();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.Run();
-#endif
-    } else if (TILING_KEY_IS(4)) { // fp16
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_HALF_DATA, half, half, half, half, InputFormat::ND_FORMAT> pa_aic_fp16 {};
-        pa_aic_fp16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_fp16.RunTP1();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_HALF_DATA, half, half, false, BlockStack::FOUR_FLOW> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.RunTP1();
-#endif
-    } else if (TILING_KEY_IS(5)) { // bf16
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, __bf16, __bf16, InputFormat::ND_FORMAT> pa_aic_bf16 {};
-        pa_aic_bf16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_bf16.RunTP1();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, false, BlockStack::FOUR_FLOW> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.RunTP1();
-#endif
-    } else if (TILING_KEY_IS(20)) { // fp16
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_HALF_DATA, half, half, half, half, InputFormat::NZ_FORMAT> pa_aic_fp16 {};
-        pa_aic_fp16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_fp16.RunTP1();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_HALF_DATA, half, half, false, BlockStack::FOUR_FLOW> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.RunTP1();
-#endif
-    } else if (TILING_KEY_IS(21)) { // bf16
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, __bf16, __bf16, InputFormat::NZ_FORMAT> pa_aic_bf16 {};
-        pa_aic_bf16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_bf16.RunTP1();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, false, BlockStack::FOUR_FLOW> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.RunTP1();
-#endif
-} else  if (TILING_KEY_IS(32)) { // fp16 + nd + preload_depth 1 + ring 1
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_HALF_DATA, half, half, half, half, InputFormat::ND_FORMAT> pa_aic_fp16 {};
-        pa_aic_fp16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_fp16.Run();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_HALF_DATA, half, half, true> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.SetArgs2(lse_gm);
-        pa_aiv.Run();
-#endif
-    } else if (TILING_KEY_IS(33)) { // bf16 + nd + preload_depth 1 + ring 1
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, __bf16, __bf16, InputFormat::ND_FORMAT> pa_aic_bf16 {};
-        pa_aic_bf16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_bf16.Run();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, true> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.SetArgs2(lse_gm);
-        pa_aiv.Run();
-#endif
-    } else if (TILING_KEY_IS(48)) { // fp16 + nz + preload_depth 1 + ring 1
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_HALF_DATA, half, half, half, half, InputFormat::NZ_FORMAT> pa_aic_fp16 {};
-        pa_aic_fp16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_fp16.Run();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_HALF_DATA, half, half, true> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.SetArgs2(lse_gm);
-        pa_aiv.Run();
-#endif
-    } else if (TILING_KEY_IS(49)) { // bf16 + nz + preload_depth 1 + ring 1
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, __bf16, __bf16, InputFormat::NZ_FORMAT> pa_aic_bf16 {};
-        pa_aic_bf16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_bf16.Run();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, true> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.SetArgs2(lse_gm);
-        pa_aiv.Run();
-#endif
-    } else if (TILING_KEY_IS(36)) { // fp16 + nd + preload_depth 2 + ring 1
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_HALF_DATA, half, half, half, half, InputFormat::ND_FORMAT> pa_aic_fp16 {};
-        pa_aic_fp16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_fp16.RunTP1();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_HALF_DATA, half, half, true, BlockStack::FOUR_FLOW> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.SetArgs2(lse_gm);
-        pa_aiv.RunTP1();
-#endif
-    } else if (TILING_KEY_IS(37)) { // bf16 + nd + preload_depth 2 + ring 1
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, __bf16, __bf16, InputFormat::ND_FORMAT> pa_aic_fp16 {};
-        pa_aic_fp16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_fp16.RunTP1();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, true, BlockStack::FOUR_FLOW> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.SetArgs2(lse_gm);
-        pa_aiv.RunTP1();
-#endif
-    } else if (TILING_KEY_IS(52)) { // fp16 + nz + preload_depth 2 + ring 1
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_HALF_DATA, half, half, half, half, InputFormat::NZ_FORMAT> pa_aic_fp16 {};
-        pa_aic_fp16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_fp16.RunTP1();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_HALF_DATA, half, half, true, BlockStack::FOUR_FLOW> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.SetArgs2(lse_gm);
-        pa_aiv.RunTP1();
-#endif
-    } else if (TILING_KEY_IS(53)) { // bf16 + nz + preload_depth 2 + ring 1
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, __bf16, __bf16, InputFormat::NZ_FORMAT> pa_aic_fp16 {};
-        pa_aic_fp16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_fp16.RunTP1();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_BF16_DATA, __bf16, __bf16, true, BlockStack::FOUR_FLOW> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.SetArgs2(lse_gm);
-        pa_aiv.RunTP1();
-#endif
-    } else if (TILING_KEY_IS(18)) { // int8_t(IN) fp16(OUT)
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_INT8_DATA, int8_t, half, half, int8_t, InputFormat::NZ_FORMAT> pa_aic_fp16 {};
-        pa_aic_fp16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_fp16.Run();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_INT8_DATA, int8_t, half> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.Run();
-#endif
-    } else if (TILING_KEY_IS(19)) { // int8_t(IN) bf16(OUT)
-#ifdef __DAV_C220_CUBE__
-        MLAttentionDecoderAic<TilingKeyType::TILING_INT8_DATA, int8_t, __bf16, __bf16, int8_t, InputFormat::NZ_FORMAT> pa_aic_bf16 {};
-        pa_aic_bf16.SetArgs(q_gm, q_rope_gm, ctkv_gm, ctkv_rope_gm, block_tables_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, tiling_para_gm);
-        pa_aic_bf16.Run();
-#elif __DAV_C220_VEC__
-        MLADecoderAiv<TilingKeyType::TILING_INT8_DATA, int8_t, __bf16> pa_aiv {};
-        pa_aiv.SetArgs(block_tables_gm, deq_qk_gm, deq_pv_gm, o_gm, s_gm, s_rope_out_gm, p_gm, o_tmp_gm, go_gm, tiling_para_gm, mask_gm);
-        pa_aiv.Run();
-#endif
-    }
-}

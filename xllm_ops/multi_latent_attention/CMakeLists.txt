@@ -2,6 +2,7 @@ add_ops_compile_options(
 	OP_NAME MultiLatentAttention
         OPTIONS --cce-auto-sync=on
                 -Wno-deprecated-declarations
+                -DASCENDC_DUMP=0
 )
 
 target_sources(op_host_aclnn PRIVATE
