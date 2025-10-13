@@ -69,10 +69,18 @@ class BeamSearchBase {
     auto opt_f32 = torch::TensorOptions().dtype(torch::kFloat32);
     token_ids = torch::randint(
         /*low=*/4, /*high=*/10, {n_sequences_, sequence_length_}, opt_i32);
-    log_probs = torch::rand({n_sequences_, 1}, opt_f32);
+    log_probs = torch::zeros({n_sequences_, 1}, opt_f32);
+    log_probs[0] = 1;
+    // log_probs = log_probs.log();
+    // log_probs = log_probs.exp();
     top_tokens =
         torch::randint(/*low=*/4, /*high=*/10, {n_sequences_, top_k_}, opt_i32);
-    top_probs = torch::rand({n_sequences_, top_k_}, opt_f32);
+
+    // top_probs = torch::rand({n_sequences_, top_k_}, opt_f32);
+    top_probs = torch::zeros({n_sequences_, top_k_}, opt_f32);
+    top_probs[0] = 1;
+    // top_probs = top_probs.log();
+    // top_probs = top_probs.exp();
     output_token_ids_torch =
         torch::zeros({n_sequences_, 1}, opt_i32);
     output_token_ids_op =
@@ -247,14 +255,17 @@ int BeamSearchOp::execute_beam_search_operator(aclTensor* token_ids,
   aclOpExecutor* executor;
   auto ret = aclnnBeamSearchGetWorkspaceSize(
       log_probs, top_tokens, top_probs, output_token_ids,output_token_index, output_log_probs,&workspaceSize, &executor);
-  CHECK_ACL_SUCCESS(ret, "aclnn_beam_search_operator failed");
+  CHECK_ACL_SUCCESS(ret, "aclnn_beam_search_operator get workspace size failed");
   void* workspaceAddr = nullptr;
   if (workspaceSize > 0) {
     ret = aclrtMalloc(&workspaceAddr, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
-    CHECK_ACL_SUCCESS(ret, "aclnn_beam_search_operator failed");
+    CHECK_ACL_SUCCESS(ret, "aclnn_beam_search_operator malloc workspace failed");
   }
   ret = aclnnBeamSearch(workspaceAddr, workspaceSize, executor, stream);
-  CHECK_ACL_SUCCESS(ret, "aclnn_beam_search_operator failed");
+  
+  CHECK_ACL_SUCCESS(ret, "aclnn_beam_search_operator execute failed");
+  ret = aclrtSynchronizeStream(stream);
+  CHECK_ACL_SUCCESS(ret, "aclnn_beam_search_operator synchronize stream failed");
 
   if (workspaceSize > 0) {
     aclrtFree(workspaceAddr);
