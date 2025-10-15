@@ -23,6 +23,7 @@ limitations under the License.
 #include <iostream>
 #include <string>
 #include <vector>
+#include <functional>
 #include "base/utils_tensor.h"
 #include "aclnn_beam_search.h"
 
@@ -36,19 +37,40 @@ struct TensorShapes {
 };
 class BeamSearchBase {
  public:
- /*
- BeamSearchBase(int64_t beam_width,
+  using ProbGenerator = std::function<void(int64_t /*n_sequences*/,
+                                           int64_t /*top_k*/,
+                                           const torch::TensorOptions& /*opt_f32*/,
+                                           torch::Tensor& /*log_probs_out*/,
+                                           torch::Tensor& /*top_probs_out*/)>;
+
+  BeamSearchBase(int64_t beam_width,
+                 int64_t top_k,
+                 int64_t request_num,
+                 int64_t sequence_length)
+      : beam_width_(beam_width),
+        top_k_(top_k),
+        request_num_(request_num),
+        sequence_length_(sequence_length),
+        n_sequences_(0) {
+    n_sequences_ = request_num_ * beam_width_;
+    shapes.token_ids_shape = {{n_sequences_, sequence_length_}};
+    shapes.log_probs_shape = {{n_sequences_, 1}};
+    shapes.top_tokens_shape = {{n_sequences_, top_k_}};
+    shapes.top_probs_shape = {{n_sequences_, top_k_}};
+    shapes.output_shape = {{n_sequences_, 1}};
+  }
+
+  BeamSearchBase(int64_t beam_width,
                  int64_t top_k,
                  int64_t request_num,
                  int64_t sequence_length,
-                 int64_t device_id = 0)
+                 ProbGenerator prob_generator)
       : beam_width_(beam_width),
         top_k_(top_k),
         request_num_(request_num),
         sequence_length_(sequence_length),
         n_sequences_(0),
-        device_id_(static_cast<int32_t>(device_id)),
-        device_(std::string("npu:") + std::to_string(static_cast<int>(device_id_))) {
+        prob_generator_(std::move(prob_generator)) {
     n_sequences_ = request_num_ * beam_width_;
     shapes.token_ids_shape = {{n_sequences_, sequence_length_}};
     shapes.log_probs_shape = {{n_sequences_, 1}};
@@ -56,62 +78,38 @@ class BeamSearchBase {
     shapes.top_probs_shape = {{n_sequences_, top_k_}};
     shapes.output_shape = {{n_sequences_, 1}};
   }
-*/
-  BeamSearchBase(int64_t beam_width,
-                 int64_t top_k,
-                 int64_t request_num,
-                 int64_t sequence_length
-                 )
-      : beam_width_(beam_width),
-        top_k_(top_k),
-        request_num_(request_num),
-        sequence_length_(sequence_length),
-        n_sequences_(0)
-    {
-    n_sequences_ = request_num_ * beam_width_;
-    shapes.token_ids_shape = {{n_sequences_, sequence_length_}};
-    shapes.log_probs_shape = {{n_sequences_, 1}};
-    shapes.top_tokens_shape = {{n_sequences_, top_k_}};
-    shapes.top_probs_shape = {{n_sequences_, top_k_}};
-    shapes.output_shape = {{n_sequences_, 1}};
-  }
+
+  void set_prob_generator(ProbGenerator gen) { prob_generator_ = std::move(gen); }
+
   void create_torch_tensors() {
-    /*
-    auto opt_i32 = torch::TensorOptions().dtype(torch::kInt32).device(device_);
-    auto opt_f32 = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
-    */
     auto opt_i32 = torch::TensorOptions().dtype(torch::kInt32);
     auto opt_f32 = torch::TensorOptions().dtype(torch::kFloat32);
+
     token_ids = torch::randint(
         /*low=*/4, /*high=*/10, {n_sequences_, sequence_length_}, opt_i32);
-    log_probs = torch::zeros({n_sequences_, 1}, opt_f32);
-    log_probs[0] = 1;
-    // log_probs = log_probs.log();
-    // log_probs = log_probs.exp();
-    top_tokens =
-        torch::randint(/*low=*/4, /*high=*/10, {n_sequences_, top_k_}, opt_i32);
+    if (prob_generator_) {
+      prob_generator_(n_sequences_, top_k_, opt_f32, log_probs, top_probs);
+    } else {
+      // Default random generation if no generator is provided
+      // Generate random log_probs and top_probs in range [-1, 0]
+      log_probs = torch::rand({n_sequences_, 1}, opt_f32) - 1;
+      top_probs = torch::rand({n_sequences_, top_k_}, opt_f32) - 1;
+    }
+    top_tokens = torch::randint(/*low=*/4, /*high=*/10, {n_sequences_, top_k_}, opt_i32);
 
-    // top_probs = torch::rand({n_sequences_, top_k_}, opt_f32);
-    top_probs = torch::zeros({n_sequences_, top_k_}, opt_f32);
-    top_probs[0] = 1;
-    // top_probs = top_probs.log();
-    // top_probs = top_probs.exp();
-    output_token_ids_torch =
-        torch::zeros({n_sequences_, 1}, opt_i32);
-    output_token_ids_op =
-        torch::zeros({n_sequences_, 1}, opt_i32);
+    output_token_ids_torch = torch::zeros({n_sequences_, 1}, opt_i32);
+    output_token_ids_op = torch::zeros({n_sequences_, 1}, opt_i32);
     output_log_probs_op = torch::zeros({n_sequences_, 1}, opt_f32);
     output_log_probs_torch = torch::zeros({n_sequences_, 1}, opt_f32);
     output_token_index_op = torch::zeros({n_sequences_, 1}, opt_i32);
     output_token_index_torch = torch::zeros({n_sequences_, 1}, opt_i32);
   }
+
   int32_t beam_width_;
   int32_t top_k_;
   int32_t request_num_;
   int32_t sequence_length_;
   int32_t n_sequences_;
-//   int32_t device_id_;
-//   torch::Device device_;
   torch::Tensor token_ids;
   torch::Tensor log_probs;
   torch::Tensor top_tokens;
@@ -122,9 +120,13 @@ class BeamSearchBase {
   torch::Tensor output_token_ids_op;
   torch::Tensor output_token_index_op;
   torch::Tensor output_log_probs_op;
-  
+
   TensorShapes shapes;
+
+ private:
+  ProbGenerator prob_generator_{nullptr};
 };
+
 class BeamSearchTorch {
  public:
   BeamSearchTorch(BeamSearchBase& base) : base(base) {}
@@ -160,24 +162,6 @@ class BeamSearchTorch {
     base.output_token_ids_torch = next_tokens;
     base.output_token_index_torch = orig_seq_indices.view({-1,1});
     base.output_log_probs_torch = topk_scores;
-    /* 
-    // old version
-    torch::Tensor orig_seq_indices =
-        (base_indices + selected_beam).reshape({-1});
-
-    torch::Tensor selected_token_ids =
-        base.token_ids.index_select(0, orig_seq_indices);
-    torch::Tensor selected_top =
-        base.top_tokens.index_select(0, orig_seq_indices);
-    torch::Tensor selected_within_top_flat =
-        selected_within_top.reshape({-1}).to(torch::kLong);
-    torch::Tensor next_tokens =
-        selected_top.gather(1, selected_within_top_flat.unsqueeze(1));
-    torch::Tensor new_token_ids =
-        torch::cat({selected_token_ids, next_tokens}, 1);
-    base.output_token_ids_torch = new_token_ids;
-    */
-    
   }
 
  private:
@@ -213,6 +197,8 @@ class BeamSearchOp {
     aclDestroyTensor(top_tokens);
     aclDestroyTensor(top_probs);
     aclDestroyTensor(output_token_ids);
+    aclDestroyTensor(output_token_index);
+    aclDestroyTensor(output_log_probs);
   }
 
  private:

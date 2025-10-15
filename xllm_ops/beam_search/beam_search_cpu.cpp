@@ -82,7 +82,7 @@ ge::graphStatus TilingBeamSearchFunc::Init() {
   AscendC::TopKTilingFunc(platform_info,
                           block_size,
                           1,
-                          top_k_,
+                          align_top_k,
                           dtype_size,
                           false,
                           AscendC::TopKMode::TOPK_NORMAL,
@@ -103,7 +103,7 @@ int32_t block_size2 = (2 * align_top_k + 31)/32*32;
   AscendC::TopKTilingFunc(platform_info,
                           block_size2, // inner
                           1, // outter
-                          top_k_, // k
+                          align_top_k, // k
                           dtype_size,// dtype
                           true,
                           AscendC::TopKMode::TOPK_NORMAL,

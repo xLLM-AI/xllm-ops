@@ -38,24 +38,38 @@ protected:
     }
 };
 
-TEST_F(BeamSearchTest, BasicMatmulCorrectness) {
-    beam_search::BeamSearchBase inputs(2, 2, 2, 2);
+TEST_F(BeamSearchTest, BasicCorrectness) {
+    // basic test：only set log_probs[0]=1, top_probs[0][0]=1
+    beam_search::BeamSearchBase::ProbGenerator basic_gen =
+        [](int64_t n_sequences, int64_t top_k, const torch::TensorOptions& opt_f32,
+           torch::Tensor& log_probs, torch::Tensor& top_probs) {
+            log_probs = torch::zeros({n_sequences, 1}, opt_f32);
+            top_probs = torch::zeros({n_sequences, top_k}, opt_f32);
+            log_probs.index_put_({0, 0}, 1.0f);
+            top_probs.index_put_({0, 0}, 1.0f);
+        };
+
+    beam_search::BeamSearchBase inputs(2, 2, 2, 2, basic_gen);
     inputs.create_torch_tensors();
+
     beam_search::BeamSearchTorch op_torch(inputs);
     op_torch.process();
     beam_search::BeamSearchOp op_cann(inputs);
     op_cann.process(stream1);
-    // Compare on CPU to avoid device mismatch
+
+    // Compare on CPU
     auto out_torch_cpu = inputs.output_token_ids_torch.to(torch::kCPU);
     auto out_op_cpu = inputs.output_token_ids_op.to(torch::kCPU);
     auto out_torch_index_cpu = inputs.output_token_index_torch.to(torch::kCPU);
     auto out_op_index_cpu = inputs.output_token_index_op.to(torch::kCPU);
     auto out_torch_log_cpu = inputs.output_log_probs_torch.to(torch::kCPU).view({-1, 1});
     auto out_op_log_cpu = inputs.output_log_probs_op.to(torch::kCPU).view({-1, 1});
-    EXPECT_TRUE(torch::equal(out_torch_cpu, out_torch_cpu))
-        << "Custom op output does not match native output";
+
+    EXPECT_TRUE(torch::equal(out_torch_log_cpu, out_op_log_cpu)) << "Log probs mismatch";
+
     op_cann.destroy_tensors();
 }
+
 TEST_F(BeamSearchTest, DifferentSizes) {
     std::vector<std::tuple<int, int, int, int>> test_sizes = {
         {2, 2, 2, 2},
@@ -71,18 +85,27 @@ TEST_F(BeamSearchTest, DifferentSizes) {
     for (auto [beam_width, top_k, request_num, sequence_length] : test_sizes) {
         beam_search::BeamSearchBase inputs(beam_width, top_k, request_num, sequence_length);
         inputs.create_torch_tensors();
+
         beam_search::BeamSearchTorch op_torch(inputs);
         op_torch.process();
         beam_search::BeamSearchOp op_cann(inputs);
         op_cann.process(stream1);
+
         auto out_torch_cpu = inputs.output_token_ids_torch.to(torch::kCPU);
         auto out_op_cpu = inputs.output_token_ids_op.to(torch::kCPU);
         auto out_torch_index_cpu = inputs.output_token_index_torch.to(torch::kCPU);
         auto out_op_index_cpu = inputs.output_token_index_op.to(torch::kCPU);
         auto out_torch_log_cpu = inputs.output_log_probs_torch.to(torch::kCPU).view({-1, 1});
         auto out_op_log_cpu = inputs.output_log_probs_op.to(torch::kCPU).view({-1, 1});
-        EXPECT_TRUE(torch::equal(out_torch_log_cpu, out_op_log_cpu))
-            << "Failed for size: beam_width=" << beam_width << ", top_k=" << top_k << ", request_num=" << request_num << ", sequence_length=" << sequence_length;
+
+        bool all_equal = torch::equal(out_torch_cpu, out_op_cpu) &&
+                         torch::equal(out_torch_index_cpu, out_op_index_cpu) &&
+                         torch::equal(out_torch_log_cpu, out_op_log_cpu);
+        EXPECT_TRUE(all_equal)
+            << "Failed for size: beam_width=" << beam_width
+            << ", top_k=" << top_k << ", request_num=" << request_num
+            << ", sequence_length=" << sequence_length;
+
         op_cann.destroy_tensors();
     }
 }

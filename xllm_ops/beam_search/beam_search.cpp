@@ -163,7 +163,7 @@ BeamSearch<TokenIdType, LogProbType>::AlignUpDataCopyProbSlice(
   int32_t block_size = AlignUp(length,32 / sizeof(LogProbType));
   AscendC::DataCopyPadExtParams<LogProbType> params;
   params.isPad = true;
-  params.paddingValue = 0;
+  params.paddingValue = -1.0f / 0.0f;
   params.leftPadding = 0;
   params.rightPadding = block_size - length;
   AscendC::DataCopyExtParams copyParams;
@@ -213,15 +213,15 @@ BeamSearch<TokenIdType, LogProbType>::Psum(int32_t request_idx,AscendC::LocalTen
   for (int32_t i = 0; i < beam_width_round; i++) {
 
     LocalTensor<LogProbType> top_probs_local = top_tokens_in_que.AllocTensor<LogProbType>();
-    // AscendC::Duplicate<LogProbType>(top_probs_local, static_cast<LogProbType>(0),this->align_beam_width);
-    // AscendC::PipeBarrier<PIPE_V>();
     int32_t round_size = this->step_size;
     if (i == beam_width_round - 1 && tail_number != 0) {
+      // make sure the first inner block for TopK (32 float) is initialized
+      AscendC::Duplicate<LogProbType>(top_probs_local, static_cast<LogProbType>(-1.0f / 0.0f), 32);
       AlignUpDataCopyProbSlice(
           top_probs_local,
           top_probs_gm[request_idx * this->beam_width * this->top_k + i * this->step_size*this->top_k], this->top_k,
           tail_number);
-          round_size = tail_number;
+      round_size = tail_number;
     } else {
       AlignUpDataCopyProbSlice(
           top_probs_local,
@@ -241,7 +241,7 @@ BeamSearch<TokenIdType, LogProbType>::Psum(int32_t request_idx,AscendC::LocalTen
           log_probs_value, this->top_k);
     }
     TopKWithSorted(request_idx, top_probs_local_tmp2, prefix_top_probs,
-                   prefix_top_index, this->step_size,i);
+                   prefix_top_index, round_size, i);
     top_tokens_in_que.FreeTensor(top_probs_local_tmp2);
   }
   
@@ -265,12 +265,11 @@ __aicore__ inline void BeamSearch<TokenIdType, LogProbType>::TopKWithSorted(
   topKInfo.inner = block_size;
   topKInfo.n = round_length_top_k * this->align_top_k;
   bool isLargest = true;
-  int32_t k = this->top_k;
   LocalTensor<uint8_t> tmp_local = top_k_tmp_buf.Get<uint8_t>();
 
   AscendC::TopK<LogProbType, false, false, false,AscendC::TopKMode::TOPK_NORMAL>(
       dst_local_value, dst_local_index, top_probs_local, src_local_index,
-      src_local_finish, tmp_local, k, this->topkTilingData, topKInfo,
+      src_local_finish, tmp_local, this->align_top_k, this->topkTilingData, topKInfo,
       isLargest);
   AscendC::Adds<int32_t>(dst_local_index, dst_local_index,
                          static_cast<int32_t>((round_idx * this->step_size)*this->align_top_k),
@@ -290,7 +289,7 @@ __aicore__ inline void BeamSearch<TokenIdType, LogProbType>::TopKWithSorted(
   AscendC::DataCopy(merge_index[this->align_top_k], prefix_top_index, this->align_top_k);
   LocalTensor<LogProbType> dst_merge_probs = top_k_second_res_buf.Get<LogProbType>();
   AscendC::Duplicate<LogProbType>(dst_merge_probs, static_cast<LogProbType>(-1.0f / 0.0f),
-                              this->align_top_k);
+                              this->align_beam_width);
   LocalTensor<int32_t> dst_merge_index = top_k_second_res_index_buf.Get<int32_t>();
   AscendC::Duplicate<int32_t>(dst_merge_index, static_cast<int32_t>(0),
                               this->align_beam_width);
@@ -306,7 +305,7 @@ __aicore__ inline void BeamSearch<TokenIdType, LogProbType>::TopKWithSorted(
           merge_index,
           src_local_finish,
           tmp_local,
-          this->top_k,
+          this->align_top_k,
           this->topKTilingData1,
           topKInfo2,
           isLargest);
