@@ -351,8 +351,10 @@ __aicore__ inline void BeamSearch<TokenIdType, LogProbType>::StackWithOutput(
   LocalTensor out_token_index_local = out_token_index_out_que.AllocTensor<TokenIdType>();
   AscendC::Duplicate<int32_t>(out_token_index_local,static_cast<int32_t>(0),this->align_beam_width);
   AscendC::Adds(out_token_index_local,align_top_k_vector,static_cast<int32_t>(request_idx * this->beam_width),this->align_beam_width);
-  AlignUpDataCopyGm(out_token_index_gm[request_idx * this->beam_width],out_token_index_local,this->beam_width);
-  out_token_index_out_que.FreeTensor(out_token_index_local);
+  out_token_index_out_que.EnQue(out_token_index_local);
+  LocalTensor out_token_index_local_tmp = out_token_index_out_que.DeQue<int32_t>();
+  AlignUpDataCopyGm(out_token_index_gm[request_idx * this->beam_width], out_token_index_local_tmp, this->beam_width);
+  out_token_index_out_que.FreeTensor(out_token_index_local_tmp);
 
   // get log probs result
   LocalTensor out_log_probs_local = out_log_probs_out_que.AllocTensor<LogProbType>();
@@ -364,7 +366,6 @@ __aicore__ inline void BeamSearch<TokenIdType, LogProbType>::StackWithOutput(
 
   // get token ids result
   LocalTensor out_token_ids_local = out_token_ids_out_que.AllocTensor<TokenIdType>();
-  AscendC::Duplicate<TokenIdType>(out_token_index_local,static_cast<TokenIdType>(0),this->align_beam_width);
   AscendC::Muls(align_top_k_vector,align_top_k_vector,static_cast<int32_t>(this->top_k),this->align_beam_width);
   prefix_top_index = align_top_k_vector + align_remainder_vector;
   AscendC::Adds(prefix_top_index,prefix_top_index,static_cast<TokenIdType>(request_idx * this->beam_width * this->top_k),this->align_beam_width);

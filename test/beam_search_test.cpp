@@ -109,3 +109,38 @@ TEST_F(BeamSearchTest, DifferentSizes) {
         op_cann.destroy_tensors();
     }
 }
+
+TEST_F(BeamSearchTest, DifferentRequestNums) {
+    std::vector<std::tuple<int, int, int, int>> test_sizes = {
+        {512, 512, 1, 1},
+        {512, 512, 2, 2},
+        {512, 512, 4, 4},
+        {512, 512, 8, 8}
+    };
+    for (auto [beam_width, top_k, request_num, sequence_length] : test_sizes) {
+        beam_search::BeamSearchBase inputs(beam_width, top_k, request_num, sequence_length);
+        inputs.create_torch_tensors();
+
+        beam_search::BeamSearchTorch op_torch(inputs);
+        op_torch.process();
+        beam_search::BeamSearchOp op_cann(inputs);
+        op_cann.process(stream1);
+
+        auto out_torch_cpu = inputs.output_token_ids_torch.to(torch::kCPU);
+        auto out_op_cpu = inputs.output_token_ids_op.to(torch::kCPU);
+        auto out_torch_index_cpu = inputs.output_token_index_torch.to(torch::kCPU);
+        auto out_op_index_cpu = inputs.output_token_index_op.to(torch::kCPU);
+        auto out_torch_log_cpu = inputs.output_log_probs_torch.to(torch::kCPU).view({-1, 1});
+        auto out_op_log_cpu = inputs.output_log_probs_op.to(torch::kCPU).view({-1, 1});
+
+        bool all_equal = torch::equal(out_torch_cpu, out_op_cpu) &&
+                         torch::equal(out_torch_index_cpu, out_op_index_cpu) &&
+                         torch::equal(out_torch_log_cpu, out_op_log_cpu);
+        EXPECT_TRUE(all_equal)
+            << "Failed for size: beam_width=" << beam_width
+            << ", top_k=" << top_k << ", request_num=" << request_num
+            << ", sequence_length=" << sequence_length;
+
+        op_cann.destroy_tensors();
+    }
+}

@@ -84,6 +84,7 @@ class BeamSearchBase {
   void create_torch_tensors() {
     auto opt_i32 = torch::TensorOptions().dtype(torch::kInt32);
     auto opt_f32 = torch::TensorOptions().dtype(torch::kFloat32);
+    auto opt_f64 = torch::TensorOptions().dtype(torch::kFloat64);
 
     token_ids = torch::randint(
         /*low=*/4, /*high=*/10, {n_sequences_, sequence_length_}, opt_i32);
@@ -91,9 +92,11 @@ class BeamSearchBase {
       prob_generator_(n_sequences_, top_k_, opt_f32, log_probs, top_probs);
     } else {
       // Default random generation if no generator is provided
-      // Generate random log_probs and top_probs in range [-1, 0]
-      log_probs = torch::rand({n_sequences_, 1}, opt_f32) - 1;
-      top_probs = torch::rand({n_sequences_, top_k_}, opt_f32) - 1;
+      // Generate random log_probs and top_probs in range [-100000, 0]
+      log_probs = torch::rand({n_sequences_, 1}, opt_f64) * 100000 - 100000;
+      log_probs = log_probs.to(opt_f32);
+      top_probs = torch::rand({n_sequences_, top_k_}, opt_f64) * 100000 - 100000;
+      top_probs = top_probs.to(opt_f32);
     }
     top_tokens = torch::randint(/*low=*/4, /*high=*/10, {n_sequences_, top_k_}, opt_i32);
 
