@@ -211,23 +211,31 @@ BeamSearch<TokenIdType, LogProbType>::Psum(int32_t request_idx,AscendC::LocalTen
   LocalTensor<LogProbType> log_probs_per = log_probs_in_que.DeQue<LogProbType>();
   int32_t tail_number = this->beam_width % this->step_size;
   for (int32_t i = 0; i < beam_width_round; i++) {
-
     LocalTensor<LogProbType> top_probs_local = top_tokens_in_que.AllocTensor<LogProbType>();
-    int32_t round_size = this->step_size;
-    if (i == beam_width_round - 1 && tail_number != 0) {
-      // make sure the first inner block for TopK (32 float) is initialized
-      AscendC::Duplicate<LogProbType>(top_probs_local, static_cast<LogProbType>(-1.0f / 0.0f), 32);
-      AlignUpDataCopyProbSlice(
-          top_probs_local,
-          top_probs_gm[request_idx * this->beam_width * this->top_k + i * this->step_size*this->top_k], this->top_k,
-          tail_number);
-      round_size = tail_number;
+
+    // We need to make sure the TopK input are initialized
+    // TopK block_size is aligned to 32
+    bool is_last_round_with_tail = (i == beam_width_round - 1 && tail_number != 0);
+    int32_t round_size = is_last_round_with_tail ? tail_number : this->step_size;
+    int32_t full_round_top_k_block_size = AlignUp(this->step_size * this->align_top_k, 32);
+    if (is_last_round_with_tail) {
+      // Note: This is an issue of AscendC:
+      // The TopK op uses both topKInfo and topkTilingData as the input config
+      // TopK will use the block_size from topkTilingData, which leads to data reuse from previous round
+      // Here we simply reinit [top_probs_local, end)
+      AscendC::Duplicate<LogProbType>(top_probs_local, static_cast<LogProbType>(-1.0f / 0.0f), full_round_top_k_block_size);
     } else {
-      AlignUpDataCopyProbSlice(
-          top_probs_local,
-          top_probs_gm[request_idx * this->beam_width * this->top_k + i * this->step_size*this->top_k], this->top_k,
-          this->step_size);
+      LocalTensor top_probs_local_last_topk_block = top_probs_local[full_round_top_k_block_size - 32];
+      AscendC::Duplicate<LogProbType>(top_probs_local_last_topk_block, static_cast<LogProbType>(-1.0f / 0.0f), 32);
     }
+    int32_t eventIDVToMTE2 = static_cast<int32_t>(pipe.FetchEventID(AscendC::HardEvent::V_MTE2));	
+    AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventIDVToMTE2);	
+    AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventIDVToMTE2);
+
+    AlignUpDataCopyProbSlice(
+      top_probs_local,
+      top_probs_gm[request_idx * this->beam_width * this->top_k + i * this->step_size * this->top_k], this->top_k,
+      round_size);
     top_tokens_in_que.EnQue(top_probs_local);
 
     LocalTensor<LogProbType> top_probs_local_tmp2 = top_tokens_in_que.DeQue<LogProbType>();
