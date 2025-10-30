@@ -27,9 +27,9 @@ using namespace AscendC;
 
 // 将 XAttentionKernel 的完整声明移动到头文件，具体实现见 x_attention.cpp
 template<uint32_t HEAD_SIZE, uint32_t BLOCK_N, uint32_t BLOCK_M,uint32_t BLOCK_M_UNSHARED>
-class XAttentionKernel {
+class XAttentionTlKernel {
  public:
-  __aicore__ inline XAttentionKernel() {}
+  __aicore__ inline XAttentionTlKernel() {}
   __aicore__ inline void Init(
       GM_ADDR Q_handle,
       GM_ADDR K_handle,
@@ -227,9 +227,9 @@ class XAttentionKernel {
 };
 
 template<uint32_t HEAD_SIZE, uint32_t HEAD_NUM_COMBINE>
-class XAttentionCombine {
+class XAttentionTlCombine {
     public:
-     __aicore__ inline XAttentionCombine() {}
+     __aicore__ inline XAttentionTlCombine() {}
      __aicore__ inline void Init(
       GM_ADDR output_shared_handle,
       GM_ADDR output_unshared_handle,

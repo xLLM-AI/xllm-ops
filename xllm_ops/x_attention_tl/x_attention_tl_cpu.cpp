@@ -1,4 +1,4 @@
-#include "x_attention_tiling.h"
+#include "x_attention_tl_tiling.h"
 #include "register/op_def_registry.h"
 #include "tiling/platform/platform_ascendc.h"
 
@@ -10,16 +10,16 @@
   printf("\n")
 
 namespace optiling {
-class TilingXAttentionFunc {
+class TilingXAttentionTlFunc {
  public:
-  explicit TilingXAttentionFunc(gert::TilingContext* tiling_context)
+  explicit TilingXAttentionTlFunc(gert::TilingContext* tiling_context)
       : tiling_context_(tiling_context) {}
 
   ge::graphStatus Init();
   ge::graphStatus RunKernelTiling();
 
  private:
-  XAttentionTilingData tiling_data_;
+  XAttentionTlTilingData tiling_data_;
   gert::TilingContext* tiling_context_ = nullptr;
 
   void SetTilingKey();
@@ -36,7 +36,7 @@ class TilingXAttentionFunc {
   size_t sync_workspace_size_ = 0;
 };
 
-ge::graphStatus TilingXAttentionFunc::Init() {
+ge::graphStatus TilingXAttentionTlFunc::Init() {
   auto platform_info =
       platform_ascendc::PlatformAscendC(tiling_context_->GetPlatformInfo());
   uint32_t aic_num = platform_info.GetCoreNumAic();
@@ -63,9 +63,9 @@ ge::graphStatus TilingXAttentionFunc::Init() {
   return ge::GRAPH_SUCCESS;
 }
 
-void TilingXAttentionFunc::SetTilingKey() { tiling_context_->SetTilingKey(0); }
+void TilingXAttentionTlFunc::SetTilingKey() { tiling_context_->SetTilingKey(0); }
 
-void TilingXAttentionFunc::FillTilingData() {
+void TilingXAttentionTlFunc::FillTilingData() {
   tiling_data_.set_batch_size(batch_size_);
   tiling_data_.set_num_heads(num_heads_);
   tiling_data_.set_head_size(head_size_);
@@ -76,7 +76,7 @@ void TilingXAttentionFunc::FillTilingData() {
   tiling_data_.set_core_num(core_num_);
 }
 
-ge::graphStatus TilingXAttentionFunc::RunKernelTiling() {
+ge::graphStatus TilingXAttentionTlFunc::RunKernelTiling() {
   SetTilingKey();
   FillTilingData();
   size_t userWorkspaceSize = batch_size_ * num_heads_ *  head_size_  * beam_size_ * sizeof(float) * 6;
@@ -90,8 +90,8 @@ ge::graphStatus TilingXAttentionFunc::RunKernelTiling() {
   return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus TilingForXAttentionFunc(gert::TilingContext* context) {
-  TilingXAttentionFunc tilingObject(context);
+static ge::graphStatus TilingForXAttentionTlFunc(gert::TilingContext* context) {
+  TilingXAttentionTlFunc tilingObject(context);
   auto ret = tilingObject.Init();
   if (ret != ge::GRAPH_SUCCESS) {
     OP_LOGE(context->GetNodeName(), "tiling Init failed.");
@@ -113,9 +113,9 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context) {
 }  // namespace ge
 
 namespace ops {
-class XAttention : public OpDef {
+class XAttentionTl : public OpDef {
  public:
-  explicit XAttention(const char* name) : OpDef(name) {
+  explicit XAttentionTl(const char* name) : OpDef(name) {
     this->Input("q_handle")
         .ParamType(REQUIRED)
         .DataType({ge::DT_FLOAT16, ge::DT_BF16})
@@ -182,11 +182,11 @@ class XAttention : public OpDef {
         .Format({ge::FORMAT_ND,ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND,ge::FORMAT_ND});
     this->SetInferShape(ge::InferShape);
-    this->AICore().SetTiling(optiling::TilingForXAttentionFunc);
+    this->AICore().SetTiling(optiling::TilingForXAttentionTlFunc);
     this->AICore().AddConfig("ascend910b");
     this->AICore().AddConfig("ascend910_93");
   }
 };
 
-OP_ADD(XAttention);
+OP_ADD(XAttentionTl);
 }  // namespace ops

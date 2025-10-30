@@ -1,10 +1,10 @@
 #include "acl/acl.h"
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
-#include "x_attention.h"
+#include "x_attention_tl.h"
 using namespace Catlass;
 template<uint32_t HEAD_SIZE, uint32_t BLOCK_N, uint32_t BLOCK_M, uint32_t BLOCK_M_UNSHARED>
-__aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::Init(
+__aicore__ inline void XAttentionTlKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::Init(
     GM_ADDR Q_handle,
     GM_ADDR K_handle,
     GM_ADDR V_handle,
@@ -81,7 +81,7 @@ __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNS
 }
 
 template<uint32_t HEAD_SIZE, uint32_t BLOCK_N, uint32_t BLOCK_M, uint32_t BLOCK_M_UNSHARED>
-__aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::run() {
+__aicore__ inline void XAttentionTlKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::run() {
     cid_ = AscendC::GetBlockIdx();
     if ASCEND_IS_AIV {
       cid_ = cid_ / 2;
@@ -119,7 +119,7 @@ __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNS
   }
 //TODO: change flashattention to page attention
   template<uint32_t HEAD_SIZE, uint32_t BLOCK_N, uint32_t BLOCK_M, uint32_t BLOCK_M_UNSHARED>
-  __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::runAIC(int32_t task_id) {
+  __aicore__ inline void XAttentionTlKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::runAIC(int32_t task_id) {
     auto q_ub = ascend_ub_.GetWithOffset<half>(block_m * head_size_, 0);
     auto q_l1 = ascend_l1_.GetWithOffset<half>(block_m * head_size_, 0);
     auto k_ub = ascend_ub_.GetWithOffset<half>(block_n * head_size_, block_m * head_size_ *sizeof(half));
@@ -172,7 +172,7 @@ __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNS
     }
   }
   template<uint32_t HEAD_SIZE, uint32_t BLOCK_N, uint32_t BLOCK_M, uint32_t BLOCK_M_UNSHARED>
-  __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::runAIV(int32_t task_id) {
+  __aicore__ inline void XAttentionTlKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::runAIV(int32_t task_id) {
     auto acc_o = ascend_ub_.GetWithOffset<float>(block_m * head_size_ / 2, 0);
     auto sumexp = ascend_ub_.GetWithOffset<float>(block_m / 2, 65536);
     auto m_i = ascend_ub_.GetWithOffset<float>(block_m / 2, 65664);
@@ -251,7 +251,7 @@ __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNS
         acc_o_half[0]);
   }
   template<uint32_t HEAD_SIZE, uint32_t BLOCK_N, uint32_t BLOCK_M, uint32_t BLOCK_M_UNSHARED>
-  __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::runAicUnshared(int32_t task_id) {
+  __aicore__ inline void XAttentionTlKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::runAicUnshared(int32_t task_id) {
     auto q_ub = ascend_ub_.GetWithOffset<half>(block_m_unshared * head_size_, 0);
     auto q_l1 = ascend_l1_.GetWithOffset<half>(block_m_unshared * head_size_, 0);
     auto k_ub = ascend_ub_.GetWithOffset<half>(block_n * head_size_, block_m_unshared * head_size_ *sizeof(half));
@@ -306,7 +306,7 @@ __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNS
   }
 
   template<uint32_t HEAD_SIZE, uint32_t BLOCK_N, uint32_t BLOCK_M, uint32_t BLOCK_M_UNSHARED>
-  __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::runAivUnshared(int32_t task_id) {
+  __aicore__ inline void XAttentionTlKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNSHARED>::runAivUnshared(int32_t task_id) {
     auto acc_o = ascend_ub_.GetWithOffset<float>(block_m_unshared * head_size_, 0);
     auto sumexp = ascend_ub_.GetWithOffset<float>(block_m_unshared, 65536);
     auto m_i = ascend_ub_.GetWithOffset<float>(block_m_unshared, 65664);
@@ -384,7 +384,7 @@ __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNS
         acc_o_half[0]);
   }
   template<uint32_t HEAD_SIZE, uint32_t HEAD_NUM_COMBINE>
-  __aicore__ inline void XAttentionCombine<HEAD_SIZE, HEAD_NUM_COMBINE>::Init(
+  __aicore__ inline void XAttentionTlCombine<HEAD_SIZE, HEAD_NUM_COMBINE>::Init(
     GM_ADDR output_shared_handle,
     GM_ADDR output_unshared_handle,
     GM_ADDR Output_handle,
@@ -432,7 +432,7 @@ __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNS
 
   }
   template<uint32_t HEAD_SIZE, uint32_t HEAD_NUM_COMBINE>
-  __aicore__ inline void XAttentionCombine<HEAD_SIZE, HEAD_NUM_COMBINE>::run(){
+  __aicore__ inline void XAttentionTlCombine<HEAD_SIZE, HEAD_NUM_COMBINE>::run(){
     cid_ = AscendC::GetBlockIdx();
     if ASCEND_IS_AIV {
       for (int32_t i = 0; i < single_task_num_; ++i) {
@@ -442,7 +442,7 @@ __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNS
     }
   }
   template<uint32_t HEAD_SIZE, uint32_t HEAD_NUM_COMBINE>
-  __aicore__ inline void XAttentionCombine<HEAD_SIZE, HEAD_NUM_COMBINE>::runAIV(int32_t task_id) {
+  __aicore__ inline void XAttentionTlCombine<HEAD_SIZE, HEAD_NUM_COMBINE>::runAIV(int32_t task_id) {
     //unshared shape: batch,beam_size,heads
     //shared shape: batch,heads,tiles_q,block_m
     //shared shape: batch,heads,beam_size
@@ -511,7 +511,7 @@ __aicore__ inline void XAttentionKernel<HEAD_SIZE, BLOCK_N, BLOCK_M, BLOCK_M_UNS
         shared_half[0]);
     }
   }
-extern "C" __global__ __aicore__ void x_attention(
+extern "C" __global__ __aicore__ void x_attention_tl(
     GM_ADDR Q_handle,
     GM_ADDR K_handle,
     GM_ADDR V_handle,
@@ -531,7 +531,7 @@ extern "C" __global__ __aicore__ void x_attention(
   GET_TILING_DATA(tiling_data, tiling);
   switch (tiling_data.head_size) {
     case 128: {
-      XAttentionKernel<128, 64, 64, 1> op;
+      XAttentionTlKernel<128, 64, 64, 1> op;
       op.Init(
       Q_handle,
       K_handle,
@@ -559,7 +559,7 @@ extern "C" __global__ __aicore__ void x_attention(
       // SyncAll();
       // // 简化：固定 head_num=8 的合并核，避免读取不存在的 head_num/tiles_q 字段
       // {
-      //     XAttentionCombine<128, 8> op_combine;
+      //     XAttentionTlCombine<128, 8> op_combine;
       //     op_combine.Init(output_shared_handle,
       //       output_unshared_handle,
       //       Output_handle,
@@ -582,7 +582,7 @@ extern "C" __global__ __aicore__ void x_attention(
       break;
     }
     default: {
-      XAttentionKernel<128, 64, 64, 1> op;
+      XAttentionTlKernel<128, 64, 64, 1> op;
       op.Init(
       Q_handle,
       K_handle,
@@ -608,7 +608,7 @@ extern "C" __global__ __aicore__ void x_attention(
     );
       op.run();
       // SyncAll();
-      // XAttentionCombine<128, 8> op_combine;
+      // XAttentionTlCombine<128, 8> op_combine;
       // op_combine.Init(output_shared_handle,
       //   output_unshared_handle,
       //   Output_handle,
