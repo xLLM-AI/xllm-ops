@@ -869,6 +869,576 @@ class UnsharedFAInferKernel {
  };
  
 
+ /*
+     FASharedInferKernelShort
+     Compute Stream 短序列优化场景
+     1. BlockMmadQK
+     2. OnlineSoftmax
+     3. BlockMmadPV
+     4. EpilogueRescaleO
+ */
+ template <
+     class BlockMmadQK,
+     class BlockMmadPV,
+     class EpilogueOnlineSoftmax,
+     class EpilogueRescaleO,
+     bool PAGED_CACHE_FLAG = true
+ >
+ class SharedFAInferKernelShort {
+ public:
+     using ArchTag = typename BlockMmadQK::ArchTag;
+     using L1TileShape = typename BlockMmadQK::L1TileShape;
+     using ElementQ = typename BlockMmadQK::ElementA;
+     using LayoutQ = typename BlockMmadQK::LayoutA;
+     using ElementK = typename BlockMmadQK::ElementB;
+     using LayoutK = typename BlockMmadQK::LayoutB;
+     using ElementS = typename BlockMmadQK::ElementC;
+     using LayoutS = typename BlockMmadQK::LayoutC;
+ 
+     using ElementP = typename BlockMmadPV::ElementA;
+     using LayoutP = typename BlockMmadPV::LayoutA;
+     using ElementV = typename BlockMmadPV::ElementB;
+     using LayoutV = typename BlockMmadPV::LayoutB;
+ 
+     using ElementMask = typename EpilogueOnlineSoftmax::ElementMask;
+     using LayoutMask = typename EpilogueOnlineSoftmax::LayoutMask;
+ 
+     using ElementO = typename EpilogueRescaleO::ElementOutput;
+     using LayoutO = typename EpilogueRescaleO::LayoutOutput;
+ 
+     using ElementOTmp = typename EpilogueRescaleO::ElementInput;
+     using LayoutOTmp = typename EpilogueRescaleO::LayoutInput;
+ 
+     using ElementUpdate = typename EpilogueRescaleO::ElementUpdate;
+     using LayoutUpdate = typename EpilogueRescaleO::LayoutUpdate;
+     // Methods
+     CATLASS_DEVICE
+     SharedFAInferKernelShort(XAttentionTilingData* tilingDataPtr): faTilingData(tilingDataPtr) {
+     }
+ 
+
+    struct TaskQue {
+        uint32_t taskIdx;
+        uint64_t gmOffsetV;
+        uint64_t gmOffsetO;
+        uint32_t rowNum;
+        uint32_t stackSeqTile;
+        uint32_t kvSIdx;
+        uint32_t blockBOffset;
+        uint32_t qSeqlen;
+        uint32_t qSBlockSize;
+        uint32_t qNBlockSize;
+        uint32_t kvSLoopNumTotal;
+
+        CATLASS_DEVICE
+        TaskQue()
+        {}
+
+        CATLASS_DEVICE
+        void SetValue(uint32_t taskIdx_, uint64_t gmOffsetV_, uint64_t gmOffsetO_, uint32_t rowNum_,
+            uint32_t stackSeqTile_, uint32_t kvSIdx_, uint32_t blockBOffset_, uint32_t qSeqlen_, uint32_t qSBlockSize_,
+            uint32_t qNBlockSize_, uint32_t kvSLoopNumTotal_)
+        {
+            taskIdx = taskIdx_;
+            gmOffsetV = gmOffsetV_;
+            gmOffsetO = gmOffsetO_;
+            rowNum = rowNum_;
+            stackSeqTile = stackSeqTile_;
+            kvSIdx = kvSIdx_;
+            blockBOffset = blockBOffset_;
+            qSeqlen = qSeqlen_;
+            qSBlockSize = qSBlockSize_;
+            qNBlockSize = qNBlockSize_;
+            kvSLoopNumTotal = kvSLoopNumTotal_;
+        }
+    };
+
+     template <int32_t CORE_TYPE = g_coreType>
+     CATLASS_DEVICE void operator()(XAttnKernelParams const &params);
+ 
+     template <>
+     CATLASS_DEVICE void operator()<AscendC::AIC>(XAttnKernelParams const &params) {
+         AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
+         AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
+
+         AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
+         AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID1);
+         AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID0);
+         AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID1);
+         AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
+        // TODO L1TileShape可能会有区别
+        static constexpr uint32_t L1_QK_SIZE =
+            BlockMmadQK::L1TileShape::M * BlockMmadQK::L1TileShape::K * sizeof(ElementQ);
+
+         BlockMmadQK blockMmadQK(resource);
+         BlockMmadPV blockMmadPV(resource, L1_QK_SIZE);
+ 
+         //__gm__ XATilingData *faTilingData = reinterpret_cast<__gm__ XATilingData *>(params.tiling);
+         uint64_t mm1OutSize = faTilingData->mm1OutSize;
+         uint64_t smOnlineOutSize = faTilingData->smOnlineOutSize;
+         uint32_t batch = faTilingData->batch;  // requestNum 
+         uint32_t beamSize = faTilingData->beamSize; 
+         uint32_t qHeads = faTilingData->numHeads;
+         uint32_t kvHeads = faTilingData->kvHeads;
+         uint32_t embed = faTilingData->embeddingSize;
+         uint32_t pagedBlockSize = faTilingData->blockSize;
+         uint32_t sharedCoreNum = faTilingData->sharedCoreNum;
+         uint32_t maxNumBlocksPerBatch = faTilingData->maxNumBlocksPerBatch;
+         uint32_t curTotalTaskNum = faTilingData->firstSharedBatchTaskNum;
+         uint32_t totalTaskNum = faTilingData->sharedTotalTaskNum;
+         uint32_t blockSize = faTilingData->blockSize;
+         uint32_t maskType = faTilingData->maskType;
+         float scaleValue = faTilingData->scaleValue;
+ 
+         AscendC::GlobalTensor<ElementQ> gQ;
+         gQ.SetGlobalBuffer((__gm__ ElementQ *)params.q);
+         AscendC::GlobalTensor<ElementK> gK;
+         gK.SetGlobalBuffer((__gm__ ElementK *)params.k_cache);
+         AscendC::GlobalTensor<ElementK> gV;
+         gV.SetGlobalBuffer((__gm__ ElementK *)params.v_cache);
+         AscendC::GlobalTensor<int32_t> gBlockTable;
+         gBlockTable.SetGlobalBuffer((__gm__ int32_t *)(params.blockTables));
+         //AscendC::GlobalTensor<int64_t> gActualQseqlen;
+         //gActualQseqlen.SetGlobalBuffer((__gm__ int64_t *)params.actualQseqlen);
+         AscendC::GlobalTensor<int32_t> gActualKvseqlen;
+         gActualKvseqlen.SetGlobalBuffer((__gm__ int32_t *)params.actualKvseqlen);
+         AscendC::GlobalTensor<ElementS> gS;
+         gS.SetGlobalBuffer((__gm__ ElementS *)params.s);
+         AscendC::GlobalTensor<ElementP> gP;
+         gP.SetGlobalBuffer((__gm__ ElementP *)params.p);
+         AscendC::GlobalTensor<ElementOTmp> gOTmp;
+         gOTmp.SetGlobalBuffer((__gm__ ElementOTmp *)params.oTemp);
+         AscendC::GlobalTensor<ElementS> gSharedO;
+         gSharedO.SetGlobalBuffer((__gm__ ElementS *)params.shared_workspace);
+ 
+         uint64_t strideQO = qHeads * embed;
+         uint64_t strideKV = kvHeads * embed;
+         uint32_t embedRound = RoundUp<BLOCK_SIZE>(embed);
+         uint32_t groupSize = qHeads / kvHeads;
+ 
+         uint32_t coreIdx = AscendC::GetBlockIdx();
+         uint32_t coreNum = sharedCoreNum; // TODO coreNum Need To be modified
+         uint32_t preTotalTaskNum = 0;
+         uint32_t curBatch = 0;
+         uint64_t qBOffset = 0;
+         uint64_t kBOffset = 0;
+         uint64_t vBOffset = 0;
+         uint64_t blockBOffset = 0;
+         uint64_t oBOffset = 0; 
+
+         int64_t qSeqlen = 0;
+         int64_t kvSeqlen = 0;
+         uint32_t curQNBlockTile;
+         uint32_t qNBlockNumPerGroup;
+         uint32_t curQNBlockNum;
+         int64_t curQSBlockTile;
+         uint32_t curQSBlockNum;
+         uint32_t blockStackNum = 4;
+         uint32_t stackSeqTilePad = blockStackNum * pagedBlockSize;
+
+         qSeqlen = beamSize;
+         kvSeqlen = gActualKvseqlen.GetValue(curBatch);
+         curQSBlockTile = GetQSBlockTile(kvSeqlen);
+         curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
+         qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile);
+         curQNBlockNum = qNBlockNumPerGroup * kvHeads;
+         curQSBlockNum = CeilDiv(qSeqlen, curQSBlockTile);
+        
+         uint32_t l1KPPingPongFlag = 0;
+         uint32_t l0ABPingPongFlag = 0;
+         uint32_t l0CPingPongFlag = 0;
+         uint32_t workspaceStagesFlag = 0;
+         uint32_t loopCnt = 0;
+         TaskQue taskQue[PRE_LAUNCH + 1];
+         LayoutK layoutKTemp(strideKV, stackSeqTilePad);
+         LayoutV layoutVTemp(stackSeqTilePad, strideKV);
+
+         for (uint32_t taskIdx = coreIdx; taskIdx < totalTaskNum + PRE_LAUNCH * coreNum; taskIdx += uint32_t(coreNum)) {
+            while(taskIdx >= curTotalTaskNum && taskIdx < totalTaskNum) {
+                ++curBatch;
+                preTotalTaskNum = curTotalTaskNum;
+                qBOffset += qSeqlen * strideQO;
+                blockBOffset += maxNumBlocksPerBatch;
+                oBOffset += qSeqlen * strideQO;
+
+                kvSeqlen = gActualKvseqlen.GetValue(curBatch);
+                curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
+                qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile);
+                curQNBlockNum = qNBlockNumPerGroup * kvHeads;
+                curQSBlockTile = GetQSBlockTile(kvSeqlen);
+                curQSBlockNum = CeilDiv(qSeqlen, curQSBlockTile);
+                curTotalTaskNum += curQNBlockNum * curQSBlockNum;
+            }
+            uint32_t taskIdxCurBatch = taskIdx - preTotalTaskNum;
+            uint32_t qSBlockIdx = taskIdxCurBatch / curQNBlockNum;
+            uint32_t qNBlockIdx = taskIdxCurBatch - qSBlockIdx * curQNBlockNum;
+            uint32_t qNBlockIdxCurGroup = qNBlockIdx % qNBlockNumPerGroup;
+
+            uint32_t kvHeadIdx = qNBlockIdx / qNBlockNumPerGroup;
+            uint32_t qHeadIdx = kvHeadIdx * groupSize + qNBlockIdxCurGroup * curQNBlockTile;
+
+            uint64_t gmOffsetQ = qBOffset + qSBlockIdx * curQSBlockTile * strideQO + qHeadIdx * embed;
+            uint64_t gmOffsetK = kBOffset + kvHeadIdx * embed;
+            uint64_t gmOffsetV = vBOffset + kvHeadIdx * embed;
+            uint64_t gmOffsetO = oBOffset + qSBlockIdx * curQSBlockTile * strideQO + qHeadIdx * embed;
+
+            uint32_t qSBlockSize =
+                (qSBlockIdx == (curQSBlockNum - 1)) ? (qSeqlen - qSBlockIdx * curQSBlockTile) : curQSBlockTile;
+            uint32_t qNBlockSize = (qNBlockIdxCurGroup == (qNBlockNumPerGroup - 1))
+                                       ? (groupSize - qNBlockIdxCurGroup * curQNBlockTile)
+                                       : curQNBlockTile; 
+
+            uint32_t rowNum = qSBlockSize * qNBlockSize;
+            uint32_t noSkipKvS = kvSeqlen;
+            uint32_t kvSLoopNumTotal = CeilDiv(noSkipKvS, pagedBlockSize);
+            if (taskIdx >= totalTaskNum) {
+                kvSLoopNumTotal = 1;
+            }
+
+            uint32_t stackSeqTile;
+
+            LayoutQ layoutQTemp(rowNum, embed);
+            if (taskIdx < totalTaskNum) {
+                blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTemp, rowNum, qNBlockSize, qHeads);
+            } 
+
+            for (uint32_t kvSIdx = 0; kvSIdx < kvSLoopNumTotal; kvSIdx += blockStackNum) {
+                if (taskIdx < totalTaskNum) {
+                    if (kvSIdx + blockStackNum > kvSLoopNumTotal - 1) {
+                        stackSeqTile = noSkipKvS - kvSIdx * pagedBlockSize;
+                    } else {
+                        stackSeqTile = stackSeqTilePad;
+                    }
+                    uint64_t gmOffsetS = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (PRE_LAUNCH + 1)
+                    + workspaceStagesFlag * WORKSPACE_BLOCK_SIZE_DB;
+                    uint32_t taskStagesFlag = (taskIdx / coreNum) % (PRE_LAUNCH + 1);
+                    GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
+                    LayoutS layOutS(rowNum, stackSeqTile, stackSeqTilePad);
+
+                    blockMmadQK(gQ[gmOffsetQ],
+                    gK[gmOffsetK],
+                    gS[gmOffsetS],
+                    gBlockTable[blockBOffset],
+                    layoutQTemp,
+                    layoutKTemp,
+                    layOutS,
+                    actualBlockShapeQK,
+                    kvSIdx,
+                    pagedBlockSize,
+                    strideKV,
+                    l1KPPingPongFlag,
+                    l0ABPingPongFlag,
+                    l0CPingPongFlag);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(qkReady);
+
+                    taskQue[workspaceStagesFlag].SetValue(taskIdx,
+                        gmOffsetV,
+                        gmOffsetO,
+                        rowNum,
+                        stackSeqTile,
+                        kvSIdx,
+                        blockBOffset,
+                        qSeqlen,
+                        qSBlockSize,
+                        qNBlockSize,
+                        kvSLoopNumTotal);
+                }
+                if (loopCnt >= PRE_LAUNCH) {
+                    uint32_t nowWorkspaceStagesFlag =
+                        (workspaceStagesFlag + (PRE_LAUNCH + 1) - PRE_LAUNCH) % (PRE_LAUNCH + 1);
+                    uint32_t nowTaskStagesFlag = (taskQue[nowWorkspaceStagesFlag].taskIdx / coreNum) % (PRE_LAUNCH + 1);
+                    uint32_t nowkvSIdx = taskQue[nowWorkspaceStagesFlag].kvSIdx;
+                    uint32_t nowRowNum = taskQue[nowWorkspaceStagesFlag].rowNum;
+                    stackSeqTile = taskQue[nowWorkspaceStagesFlag].stackSeqTile;
+                    uint64_t gmOffsetOTmp = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (PRE_LAUNCH + 1) +
+                                            nowWorkspaceStagesFlag * WORKSPACE_BLOCK_SIZE_DB;
+                    GemmCoord actualBlockShapePV{nowRowNum, embed, stackSeqTile};
+                    LayoutOTmp layoutOTmp(nowRowNum, embed, embedRound);
+                    LayoutP layoutPTemp(nowRowNum, stackSeqTile, stackSeqTilePad);
+                    uint64_t gmOffsetP = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (PRE_LAUNCH + 1) +
+                                         nowWorkspaceStagesFlag * WORKSPACE_BLOCK_SIZE_DB;
+                    blockMmadPV(gP[gmOffsetP],
+                        gV[taskQue[nowWorkspaceStagesFlag].gmOffsetV],
+                        gOTmp[gmOffsetOTmp],
+                        gBlockTable[taskQue[nowWorkspaceStagesFlag].blockBOffset],
+                        layoutPTemp,
+                        layoutVTemp,
+                        layoutOTmp,
+                        actualBlockShapePV,
+                        nowkvSIdx,
+                        pagedBlockSize,
+                        strideKV,
+                        softmaxReady,
+                        l1KPPingPongFlag,
+                        l0ABPingPongFlag,
+                        l0CPingPongFlag);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(pvReady);
+                }
+                loopCnt++;
+                workspaceStagesFlag = (workspaceStagesFlag + 1) % (PRE_LAUNCH + 1);
+            }
+
+         }
+ 
+         AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
+         AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
+ 
+         AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
+         AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID1);
+ 
+         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID0);
+         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID1);
+         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
+     }
+ 
+ 
+     template <>
+     CATLASS_DEVICE void operator()<AscendC::AIV>(XAttnKernelParams const &params) {
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID4);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
+
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
+ 
+         // Get tiling parameters
+         //__gm__ XATilingData *faTilingData = reinterpret_cast<__gm__ XATilingData *>(params.tiling);
+         uint64_t mm1OutSize = faTilingData->mm1OutSize;
+         uint64_t smOnlineOutSize = faTilingData->smOnlineOutSize;
+         uint64_t mm2OutSize = faTilingData->mm2OutSize;
+         uint32_t batch = faTilingData->batch;
+         uint32_t beamSize = faTilingData->beamSize;
+         uint32_t qHeads = faTilingData->numHeads;
+         uint32_t kvHeads = faTilingData->kvHeads;
+         uint32_t embed = faTilingData->embeddingSize;
+         uint32_t sharedCoreNum = faTilingData->sharedCoreNum;
+         uint32_t pagedBlockSize = faTilingData->blockSize;
+         uint32_t maxNumBlocksPerBatch = faTilingData->maxNumBlocksPerBatch;
+         uint32_t firstBatchTaskNum = faTilingData->firstSharedBatchTaskNum;
+         uint32_t totalTaskNum = faTilingData->sharedTotalTaskNum;
+         uint32_t maskType = faTilingData->maskType;
+         float scaleValue = faTilingData->scaleValue;
+         
+         uint64_t gOffsetTempO = batch * beamSize * qHeads * embed;
+         uint64_t gMaxOffset = batch * beamSize * qHeads * SOFTMAX_BROAD_SIZE;
+         // Get the memory offset address of the input on Global Memory
+         //AscendC::GlobalTensor<ElementMask> gMask;
+         //gMask.SetGlobalBuffer((__gm__ ElementMask *)params.mask);
+         //AscendC::GlobalTensor<int64_t> gActualQseqlen;
+         //gActualQseqlen.SetGlobalBuffer((__gm__ int64_t *)params.actualQseqlen);
+         AscendC::GlobalTensor<int32_t> gActualKvseqlen;
+         gActualKvseqlen.SetGlobalBuffer((__gm__ int32_t *)params.actualKvseqlen);
+         AscendC::GlobalTensor<ElementO> gO;
+         gO.SetGlobalBuffer((__gm__ ElementO *)params.o);
+         AscendC::GlobalTensor<ElementS> gS;
+         gS.SetGlobalBuffer((__gm__ ElementS *)params.s);
+         AscendC::GlobalTensor<ElementP> gP;
+         gP.SetGlobalBuffer((__gm__ ElementP *)params.p);
+         AscendC::GlobalTensor<ElementOTmp> gOTmp;
+         gOTmp.SetGlobalBuffer((__gm__ ElementOTmp *)params.oTemp);
+         AscendC::GlobalTensor<ElementOTmp> gOUpdate;
+         gOUpdate.SetGlobalBuffer((__gm__ ElementOTmp *)params.oUpdate);
+ 
+         // shared Gm and Gl output
+         AscendC::GlobalTensor<float> gSharedO;
+         AscendC::GlobalTensor<ElementS> gSharedSum;
+         AscendC::GlobalTensor<ElementS> gSharedMax;
+         gSharedO.SetGlobalBuffer((__gm__ float *)params.shared_workspace);
+         gSharedMax.SetGlobalBuffer((__gm__ ElementS *)params.shared_workspace + gOffsetTempO);
+         gSharedSum.SetGlobalBuffer((__gm__ ElementS *)params.shared_workspace + gOffsetTempO + gMaxOffset);
+         
+
+         uint32_t groupSize = qHeads / kvHeads;
+         uint32_t embedRound = RoundUp(embed, BLOCK_SIZE);
+ 
+         EpilogueOnlineSoftmax epilogueOnlineSoftmax(resource, scaleValue);
+         EpilogueRescaleO epilogueRescaleO(resource);
+ 
+         // uint32_t curTotalTaskNum = 0;
+         uint32_t preTotalTaskNum = 0;
+         uint32_t curBatch = 0;
+         uint32_t oBOffset = 0;
+         uint32_t qSeqlen = static_cast<uint32_t>(beamSize);
+         uint32_t kvSeqlen = static_cast<uint32_t>(gActualKvseqlen.GetValue(curBatch));
+         uint32_t curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
+         uint32_t qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile);
+         uint32_t curQNBlockNum = qNBlockNumPerGroup * kvHeads;
+         uint32_t curQSBlockTile = GetQSBlockTile(kvSeqlen);
+         uint32_t curQSBlockNum = CeilDiv(qSeqlen, curQSBlockTile);
+         uint32_t curTotalTaskNum = firstBatchTaskNum;
+         uint32_t blockStackNum = 4;
+         uint32_t stackSeqTilePad = blockStackNum * pagedBlockSize; 
+         uint32_t coreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
+         // coreNum Need to be changed TODO
+         uint32_t coreNum = sharedCoreNum;
+
+         TaskQue taskQue[PRE_LAUNCH + 1];
+         uint32_t loopCnt = 0;
+         uint32_t workspaceStagesFlag = 0;
+         // Go through each task.
+         for (uint32_t taskIdx = coreIdx; taskIdx < totalTaskNum + PRE_LAUNCH * coreNum; taskIdx += uint32_t(coreNum)) {
+             // Get the offset of each core on the GM.
+             while (taskIdx >= curTotalTaskNum && taskIdx < totalTaskNum) {
+                 curBatch++;
+                 oBOffset += qSeqlen * qHeads * embed;
+                 preTotalTaskNum = curTotalTaskNum;
+                 qSeqlen = static_cast<uint32_t>(beamSize);
+                 kvSeqlen = static_cast<uint32_t>(gActualKvseqlen.GetValue(curBatch));
+                 curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
+                 qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile);
+                 curQNBlockNum = qNBlockNumPerGroup * kvHeads;
+                 curQSBlockTile = GetQSBlockTile(kvSeqlen);
+                 curQSBlockNum = CeilDiv(qSeqlen, curQSBlockTile);
+                 curTotalTaskNum += curQNBlockNum * curQSBlockNum;
+             }
+             uint32_t taskIdxCurBatch = taskIdx - preTotalTaskNum;
+             uint32_t qSBlockIdx = taskIdxCurBatch / curQNBlockNum;
+             uint32_t qNBlockIdx = taskIdxCurBatch % curQNBlockNum;
+             uint32_t qNBlockIdxCurGroup = qNBlockIdx % qNBlockNumPerGroup;
+ 
+             uint32_t oSOffset = qSBlockIdx * curQSBlockTile * qHeads * embed;
+             uint32_t kvNIdx = qNBlockIdx / qNBlockNumPerGroup;
+             uint32_t qStartNIdx = kvNIdx * groupSize + qNBlockIdxCurGroup * curQNBlockTile;
+             uint32_t oNOffset = qStartNIdx * embed;
+             uint32_t gmOffsetO = oBOffset + oSOffset + oNOffset;
+    
+             // shared sum max workspace offset
+             // Calculate shared workspace offset for this core's task
+             // gsharedout size: [batch*beamSize, numHeads, 8]
+             // Each core handles: [qSBlockSize, qNBlockSize] elements
+             // Offset = curBatch * beamSize * qHeads * 8 + qSBlockIdx * curQSBlockTile * qHeads * 8 + qStartNIdx * 8;
+             uint32_t gSharedOffset = curBatch * qSeqlen * qHeads * SOFTMAX_BROAD_SIZE + 
+             qSBlockIdx * curQSBlockTile * qHeads * SOFTMAX_BROAD_SIZE + qStartNIdx * SOFTMAX_BROAD_SIZE;
+             
+             
+             uint32_t qSBlockSize = (qSBlockIdx == (curQSBlockNum - 1)) ? (qSeqlen - qSBlockIdx * curQSBlockTile)
+                                                                        : curQSBlockTile;
+             uint32_t qNBlockSize = (qNBlockIdxCurGroup == (qNBlockNumPerGroup - 1))
+                                        ? (groupSize - qNBlockIdxCurGroup * curQNBlockTile)
+                                        : curQNBlockTile;
+             uint32_t rowNum = qSBlockSize * qNBlockSize;
+             uint32_t rowNumRound = RoundUp(rowNum, BLOCK_SIZE);
+ 
+             uint32_t noSkipKvS = kvSeqlen;
+             uint32_t noMaskKvS = kvSeqlen;
+             uint32_t noMaskTailS = 0;
+            
+             uint32_t stackSeqTile = 0;
+             uint32_t kvSLoopNumTotal = CeilDiv(noSkipKvS, pagedBlockSize);
+             if (taskIdx >= totalTaskNum) {
+                kvSLoopNumTotal = 1;
+             }
+             uint32_t isLastStackTile = 0;
+             // no mask kvSeqlen loop
+             for (uint32_t kvSIdx = 0; kvSIdx < kvSLoopNumTotal; kvSIdx += blockStackNum) {
+                if (taskIdx < totalTaskNum) {
+                    if (kvSIdx + blockStackNum > kvSLoopNumTotal - 1) {
+                        stackSeqTile = noSkipKvS - kvSIdx * pagedBlockSize;
+                        isLastStackTile = 1;
+                    } else {
+                        stackSeqTile = stackSeqTilePad;
+                    }
+                    uint64_t gmOffsetS = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (PRE_LAUNCH + 1) +
+                                         workspaceStagesFlag * WORKSPACE_BLOCK_SIZE_DB;
+                    uint32_t taskStagesFlag = (taskIdx / coreNum) % (PRE_LAUNCH + 1);
+                    GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
+                    LayoutS layOutS(rowNum, stackSeqTile, stackSeqTilePad); 
+                    LayoutP layOutP(rowNum, stackSeqTile, stackSeqTilePad);
+                    uint64_t gmOffsetP = gmOffsetS;
+                    uint32_t kvSStartIdx = kvSIdx * pagedBlockSize;
+                    uint32_t kvSEndIdx = kvSStartIdx + stackSeqTile;
+                    Arch::CrossCoreWaitFlag(qkReady);
+                    epilogueOnlineSoftmax(
+                        gP[gmOffsetP], gS[gmOffsetS], gSharedMax[gSharedOffset], gSharedSum[gSharedOffset], 
+                        layOutP, layOutS, actualBlockShapeQK, (kvSIdx == 0),
+                        isLastStackTile, qSBlockSize, qNBlockSize, workspaceStagesFlag, qHeads
+                    );
+                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(softmaxReady);
+                    taskQue[workspaceStagesFlag].SetValue(taskIdx,
+                    0,
+                    gmOffsetO,
+                    rowNum,
+                    stackSeqTile,
+                    kvSIdx,
+                    0,
+                    qSeqlen,
+                    qSBlockSize,
+                    qNBlockSize,
+                    kvSLoopNumTotal);
+
+                }
+                if (loopCnt >= PRE_LAUNCH) {
+                    uint32_t nowWorkspaceStagesFlag =
+                        (workspaceStagesFlag + (PRE_LAUNCH + 1) - PRE_LAUNCH) % (PRE_LAUNCH + 1);
+                    uint32_t nowTaskStagesFlag = (taskQue[nowWorkspaceStagesFlag].taskIdx / coreNum) % (PRE_LAUNCH + 1);
+                    uint32_t nowkvSIdx = taskQue[nowWorkspaceStagesFlag].kvSIdx;
+                    uint32_t nowRowNum = taskQue[nowWorkspaceStagesFlag].rowNum;
+                    stackSeqTile = taskQue[nowWorkspaceStagesFlag].stackSeqTile;
+                    // uint32_t curStackTileMod = (stackSeqCount - PRE_LAUNCH) % (PRE_LAUNCH + 1);
+                    uint64_t gmOffsetOTmp = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (PRE_LAUNCH + 1) +
+                                            nowWorkspaceStagesFlag * WORKSPACE_BLOCK_SIZE_DB;
+                    GemmCoord actualBlockShapePV{nowRowNum, embed, stackSeqTile};
+                    LayoutOTmp layoutOTmp(nowRowNum, embed, embedRound);
+                                        LayoutO layoutO(taskQue[nowWorkspaceStagesFlag].qSeqlen, embed * qHeads);
+                    LayoutUpdate layoutUpdate(nowRowNum, embed, embedRound);
+                    uint64_t gmOffsetUpdate = (uint64_t)(coreIdx * WORKSPACE_BLOCK_SIZE_DB);
+
+                    Arch::CrossCoreWaitFlag(pvReady);
+                    // rescale O
+                    epilogueRescaleO(
+                        gO[taskQue[nowWorkspaceStagesFlag].gmOffsetO], 
+                        gOTmp[gmOffsetOTmp], 
+                        gSharedO[taskQue[nowWorkspaceStagesFlag].gmOffsetO], 
+                        layoutO, layoutOTmp, actualBlockShapePV, 
+                        taskQue[nowWorkspaceStagesFlag].qSBlockSize,
+                        taskQue[nowWorkspaceStagesFlag].qNBlockSize,
+                        (nowkvSIdx == 0),
+                        nowkvSIdx + blockStackNum >= taskQue[nowWorkspaceStagesFlag].kvSLoopNumTotal, 
+                        nowWorkspaceStagesFlag
+                    );
+                    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+                }
+          
+                     
+             }
+             loopCnt++;
+             workspaceStagesFlag = (workspaceStagesFlag + 1) % (PRE_LAUNCH + 1); 
+                
+      
+         }
+ 
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID4);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
+
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
+     }
+ 
+ private:
+     Arch::Resource<ArchTag> resource;
+     Arch::CrossCoreFlag qkReady{QK_READY_ID};
+     Arch::CrossCoreFlag softmaxReady{SOFTMAX_READY_ID};
+     Arch::CrossCoreFlag pvReady{PV_READY_ID};
+     XAttentionTilingData* faTilingData;
+ };
+
+
 template <class EpilogueCombineScale>
 class CombineScaleKernel {
 public:
