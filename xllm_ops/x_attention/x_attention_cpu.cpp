@@ -199,8 +199,8 @@ ge::graphStatus TilingXAttentionFunc::FillBasicTilingData()
   auto sharedBlockTableShape = tiling_context_->GetInputShape(SHARED_BLOCK_TABLE)->GetStorageShape();
   
   int32_t numTokens = queryShape.GetDim(0);
-  int32_t qHeadNum = queryShape.GetDim(2);
-  int32_t embeddingSize = queryShape.GetDim(3);
+  int32_t qHeadNum = queryShape.GetDim(1);
+  int32_t embeddingSize = queryShape.GetDim(2);
   int32_t batch = sharedBlockTableShape.GetDim(0);
   int32_t maxNumBlocksPerBatch = sharedBlockTableShape.GetDim(1);
   int32_t blockNum = sharedKeyBlockShape.GetDim(0);
