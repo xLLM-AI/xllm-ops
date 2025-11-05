@@ -11,7 +11,7 @@ PYTORCH_NPU_INSTALL_PATH = os.path.dirname(os.path.abspath(torch_npu.__file__))
 USE_NINJA = os.getenv('USE_NINJA') == '1'
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 
-source_files = glob.glob(os.path.join(BASE_DIR, "csrc", "*.cpp"), recursive=True)
+source_files = glob.glob(os.path.join(BASE_DIR, "*.cpp"), recursive=True)
 
 exts = []
 ext = NpuExtension(

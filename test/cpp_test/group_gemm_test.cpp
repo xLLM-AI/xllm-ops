@@ -21,7 +21,7 @@ limitations under the License.
 #include <tuple>
 
 #include "group_gemm.h"
-#include "base/utils_tensor.h"
+#include "utils_tensor.h"
 
 class GroupGemmTest : public ::testing::Test {
 protected:

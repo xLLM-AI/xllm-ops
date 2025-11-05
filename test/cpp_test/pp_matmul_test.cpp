@@ -20,7 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "pp_matmul.h"
-#include "base/utils_tensor.h"
+#include "utils_tensor.h"
 
 class PPMatmulTest : public ::testing::Test {
 protected:
@@ -39,7 +39,7 @@ protected:
 };
 
 TEST_F(PPMatmulTest, BasicMatmulCorrectness) {
-    pp_matmul::PPMatmulBase inputs(16, 7168, 2048);
+    pp_matmul::PPMatmulBase inputs(16, 12800, 5120);
     inputs.create_torch_tensors();
     pp_matmul::PPMatmulOp op_gemm(inputs);
     op_gemm.process(stream1);
@@ -53,9 +53,9 @@ TEST_F(PPMatmulTest, BasicMatmulCorrectness) {
 
 TEST_F(PPMatmulTest, DifferentSizes) {
     std::vector<std::tuple<int, int, int>> test_sizes = {
-        {1, 7168, 2048},
-        {2, 7168, 2048},
-        {4, 7168, 2048}
+        {1, 12800, 5120},
+        {2, 12800, 5120},
+        {4, 12800, 5120}
     };
     
     for (auto [m, n, k] : test_sizes) {

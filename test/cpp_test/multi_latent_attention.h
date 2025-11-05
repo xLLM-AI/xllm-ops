@@ -18,8 +18,8 @@ limitations under the License.
 #define MULTI_LATENT_ATTENTION_H
 
 #include "aclnn_multi_latent_attention.h"
-#include "base/utils_print.h"
-#include "base/utils_tensor.h"
+#include "utils_print.h"
+#include "utils_tensor.h"
 
 #define print_tensor_shape(tensor) \
     do { \

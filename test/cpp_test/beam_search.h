@@ -24,7 +24,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 #include <functional>
-#include "base/utils_tensor.h"
+#include "utils_tensor.h"
 #include "aclnn_beam_search_group.h"
 
 namespace beam_search {

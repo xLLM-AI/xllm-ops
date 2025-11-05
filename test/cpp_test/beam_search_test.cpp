@@ -20,7 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "beam_search.h"
-#include "base/utils_tensor.h"
+#include "utils_tensor.h"
 
 class BeamSearchTest : public ::testing::Test {
 protected:

@@ -21,7 +21,7 @@ limitations under the License.
 #include <tuple>
 
 #include "multi_latent_attention.h"
-#include "base/utils_tensor.h"
+#include "utils_tensor.h"
 
 class MultiLatentAttentionTest : public ::testing::Test {
 protected:

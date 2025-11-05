@@ -19,8 +19,8 @@ limitations under the License.
 
 #include "aclnn_pp_mat_mul.h"
 #include "aclnn_pp_matmul_opt.h"
-#include "base/utils_print.h"
-#include "base/utils_tensor.h"
+#include "utils_print.h"
+#include "utils_tensor.h"
 
 namespace pp_matmul {
 struct TensorShapes {
@@ -119,6 +119,9 @@ int PPMatmulNative::execute_pp_matmul_operator(aclTensor* input_a,
   ret = aclnnPpMatMul(workspaceAddr, workspaceSize, executor, stream);
   CHECK_ACL_SUCCESS(ret, "aclnn_pp_matmul_operator execute failed");
 
+  ret = aclrtSynchronizeStream(stream);
+  CHECK_ACL_SUCCESS(ret, "aclnn_pp_matmul_operator synchronize stream failed");
+
   if (workspaceSize > 0) {
     aclrtFree(workspaceAddr);
   }
@@ -176,6 +179,9 @@ int PPMatmulOp::execute_pp_matmul_op_operator(aclTensor* input_a,
   }
   ret = aclnnPpMatmulOpt(workspaceAddr, workspaceSize, executor, stream);
   CHECK_ACL_SUCCESS(ret, "aclnn_pp_matmul_op_operator failed");
+
+  ret = aclrtSynchronizeStream(stream);
+  CHECK_ACL_SUCCESS(ret, "aclnn_pp_matmul_op_operator synchronize stream failed");
 
   if (workspaceSize > 0) {
     aclrtFree(workspaceAddr);

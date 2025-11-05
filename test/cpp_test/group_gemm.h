@@ -19,8 +19,8 @@ limitations under the License.
 
 #include "aclnn_index_group_matmul.h"
 #include "aclnnop/aclnn_grouped_matmul_v4.h"
-#include "base/utils_print.h"
-#include "base/utils_tensor.h"
+#include "utils_print.h"
+#include "utils_tensor.h"
 namespace group_gemm {
 class GroupGemmBase {
  public:

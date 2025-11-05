@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "aclnn_x_attention.h"
-#include "base/utils_tensor.h"
+#include "utils_tensor.h"
 
 namespace xattention {
 struct TensorShapes {
