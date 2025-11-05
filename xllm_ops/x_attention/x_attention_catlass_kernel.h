@@ -104,10 +104,19 @@ class UnsharedFAInferKernel {
         uint32_t taskEndIdx = taskStartIdx + (relativeCoreIdx >= unsharedFullCoreNum ? unsharedTaskNumTail : unsharedTaskNumHead);
         //cce::printf("aic blockIdx:%d, sub block num:%d, loopCount:%d\n", coreIdx, AscendC::GetSubBlockNum(), taskEndIdx - taskStartIdx);
         
-        int64_t gmQOffset = taskStartIdx * groupSize * unshareGroupCountPerLoop * embeddingSize;
-        int64_t gmKVOffset = taskStartIdx * maxDecodeStep * unshareGroupCountPerLoop * embeddingSize;
-        uint64_t gmSOffset = coreNumShared * WORKSPACE_BLOCK_SIZE_DB + relativeCoreIdx * UNSHARED_WORKSPACE_BLOCK_SIZE_DB;
+        int64_t qOBaseBlockSize = groupSize * unshareGroupCountPerLoop * embeddingSize;
+        int64_t kvBaseBlockSize = maxDecodeStep * unshareGroupCountPerLoop * embeddingSize;
+        int64_t gmQOffset = taskStartIdx * qOBaseBlockSize;
+        int64_t gmOOffset = gmQOffset;
+        int64_t gmKOffset = taskStartIdx * kvBaseBlockSize;
+        int64_t gmVOffset = gmKOffset;
+        uint64_t gmSOffset = (coreNumShared * WORKSPACE_BLOCK_SIZE_DB +
+                              relativeCoreIdx * UNSHARED_WORKSPACE_BLOCK_SIZE_DB) * NUM3;
         uint64_t gmPOffset = gmSOffset;
+        uint64_t sRelativeOffset = 0;
+        uint64_t pRelativeOffset = 0;
+        uint64_t actualPOffset = 0;
+        uint64_t actualSOffset = 0;
 
         LayoutQ layoutQTemp(unshareGroupCountPerLoop * groupSize, embeddingSize);
         LayoutK layoutKTemp(embeddingSize, unshareGroupCountPerLoop * maxDecodeStep);
@@ -115,25 +124,38 @@ class UnsharedFAInferKernel {
         LayoutO layoutOTemp(unshareGroupCountPerLoop * groupSize, embeddingSize);
         LayoutS layoutSTemp(unshareGroupCountPerLoop * groupSize, unshareGroupCountPerLoop * maxDecodeStep);
         LayoutP layoutPTemp(unshareGroupCountPerLoop * groupSize, unshareGroupCountPerLoop * maxDecodeStep);
-        for (uint32_t taskIdx = taskStartIdx; taskIdx < taskEndIdx; ++taskIdx) {
-            uint32_t actualGroupCount = (isTailCore && (taskIdx + 1 == taskEndIdx)) ? unshareGroupCountTailLoop : unshareGroupCountPerLoop;
-            GemmCoord actualBlockShapeQK{actualGroupCount * groupSize, actualGroupCount * maxDecodeStep, embeddingSize};
-            GemmCoord actualBlockShapePV{actualGroupCount * groupSize, embeddingSize, actualGroupCount * maxDecodeStep};
-            blockMmadQK(
-                gQ[gmQOffset], gUnsharedK[gmKVOffset], gS[gmSOffset], 
-                layoutQTemp, layoutKTemp, layoutSTemp, actualBlockShapeQK);
-            Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(qkReady);
-            blockMmadPV(
-                gP[gmPOffset], gUnsharedV[gmKVOffset], gUnsharedO[gmQOffset],
-                layoutPTemp, layoutVTemp, layoutOTemp,
-                actualBlockShapePV, softmaxReady);
-            gmQOffset += groupSize * unshareGroupCountPerLoop * embeddingSize;
-            gmKVOffset += maxDecodeStep * unshareGroupCountPerLoop * embeddingSize;
+        uint32_t actualGroupCount = unshareGroupCountPerLoop;
+        GemmCoord actualBlockShapeQK{actualGroupCount * groupSize, actualGroupCount * maxDecodeStep, embeddingSize};
+        GemmCoord actualBlockShapePV{actualGroupCount * groupSize, embeddingSize, actualGroupCount * maxDecodeStep};
+        for (uint32_t taskIdx = taskStartIdx; taskIdx < taskEndIdx + PRE_LAUNCH; ++taskIdx) {
+            if (taskIdx < taskEndIdx) {
+                sRelativeOffset = (taskIdx % (PRE_LAUNCH + 1)) * UNSHARED_WORKSPACE_BLOCK_SIZE_DB;
+                actualSOffset = gmSOffset + sRelativeOffset;
+                blockMmadQK(
+                    gQ[gmQOffset], gUnsharedK[gmKOffset], gS[actualSOffset],
+                    layoutQTemp, layoutKTemp, layoutSTemp, actualBlockShapeQK);
+                Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(qkReady);
+                gmQOffset += qOBaseBlockSize;
+                gmKOffset += kvBaseBlockSize;
+            }
+            if (taskIdx >= taskStartIdx + PRE_LAUNCH) {
+                pRelativeOffset = ((taskIdx - PRE_LAUNCH) % (PRE_LAUNCH + 1)) * UNSHARED_WORKSPACE_BLOCK_SIZE_DB;
+                actualPOffset = gmPOffset + pRelativeOffset;
+                blockMmadPV(
+                    gP[actualPOffset],
+                    gUnsharedV[gmVOffset], gUnsharedO[gmOOffset],
+                    layoutPTemp, layoutVTemp, layoutOTemp,
+                    actualBlockShapePV, softmaxReady);
+                gmOOffset += qOBaseBlockSize;
+                gmVOffset += kvBaseBlockSize;
+            }
         }
     }
     template <>
     CATLASS_DEVICE void operator()<AscendC::AIV>(XAttnKernelParams const &params) {
-        // __gm__ XATilingData *faTilingData = reinterpret_cast<__gm__ XATilingData *>(params.tiling);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+
         AscendC::GlobalTensor<ElementS> gS;
         gS.SetGlobalBuffer((__gm__ ElementS *)params.s);
         AscendC::GlobalTensor<ElementP> gP;
@@ -173,23 +195,33 @@ class UnsharedFAInferKernel {
         EpilogueFAUnsharedSoftmax epilogueFAUnsharedSoftmax(resource, scaleValue, unsharedKvSeqLen, maxDecodeStep, unshareGroupCountPerLoop,
                                                             groupSize);
    
-        uint64_t gmSOffset = coreNumShared * WORKSPACE_BLOCK_SIZE_DB + relativeCoreIdx * UNSHARED_WORKSPACE_BLOCK_SIZE_DB;
-        uint64_t gmPOffset = gmSOffset;
-        uint64_t gmUnsharedGmGlOffset = taskStartIdx * groupSize * unshareGroupCountPerLoop;
+        uint64_t gmSPOffset = (coreNumShared * WORKSPACE_BLOCK_SIZE_DB  +
+                               relativeCoreIdx * UNSHARED_WORKSPACE_BLOCK_SIZE_DB) * NUM3;
+        uint64_t spRelativeOffset = 0;
+        uint64_t actualSPOffset = 0;
+        int64_t gmGlBaseBlockSize = groupSize * unshareGroupCountPerLoop;
+        uint64_t gmUnsharedGmGlOffset = taskStartIdx * gmGlBaseBlockSize;
         LayoutS layoutSTemp(unshareGroupCountPerLoop * groupSize, unshareGroupCountPerLoop * maxDecodeStep);
         LayoutP layoutPTemp(unshareGroupCountPerLoop * groupSize, unshareGroupCountPerLoop * maxDecodeStep);
+        uint32_t actualGroupCount = unshareGroupCountPerLoop;
+        GemmCoord actualBlockShapeQK{actualGroupCount * groupSize, actualGroupCount * maxDecodeStep, embeddingSize};
         for (uint32_t taskIdx = taskStartIdx; taskIdx < taskEndIdx; ++taskIdx) {
+            spRelativeOffset = (taskIdx % (PRE_LAUNCH + 1)) * UNSHARED_WORKSPACE_BLOCK_SIZE_DB;
+            actualSPOffset = gmSPOffset + spRelativeOffset;
             Arch::CrossCoreWaitFlag(qkReady);
             uint32_t actualGroupCount = (isTailCore && (taskIdx + 1 == taskEndIdx)) ? unshareGroupCountTailLoop : unshareGroupCountPerLoop;
             GemmCoord actualBlockShapeQK{actualGroupCount * groupSize, actualGroupCount * maxDecodeStep, embeddingSize};
             // FA unshared softmax
             epilogueFAUnsharedSoftmax(
-                gP[gmPOffset], gS[gmSOffset], gUnsharedGm[gmUnsharedGmGlOffset], gUnsharedGl[gmUnsharedGmGlOffset], layoutPTemp, layoutSTemp,
+                gP[actualSPOffset], gS[actualSPOffset], gUnsharedGm[gmUnsharedGmGlOffset],
+                gUnsharedGl[gmUnsharedGmGlOffset], layoutPTemp, layoutSTemp,
                 actualBlockShapeQK, actualGroupCount
             );
             Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(softmaxReady);
-            gmUnsharedGmGlOffset += actualGroupCount * groupSize;
+            gmUnsharedGmGlOffset += gmGlBaseBlockSize;
         }
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
     }
   private:
     Arch::Resource<ArchTag> resource;
@@ -411,7 +443,7 @@ class UnsharedFAInferKernel {
                          stackSeqTile = pagedBlockSize * blockStackNum;
                      }
                      uint32_t SWorkSpacePingPongFlag = stackSeqCount % (preLaunch + 1);
-                     uint64_t gmSOffset = coreIdx * WORKSPACE_BLOCK_SIZE_DB /** (preLaunch + 1)*/
+                     uint64_t gmSOffset = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (preLaunch + 1)
                                           + SWorkSpacePingPongFlag * WORKSPACE_BLOCK_SIZE_DB;
                      GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
                      if constexpr (!PAGED_CACHE_FLAG) {
@@ -436,7 +468,7 @@ class UnsharedFAInferKernel {
                          stackSeqTile = pagedBlockSize * blockStackNum;
                      }
                      uint32_t PVWorkSpacePingPongFlag = (stackSeqCount - preLaunch) % (preLaunch + 1);
-                     uint64_t gmPOffset = coreIdx * WORKSPACE_BLOCK_SIZE_DB /** (preLaunch + 1)*/
+                     uint64_t gmPOffset = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (preLaunch + 1)
                                           + PVWorkSpacePingPongFlag * WORKSPACE_BLOCK_SIZE_DB;
                      uint64_t gmOTmpOffset = gmPOffset;
                      LayoutP layoutPTemp(rowNum, stackSeqTileRound);
@@ -481,7 +513,7 @@ class UnsharedFAInferKernel {
                  if ((kvSIdx < kvSLoopNumTotal) && (stackSeqCount <= totalStackSeqNum - 1)) {
                      stackSeqTile = maskedKvS;
                      uint32_t SWorkSpacePingPongFlag = stackSeqCount % (preLaunch + 1);
-                     uint64_t gmSOffset = coreIdx * WORKSPACE_BLOCK_SIZE_DB /** (preLaunch + 1)*/
+                     uint64_t gmSOffset = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (preLaunch + 1)
                                           + SWorkSpacePingPongFlag * WORKSPACE_BLOCK_SIZE_DB;
                      GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
                      if constexpr (!PAGED_CACHE_FLAG) {
@@ -511,7 +543,7 @@ class UnsharedFAInferKernel {
                          stackSeqTile = pagedBlockSize * blockStackNum;
                      }
                      uint32_t PVWorkSpacePingPongFlag = (stackSeqCount - preLaunch) % (preLaunch + 1);
-                     uint64_t gmPOffset = coreIdx * WORKSPACE_BLOCK_SIZE_DB /** (preLaunch + 1)*/
+                     uint64_t gmPOffset = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (preLaunch + 1)
                                           + PVWorkSpacePingPongFlag * WORKSPACE_BLOCK_SIZE_DB;
                      uint64_t gmOTmpOffset = gmPOffset;
                      LayoutP layoutPTemp(rowNum, stackSeqTileRound);
@@ -614,7 +646,7 @@ class UnsharedFAInferKernel {
          float scaleValue = faTilingData->scaleValue;
          
          uint64_t gOffsetTempO = batch * beamSize * qHeads * embed;
-         uint64_t gMaxOffset = batch * beamSize * qHeads;
+         uint64_t gMaxOffset = batch * beamSize * qHeads * SOFTMAX_BROAD_SIZE;;
          // Get the memory offset address of the input on Global Memory
          AscendC::GlobalTensor<int32_t> gActualKvseqlen;
          gActualKvseqlen.SetGlobalBuffer((__gm__ int32_t *)params.actualKvseqlen);
@@ -690,11 +722,11 @@ class UnsharedFAInferKernel {
 
              // shared sum max workspace offset
              // Calculate shared workspace offset for this core's task
-             // gsharedout size: [batch*beamSize, numHeads, 1]
+             // gsharedout size: [batch*beamSize, numHeads, 8]
              // Each core handles: [qSBlockSize, qNBlockSize] elements
-             // Offset = curBatch * beamSize * qHeads + qSBlockIdx * curQSBlockTile * qHeads + qStartNIdx;
-             uint32_t gSharedOffset = curBatch * qSeqlen * qHeads + 
-             qSBlockIdx * curQSBlockTile * qHeads + qStartNIdx;
+             // Offset = curBatch * beamSize * qHeads * 8 + qSBlockIdx * curQSBlockTile * qHeads * 8 + qStartNIdx * 8;
+             uint32_t gSharedOffset = curBatch * qSeqlen * qHeads * SOFTMAX_BROAD_SIZE +
+                 qSBlockIdx * curQSBlockTile * qHeads * SOFTMAX_BROAD_SIZE + qStartNIdx * SOFTMAX_BROAD_SIZE;
              // cce::printf("gSharedOffset:%d\n", gSharedOffset);
              uint32_t qSBlockSize = (qSBlockIdx == (curQSBlockNum - 1)) ? (qSeqlen - qSBlockIdx * curQSBlockTile)
                                                                         : curQSBlockTile;
@@ -740,7 +772,7 @@ class UnsharedFAInferKernel {
                  LayoutP layOutP(rowNum, stackSeqTile, stackSeqTilePad);
                  GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
                  uint32_t curStackTileMod = stackSeqCount % (preLaunch + 1);
-                 uint32_t gmOffsetS = coreIdx * WORKSPACE_BLOCK_SIZE_DB /** (preLaunch + 1)*/ + // cube core offset
+                 uint32_t gmOffsetS = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (preLaunch + 1) + // cube core offset
                                       curStackTileMod * WORKSPACE_BLOCK_SIZE_DB;            // single cube core db offset
                  // vec core offset will be processed within epilogue block
                  uint32_t gmOffsetP = gmOffsetS;
@@ -765,7 +797,7 @@ class UnsharedFAInferKernel {
                      LayoutOTmp layoutOTmp(rowNum, embed, embedRound);
                      GemmCoord actualBlockShapePV{rowNum, embed, stackSeqTile};
                      uint32_t curStackTileMod = (stackSeqCount - preLaunch) % (preLaunch + 1);
-                     uint32_t gmOffsetOTmp = coreIdx * WORKSPACE_BLOCK_SIZE_DB /** (preLaunch + 1)*/
+                     uint32_t gmOffsetOTmp = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (preLaunch + 1)
                                              + curStackTileMod * WORKSPACE_BLOCK_SIZE_DB;
                      Arch::CrossCoreWaitFlag(pvReady);
                      // rescale O
@@ -827,7 +859,7 @@ class UnsharedFAInferKernel {
                      LayoutOTmp layoutOTmp(rowNum, embed, embedRound);
                      GemmCoord actualBlockShapePV{rowNum, embed, stackSeqTile};
                      uint32_t curStackTileMod = (stackSeqCount - preLaunch) % (preLaunch + 1);
-                     uint32_t gmOffsetOTmp = coreIdx * WORKSPACE_BLOCK_SIZE_DB /** (preLaunch + 1)*/
+                     uint32_t gmOffsetOTmp = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (preLaunch + 1)
                                              + curStackTileMod * WORKSPACE_BLOCK_SIZE_DB;
                      Arch::CrossCoreWaitFlag(pvReady);
                      // rescale O
@@ -1486,9 +1518,12 @@ public:
         uint32_t currentCoreRowNum = 0;
         uint32_t embed = faTilingData->embeddingSize;
         uint32_t gmOffsetO = 0;
-        uint32_t gmOffsetGl = 0;
-        uint32_t gmOffsetGm = 0;
-        uint32_t sumMaxGmOffset = numTokens * qHeads;
+        uint32_t gmOffsetSharedGl = 0;
+        uint32_t gmOffsetSharedGm = 0;
+        uint32_t gmOffsetUnSharedGl = 0;
+        uint32_t gmOffsetUnSharedGm = 0;
+        uint32_t sharedSumMaxGmOffset = numTokens * qHeads * SOFTMAX_BROAD_SIZE;
+        uint32_t unsharedSumMaxGmOffset = numTokens * qHeads;
         uint32_t attnOutputOffset = numTokens * qHeads * embed;
         if (coreIdx >= faTilingData->combineCoreNum) {
             return;
@@ -1497,15 +1532,19 @@ public:
         if (coreIdx < combineFormerCoreNum) {
             currentCoreRowNum = combineFormerRowNum;
             gmOffsetO = coreIdx * combineFormerRowNum * embed;
-            gmOffsetGl = coreIdx *combineFormerRowNum;
-            gmOffsetGm = gmOffsetGl;
+            gmOffsetUnSharedGl = coreIdx *combineFormerRowNum;
+            gmOffsetUnSharedGm = gmOffsetUnSharedGl;
+            gmOffsetSharedGl = coreIdx *combineFormerRowNum * SOFTMAX_BROAD_SIZE;
+            gmOffsetSharedGm = gmOffsetSharedGl;
         } else {
             currentCoreRowNum = combineTailRowNum;
             gmOffsetO = combineFormerCoreNum * combineFormerRowNum * embed 
             + (coreIdx - combineFormerCoreNum) * combineTailRowNum * embed;
-            gmOffsetGl = combineFormerCoreNum * combineFormerRowNum  
+            gmOffsetUnSharedGl = combineFormerCoreNum * combineFormerRowNum
             + (coreIdx - combineFormerCoreNum) * combineTailRowNum;
-            gmOffsetGm = gmOffsetGl;
+            gmOffsetUnSharedGm = gmOffsetUnSharedGl;
+            gmOffsetSharedGl = gmOffsetUnSharedGl * SOFTMAX_BROAD_SIZE;
+            gmOffsetSharedGm = gmOffsetSharedGl;
         }
         // shared_workspace [attnout:[attnOut * 4Bytes], 
         // gm:[attnOutputOffset * 4Bytes], 
@@ -1513,11 +1552,13 @@ public:
         AscendC::GlobalTensor<ElementInput> gSharedGm;
         gSharedGm.SetGlobalBuffer((__gm__ ElementInput *)params.shared_workspace + attnOutputOffset);
         AscendC::GlobalTensor<ElementInput> gSharedGl;
-        gSharedGl.SetGlobalBuffer((__gm__ ElementInput *)params.shared_workspace + attnOutputOffset + sumMaxGmOffset); // TODO
+        gSharedGl.SetGlobalBuffer((__gm__ ElementInput *)params.shared_workspace + attnOutputOffset +
+                                  sharedSumMaxGmOffset);
         AscendC::GlobalTensor<ElementInput> gUnsharedGm;
         gUnsharedGm.SetGlobalBuffer((__gm__ ElementInput *)params.unshared_workspace + attnOutputOffset);
         AscendC::GlobalTensor<ElementInput> gUnsharedGl;
-        gUnsharedGl.SetGlobalBuffer((__gm__ ElementInput *)params.unshared_workspace + attnOutputOffset + sumMaxGmOffset);
+        gUnsharedGl.SetGlobalBuffer((__gm__ ElementInput *)params.unshared_workspace + attnOutputOffset +
+                                    unsharedSumMaxGmOffset);
         AscendC::GlobalTensor<ElementInput> gSharedOut;
         gSharedOut.SetGlobalBuffer((__gm__ ElementInput *)params.shared_workspace);
         AscendC::GlobalTensor<ElementInput> gUnsharedOut;
@@ -1529,8 +1570,8 @@ public:
         //cce::printf("coreIdx:%d, gmOffsetO:%d, currentCoreRowNum:%d, gmOffsetGl:%d, gmOffsetGm:%d\n", AscendC::GetBlockIdx(), 
         //gmOffsetO, currentCoreRowNum, gmOffsetGl, gmOffsetGm);
         epilogueCombineScale(
-            gSharedGm[gmOffsetGm], gUnsharedGm[gmOffsetGl], 
-            gSharedGl[gmOffsetGm], gUnsharedGl[gmOffsetGl], 
+            gSharedGm[gmOffsetSharedGm], gUnsharedGm[gmOffsetUnSharedGm],
+            gSharedGl[gmOffsetSharedGl], gUnsharedGl[gmOffsetUnSharedGl],
             gSharedOut[gmOffsetO], gUnsharedOut[gmOffsetO], 
             gFinalOut[gmOffsetO], actualBlockShape
         );

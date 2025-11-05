@@ -38,7 +38,12 @@ extern "C" __global__ __aicore__ void x_attention(GM_ADDR query, GM_ADDR shared_
      shared_block_table, shared_kv_lens, decode_step, s, p, oTemp, oUpdate, shared_workspace, 
          unshared_workspace, attn_out, tiling};
     if (coreIdx < tiling_data.sharedCoreNum) {
-        CallSharedInferKernel(params, &tiling_data);
+        bool shortSequence = tiling_data.maxNumBlocksPerBatch * tiling_data.blockSize <= 512;
+        if (shortSequence) {
+            CallSharedInferKernelShort(params, &tiling_data);
+        } else {
+            CallSharedInferKernel(params, &tiling_data);
+        }
     } else {
         CallUnsharedInferKernel(params, &tiling_data);
     }

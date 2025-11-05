@@ -45,6 +45,7 @@ constexpr int32_t NUM4 = 4;
 constexpr uint32_t Q_S_BLOCK_TILE = 128;
 constexpr int32_t WORKSPACE_BLOCK_SIZE_DB = 128 * 128 * 4; // row * col * blockStackNum
 constexpr int32_t UNSHARED_WORKSPACE_BLOCK_SIZE_DB = 128 * 256;   // unshared no pinpong
+constexpr int32_t FLOAT_BLOCK_SIZE = 8;
 
 class TilingXAttentionFunc {
   public:
@@ -131,13 +132,12 @@ void TilingXAttentionFunc::SetWorkspaces()
   // Attention occupied space
   // TODO: Only apply for one temporary space, affecting preload function, long sequence scenario needs extra processing
   uint64_t mm1OutSize = (sharedBlockDim * WORKSPACE_BLOCK_SIZE_DB + 
-                         unsharedBlockDim * UNSHARED_WORKSPACE_BLOCK_SIZE_DB)* sizeof(float);
+                         unsharedBlockDim * UNSHARED_WORKSPACE_BLOCK_SIZE_DB) * NUM3 * sizeof(float);;
   uint64_t smOnlineOutSize = (sharedBlockDim * WORKSPACE_BLOCK_SIZE_DB +
-                              unsharedBlockDim * UNSHARED_WORKSPACE_BLOCK_SIZE_DB) * sizeof(int16_t);
-  uint64_t mm2OutSize = (sharedBlockDim * WORKSPACE_BLOCK_SIZE_DB +
-                         unsharedBlockDim * UNSHARED_WORKSPACE_BLOCK_SIZE_DB) * sizeof(float);
-  uint64_t updateSize = (sharedBlockDim * WORKSPACE_BLOCK_SIZE_DB +
-                         unsharedBlockDim * UNSHARED_WORKSPACE_BLOCK_SIZE_DB) * sizeof(float);
+                              unsharedBlockDim * UNSHARED_WORKSPACE_BLOCK_SIZE_DB) * NUM3 * sizeof(int16_t);
+  uint64_t mm2OutSize = sharedBlockDim * WORKSPACE_BLOCK_SIZE_DB * NUM3 * sizeof(float);
+  // oUpdate currently not used
+  uint64_t updateSize = 0; // sharedBlockDim * WORKSPACE_BLOCK_SIZE_DB * NUM3 * sizeof(float);
   tiling_data_.set_mm1OutSize(mm1OutSize);
   tiling_data_.set_smOnlineOutSize(smOnlineOutSize);
   tiling_data_.set_mm2OutSize(mm2OutSize);
@@ -146,10 +146,12 @@ void TilingXAttentionFunc::SetWorkspaces()
   // combine required output occupied space
   uint64_t sumMaxSize = tiling_data_.get_numTokens() * tiling_data_.get_numHeads() * sizeof(float) * NUM2;
   uint64_t attnOutSize = qoSize * 2;
-  uint64_t combineWorkspaceSize = sumMaxSize + attnOutSize;
+  uint64_t combineWorkspaceSize = sumMaxSize * FLOAT_BLOCK_SIZE + attnOutSize;
+  uint64_t unsharedcombineWorkspaceSize = sumMaxSize + attnOutSize;
   tiling_data_.set_sharedWorkspaceSize(combineWorkspaceSize); // new line
 
-  userWorkspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + updateSize + combineWorkspaceSize * 2;
+  userWorkspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + updateSize + combineWorkspaceSize +
+                      unsharedcombineWorkspaceSize;
   size_t* workspace = tiling_context_->GetWorkspaceSizes(1);
   workspace[0] = systemWorkspaceSize + userWorkspaceSize;
 }

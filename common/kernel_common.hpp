@@ -18,6 +18,8 @@ constexpr uint32_t BLOCK_SIZE = 16;
 constexpr int32_t WORKSPACE_BLOCK_SIZE_DB = 128 * 128 * 4; // row * col * blockStackNum
 constexpr int32_t UNSHARED_WORKSPACE_BLOCK_SIZE_DB = 128 * 256;   // unshared no pinpong
 constexpr uint32_t TMP_SIZE_DECODER = 32768;
+constexpr uint32_t PRE_LAUNCH = 2;
+constexpr uint32_t SOFTMAX_BROAD_SIZE = 8;
 
 constexpr int32_t TILING_BATCH = 0;
 constexpr int32_t TILING_NUMHEADS = 1;
@@ -45,6 +47,7 @@ constexpr int32_t TILING_HEADDIM_V_SPLIT_VECTOR_FORMER = 40;
 constexpr int32_t TILING_HEADDIM_V_SPLIT_VECTOR_TAIL = 41;
 
 constexpr int32_t NUM1 = 1;
+constexpr int32_t NUM2 = 2;
 constexpr int32_t NUM3 = 3;
 constexpr int32_t NUM4 = 4;
 constexpr int32_t NUM64 = 64;
