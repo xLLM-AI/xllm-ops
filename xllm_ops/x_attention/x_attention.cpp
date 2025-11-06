@@ -47,6 +47,6 @@ extern "C" __global__ __aicore__ void x_attention(GM_ADDR query, GM_ADDR shared_
     } else {
         CallUnsharedInferKernel(params, &tiling_data);
     }
-    AscendC::SyncAll();
+    AscendC::SyncAll<false>();
     CallCombineScale(params, &tiling_data);
 }

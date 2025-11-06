@@ -42,7 +42,6 @@ BEGIN_TILING_DATA_DEF(XAttentionTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, maxDecodeStep);
   TILING_DATA_FIELD_DEF(uint32_t, unsharedCoreNum);
   TILING_DATA_FIELD_DEF(uint32_t, unshareGroupCountPerLoop);
-  TILING_DATA_FIELD_DEF(uint32_t, unshareGroupCountTailLoop);
   TILING_DATA_FIELD_DEF(uint32_t, unsharedFullCoreNum);
   TILING_DATA_FIELD_DEF(uint32_t, unsharedTaskNumHead);
   TILING_DATA_FIELD_DEF(uint32_t, unsharedTaskNumTail);

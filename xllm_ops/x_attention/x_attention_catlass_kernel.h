@@ -91,7 +91,6 @@ class UnsharedFAInferKernel {
         uint32_t groupSize = faTilingData->groupSize;
         uint32_t unsharedCoreNum = faTilingData->unsharedCoreNum;
         uint32_t unshareGroupCountPerLoop = faTilingData->unshareGroupCountPerLoop;
-        uint32_t unshareGroupCountTailLoop = faTilingData->unshareGroupCountTailLoop;
         uint32_t unsharedTaskNumHead = faTilingData->unsharedTaskNumHead;
         uint32_t unsharedTaskNumTail = faTilingData->unsharedTaskNumTail;
         uint32_t unsharedFullCoreNum = faTilingData->unsharedFullCoreNum;
@@ -124,9 +123,10 @@ class UnsharedFAInferKernel {
         LayoutO layoutOTemp(unshareGroupCountPerLoop * groupSize, embeddingSize);
         LayoutS layoutSTemp(unshareGroupCountPerLoop * groupSize, unshareGroupCountPerLoop * maxDecodeStep);
         LayoutP layoutPTemp(unshareGroupCountPerLoop * groupSize, unshareGroupCountPerLoop * maxDecodeStep);
-        uint32_t actualGroupCount = unshareGroupCountPerLoop;
-        GemmCoord actualBlockShapeQK{actualGroupCount * groupSize, actualGroupCount * maxDecodeStep, embeddingSize};
-        GemmCoord actualBlockShapePV{actualGroupCount * groupSize, embeddingSize, actualGroupCount * maxDecodeStep};
+        GemmCoord actualBlockShapeQK{unshareGroupCountPerLoop * groupSize, unshareGroupCountPerLoop * maxDecodeStep,
+                                     embeddingSize};
+        GemmCoord actualBlockShapePV{unshareGroupCountPerLoop * groupSize, embeddingSize,
+                                     unshareGroupCountPerLoop * maxDecodeStep};
         for (uint32_t taskIdx = taskStartIdx; taskIdx < taskEndIdx + PRE_LAUNCH; ++taskIdx) {
             if (taskIdx < taskEndIdx) {
                 sRelativeOffset = (taskIdx % (PRE_LAUNCH + 1)) * UNSHARED_WORKSPACE_BLOCK_SIZE_DB;
@@ -172,7 +172,6 @@ class UnsharedFAInferKernel {
         uint32_t groupSize = faTilingData->groupSize;
         uint32_t unsharedCoreNum = faTilingData->unsharedCoreNum;
         uint32_t unshareGroupCountPerLoop = faTilingData->unshareGroupCountPerLoop;
-        uint32_t unshareGroupCountTailLoop = faTilingData->unshareGroupCountTailLoop;
         uint32_t unsharedTaskNumHead = faTilingData->unsharedTaskNumHead;
         uint32_t unsharedTaskNumTail = faTilingData->unsharedTaskNumTail;
         uint32_t unsharedFullCoreNum = faTilingData->unsharedFullCoreNum;
@@ -203,19 +202,17 @@ class UnsharedFAInferKernel {
         uint64_t gmUnsharedGmGlOffset = taskStartIdx * gmGlBaseBlockSize;
         LayoutS layoutSTemp(unshareGroupCountPerLoop * groupSize, unshareGroupCountPerLoop * maxDecodeStep);
         LayoutP layoutPTemp(unshareGroupCountPerLoop * groupSize, unshareGroupCountPerLoop * maxDecodeStep);
-        uint32_t actualGroupCount = unshareGroupCountPerLoop;
-        GemmCoord actualBlockShapeQK{actualGroupCount * groupSize, actualGroupCount * maxDecodeStep, embeddingSize};
+        GemmCoord actualBlockShapeQK{unshareGroupCountPerLoop * groupSize, unshareGroupCountPerLoop * maxDecodeStep,
+                                     embeddingSize};
         for (uint32_t taskIdx = taskStartIdx; taskIdx < taskEndIdx; ++taskIdx) {
             spRelativeOffset = (taskIdx % (PRE_LAUNCH + 1)) * UNSHARED_WORKSPACE_BLOCK_SIZE_DB;
             actualSPOffset = gmSPOffset + spRelativeOffset;
             Arch::CrossCoreWaitFlag(qkReady);
-            uint32_t actualGroupCount = (isTailCore && (taskIdx + 1 == taskEndIdx)) ? unshareGroupCountTailLoop : unshareGroupCountPerLoop;
-            GemmCoord actualBlockShapeQK{actualGroupCount * groupSize, actualGroupCount * maxDecodeStep, embeddingSize};
             // FA unshared softmax
             epilogueFAUnsharedSoftmax(
                 gP[actualSPOffset], gS[actualSPOffset], gUnsharedGm[gmUnsharedGmGlOffset],
                 gUnsharedGl[gmUnsharedGmGlOffset], layoutPTemp, layoutSTemp,
-                actualBlockShapeQK, actualGroupCount
+                actualBlockShapeQK, unshareGroupCountPerLoop
             );
             Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(softmaxReady);
             gmUnsharedGmGlOffset += gmGlBaseBlockSize;

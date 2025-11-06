@@ -97,11 +97,12 @@ void TilingXAttentionFunc::FillUnsharedSplitCoreTilingData()
   tiling_data_.set_unsharedCoreNum(unsharedBlockDim);
   tiling_data_.set_groupSize(tiling_data_.get_numHeads() / tiling_data_.get_kvHeads());
   uint32_t totalGroupCount = tiling_data_.get_batch() * tiling_data_.get_beamSize() * tiling_data_.get_kvHeads();
-  uint32_t maxGroupCountPerLoop = std::min(128 / tiling_data_.get_groupSize(), 256 / tiling_data_.get_maxDecodeStep()) / 32 * 32;
+  uint32_t maxGroupCountPerLoop = std::min(128 / tiling_data_.get_groupSize(), 256 / tiling_data_.get_maxDecodeStep());
+  // ensure each task handles same group count
+  while (maxGroupCountPerLoop > 1 && totalGroupCount % maxGroupCountPerLoop != 0)
+      --maxGroupCountPerLoop;
   tiling_data_.set_unshareGroupCountPerLoop(maxGroupCountPerLoop);
-  uint32_t unshareGroupCountTailLoop = totalGroupCount % maxGroupCountPerLoop == 0 ? maxGroupCountPerLoop : 
-                                      (totalGroupCount % maxGroupCountPerLoop);
-  uint32_t totalTaskNum = (totalGroupCount + maxGroupCountPerLoop - 1) / maxGroupCountPerLoop;
+  uint32_t totalTaskNum = totalGroupCount / maxGroupCountPerLoop;
   uint32_t unsharedFullCoreNum = unsharedBlockDim;
   uint32_t unsharedTaskNumHead = totalTaskNum / unsharedBlockDim;
   uint32_t unsharedTaskNumTail = unsharedTaskNumHead;
@@ -110,7 +111,6 @@ void TilingXAttentionFunc::FillUnsharedSplitCoreTilingData()
     unsharedFullCoreNum = remainTask;
     unsharedTaskNumHead += 1;
   }
-  tiling_data_.set_unshareGroupCountTailLoop(unshareGroupCountTailLoop);
   tiling_data_.set_unsharedFullCoreNum(unsharedFullCoreNum);
   tiling_data_.set_unsharedTaskNumHead(unsharedTaskNumHead);
   tiling_data_.set_unsharedTaskNumTail(unsharedTaskNumTail);
