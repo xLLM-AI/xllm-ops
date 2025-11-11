@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
+#include "common.h"
 
 using namespace AscendC;
 template <typename TokenIdType, typename LogProbType> class BeamSearchGroup {
@@ -70,6 +71,7 @@ public:
   StackWithOutput(int32_t request_idx,
                   AscendC::LocalTensor<LogProbType> &prefix_top_probs,
                   AscendC::LocalTensor<int32_t> &prefix_top_index);
+  AscendC::TPipe pipe;
 
 private:
   AscendC::GlobalTensor<TokenIdType> token_ids_gm;
@@ -93,7 +95,7 @@ private:
   int32_t step_size;
   TopkTiling topkTilingData;
   TopkTiling topKTilingData1;
-  AscendC::TPipe pipe;
+  
   AscendC::TQue<AscendC::QuePosition::VECIN, 1> log_probs_in_que;
   AscendC::TQue<AscendC::QuePosition::VECIN, 1> top_tokens_in_que;
   AscendC::TQue<AscendC::QuePosition::VECOUT, 1> out_token_ids_out_que;
@@ -111,4 +113,33 @@ private:
   AscendC::TBuf<AscendC::TPosition::VECCALC> top_k_tmp_buf;
   AscendC::TBuf<AscendC::TPosition::VECCALC> beam_counts_buf;
   AscendC::TBuf<AscendC::TPosition::VECCALC> beam_write_pos_buf;
+};
+
+class ProcessSequence{
+ public:
+  __aicore__ inline ProcessSequence() {}
+  __aicore__ inline void
+  Init(GM_ADDR sequence, GM_ADDR token_index, GM_ADDR out_sequence, GM_ADDR out_token_ids,
+     int32_t beam_width, int32_t current_step, int32_t max_decode_step, int32_t request_num);
+  __aicore__ inline void
+  Process();
+  
+ private:
+  int32_t beam_width;
+  int32_t current_step;
+  int32_t max_decode_step;
+  int32_t request_num;
+  int32_t align_beam_width;
+  int32_t align_current_step;
+  AscendC::GlobalTensor<int32_t> sequence_gm;
+  AscendC::GlobalTensor<int32_t> out_sequence_gm;
+  AscendC::GlobalTensor<int32_t> token_index_gm;
+  AscendC::GlobalTensor<int32_t> out_token_ids_gm;
+  AscendC::TPipe pipe;
+  AscendC::TQue<AscendC::QuePosition::VECIN, 1> sequence_in_que;
+  AscendC::TQue<AscendC::QuePosition::VECOUT, 1> sequence_out_que;
+  AscendC::TQue<AscendC::QuePosition::VECIN, 1> in_token_ids_que;
+  AscendC::TBuf<AscendC::TPosition::VECCALC> sequence_buf;
+  AscendC::TBuf<AscendC::TPosition::VECCALC> token_index_buf;
+  AscendC::TBuf<AscendC::TPosition::VECOUT> out_token_ids_buf;
 };

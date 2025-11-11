@@ -49,6 +49,8 @@ class TilingBeamSearchGroupFunc {
   uint32_t request_num_ = 0;
   uint32_t min_size_ = 0;
   uint32_t step_size_ = 0;
+  uint32_t current_step_ = 0;
+  uint32_t max_decode_step_ = 0;
   size_t sync_workspace_size_ = 0;
 };
 
@@ -61,7 +63,9 @@ ge::graphStatus TilingBeamSearchGroupFunc::Init() {
   // check input shape
   auto token_ids_shape = tiling_context_->GetInputShape(0)->GetOriginShape();
   auto top_tokens_shape = tiling_context_->GetInputShape(2)->GetOriginShape();
-
+  auto sequence_shape = tiling_context_->GetInputShape(3)->GetOriginShape();
+  current_step_ = static_cast<uint32_t>(*(tiling_context_->GetAttrs()->GetAttrPointer<int>(0)));
+  max_decode_step_ = sequence_shape.GetDim(sequence_shape.GetDimNum() - 1);
   num_sequences_ = token_ids_shape.GetDim(token_ids_shape.GetDimNum() - 2);
   sequence_length_ = token_ids_shape.GetDim(token_ids_shape.GetDimNum() - 1);
   top_k_ = top_tokens_shape.GetDim(top_tokens_shape.GetDimNum() - 1);
@@ -137,6 +141,8 @@ void TilingBeamSearchGroupFunc::FillTilingData() {
   tiling_data_.set_core_num(core_num_);
   tiling_data_.set_min_size(min_size_);
   tiling_data_.set_step_size(step_size_);
+  tiling_data_.set_current_step(current_step_);
+  tiling_data_.set_max_decode_step(max_decode_step_);
 }
 
 ge::graphStatus TilingBeamSearchGroupFunc::RunKernelTiling() {
@@ -199,6 +205,11 @@ class BeamSearchGroup : public OpDef {
         .DataType({ge::DT_FLOAT})
         .Format({ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND});
+    this->Input("sequence")
+        .ParamType(REQUIRED)
+        .DataType({ge::DT_INT32})
+        .Format({ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND});
     this->Output("out_token_ids")
         .ParamType(REQUIRED)
         .DataType({ge::DT_INT32})
@@ -219,6 +230,12 @@ class BeamSearchGroup : public OpDef {
         .DataType({ge::DT_INT32})
         .Format({ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND});
+    this->Output("out_sequence")
+        .ParamType(REQUIRED)
+        .DataType({ge::DT_INT32})
+        .Format({ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND});
+    this->Attr("current_step").Int(0);
     this->SetInferShape(ge::InferShape);
     this->AICore().SetTiling(optiling::TilingForBeamSearchGroupFunc);
     this->AICore().AddConfig("ascend910b");

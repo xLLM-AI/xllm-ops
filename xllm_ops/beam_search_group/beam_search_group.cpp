@@ -401,6 +401,7 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::StackWithOutpu
   out_token_index_out_que.EnQue(out_token_index_local);
   LocalTensor<TokenIdType> out_token_index_tmp = out_token_index_out_que.DeQue<TokenIdType>();
   AlignUpDataCopyGm(out_token_index_gm[request_idx * this->beam_width], out_token_index_tmp, this->beam_width);
+  // GetSequence(request_idx, out_token_index_tmp);
   out_token_index_out_que.FreeTensor(out_token_index_tmp);
 
   out_log_probs_out_que.EnQue(out_log_probs_local);
@@ -414,10 +415,181 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::StackWithOutpu
   out_token_ids_out_que.FreeTensor(out_token_ids_tmp);
 }
 
+// template <typename TokenIdType, typename LogProbType>
+// __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::GetSequence(int32_t request_idx,
+//                          AscendC::LocalTensor<TokenIdType> &token_index_local) {
+//   LocalTensor<int32_t> in_sequence_local = sequence_in_que.AllocTensor<int32_t>();
+//   int32_t sequence_offset = request_idx * this->beam_width * this->max_decode_step;
+
+//   tl::ascend::copy_gm_to_ub_beam<int32_t>
+//                             (in_sequence_local, sequence_gm[sequence_offset],this->current_step,
+//                               this->current_step,this->current_step,this->beam_width
+//                             );
+//   sequence_in_que.EnQue(in_sequence_local);
+//   LocalTensor<int32_t> in_sequence_tmp = sequence_in_que.DeQue<int32_t>();
+//   LocalTensor<int32_t> sequence_local = sequence_buf.Get<int32_t>();
+//   for (int32_t i = 0; i < this->beam_width; i++) {
+//     int32_t token_idx = token_index_local.GetValue(i);
+//     tl::ascend::copy_ub_to_ub_beam<int32_t, int32_t>
+//                   (sequence_local[i*this->current_step], 
+//                     in_sequence_tmp[token_idx*this->current_step],
+//                     this->current_step);
+//   }
+//   LocalTensor<int32_t> out_sequence_local = sequence_out_que.AllocTensor<int32_t>();
+//   tl::ascend::copy_ub_to_ub_beam<int32_t, int32_t>
+//                   (out_sequence_local, 
+//                     sequence_local,
+//                     this->current_step * this->beam_width);
+//   sequence_out_que.EnQue(out_sequence_local);
+//   LocalTensor<int32_t> out_sequence_tmp = sequence_out_que.DeQue<int32_t>();
+//   tl::ascend::copy_ub_to_gm_beam<int32_t>
+//                   (out_sequence_gm[request_idx * this->beam_width * this->max_decode_step],
+//                      out_sequence_tmp,
+//                      this->current_step, 
+//                      this->current_step, 
+//                      this->beam_width);
+//   sequence_in_que.FreeTensor(in_sequence_tmp);
+//   sequence_out_que.FreeTensor(out_sequence_tmp);
+// }
+
+__aicore__ inline void ProcessSequence::Init(GM_ADDR sequence, 
+                                            GM_ADDR token_index, 
+                                            GM_ADDR out_sequence, 
+                                            GM_ADDR out_token_ids,
+                                            int32_t beam_width, 
+                                            int32_t current_step, 
+                                            int32_t max_decode_step,
+                                            int32_t request_num) {
+  sequence_gm.SetGlobalBuffer((__gm__ int32_t *)sequence);
+  token_index_gm.SetGlobalBuffer((__gm__ int32_t *)token_index);
+  out_sequence_gm.SetGlobalBuffer((__gm__ int32_t *)out_sequence);
+  out_token_ids_gm.SetGlobalBuffer((__gm__ int32_t *)out_token_ids);
+  this->beam_width = beam_width;
+  this->current_step = current_step;
+  this->max_decode_step = max_decode_step;
+  this->align_beam_width =(beam_width / 32 + 1) * 32;
+  this->align_current_step = (current_step / 8 + 1) * 8;
+  this->request_num = request_num;
+  pipe.InitBuffer(sequence_in_que, 1, this->align_current_step * this->align_beam_width * sizeof(int32_t));
+  pipe.InitBuffer(sequence_out_que, 1, this->align_current_step * this->align_beam_width * sizeof(int32_t));
+  pipe.InitBuffer(sequence_buf, this->align_current_step * this->align_beam_width * sizeof(int32_t));
+  pipe.InitBuffer(token_index_buf, this->align_beam_width * sizeof(int32_t));
+  pipe.InitBuffer(in_token_ids_que, 1,this->align_beam_width * sizeof(int32_t));
+  pipe.InitBuffer(out_token_ids_buf, this->align_beam_width * sizeof(int32_t));
+}
+
+__aicore__ inline void ProcessSequence::Process() {
+  for (int32_t request_idx = 0; request_idx < this->request_num; request_idx++) {
+    // printf("request num: %d\n", this->request_num);
+    if (request_idx % 24 == block_idx){
+      LocalTensor<int32_t> in_token_ids_local = in_token_ids_que.AllocTensor<int32_t>();
+      tl::ascend::copy_gm_to_ub_beam<int32_t>
+                                (in_token_ids_local, 
+                                  out_token_ids_gm[request_idx * this->beam_width],
+                                  0,
+                                  0,
+                                  1,
+                                  this->beam_width
+                                );
+      // AscendC::DumpTensor(out_token_ids_gm, 0, this->align_beam_width);
+      // printf("out_token_ids_local \n");
+      // AscendC::DumpTensor(in_token_ids_local, 0, this->align_beam_width);
+      // printf(" sequence \n");
+      // AscendC::DumpTensor(sequence_gm, 0, this->align_beam_width);
+      in_token_ids_que.EnQue(in_token_ids_local);
+      LocalTensor<int32_t> in_token_ids_tmp = in_token_ids_que.DeQue<int32_t>();
+      LocalTensor<int32_t> token_index_local = token_index_buf.Get<int32_t>();
+      tl::ascend::copy_gm_to_ub_beam<int32_t>
+                                (token_index_local, token_index_gm[request_idx * this->beam_width],this->beam_width,
+                                  this->beam_width,this->beam_width,1
+                                );
+      // printf("token_index_local \n");
+      // AscendC::DumpTensor(token_index_local, 0, this->align_beam_width);
+      // printf("token_index_gm \n");
+      // AscendC::DumpTensor(token_index_gm, 0, this->align_beam_width);
+      LocalTensor<int32_t> in_sequence_local = sequence_in_que.AllocTensor<int32_t>();
+      int32_t sequence_offset = request_idx * this->beam_width * this->max_decode_step;
+      // AscendC::DumpTensor(sequence_gm[sequence_offset], 0, 8);
+      // printf("value \n");
+      // printf("src stride : %d\n", this->max_decode_step-this->current_step);
+      // printf("dst stride : %d\n", this->align_current_step - this->current_step);
+      // printf("dst N : %d\n", this->current_step);
+      // printf("dst M : %d\n", this->beam_width);
+      tl::ascend::copy_gm_to_ub_beam_align<int32_t>
+                                (in_sequence_local, sequence_gm[sequence_offset],
+                                  this->max_decode_step-this->current_step,
+                                  0,
+                                  this->current_step,
+                                  this->beam_width
+                                );
+      // printf(" in_sequence_local \n");
+      // AscendC::DumpTensor(in_sequence_local, 0, this->align_current_step * this->beam_width);
+      sequence_in_que.EnQue(in_sequence_local);
+      LocalTensor<int32_t> in_sequence_tmp = sequence_in_que.DeQue<int32_t>();
+      LocalTensor<int32_t> sequence_local = sequence_buf.Get<int32_t>();
+      for (int32_t i = 0; i < this->beam_width; i++) {
+        int32_t token_idx = token_index_local.GetValue(i);
+        token_idx = token_idx - request_idx * this->beam_width;
+        // printf("token_idx : %d\n", token_idx);
+        tl::ascend::copy_ub_to_ub_beam<int32_t, int32_t>
+                      (sequence_local[i*this->align_current_step], 
+                        in_sequence_tmp[token_idx*this->align_current_step],
+                        this->align_current_step);
+        // printf(" sequence_local \n");
+        // AscendC::DumpTensor(in_sequence_tmp[token_idx*this->align_current_step], 0, this->align_current_step);
+        // AscendC::DumpTensor(sequence_local[i*this->align_current_step], 0, this->align_current_step);
+      }
+      // printf(" sequence_local \n");
+      // AscendC::DumpTensor(sequence_local, 0, this->align_current_step * this->beam_width);
+      LocalTensor<int32_t> out_sequence_local = sequence_out_que.AllocTensor<int32_t>();
+      tl::ascend::copy_ub_to_ub_beam<int32_t, int32_t>
+                      (out_sequence_local, 
+                        sequence_local,
+                        this->align_current_step * this->align_beam_width);
+      sequence_out_que.EnQue(out_sequence_local);
+      LocalTensor<int32_t> out_sequence_tmp = sequence_out_que.DeQue<int32_t>();
+      // printf(" out_sequence_tmp \n");
+      // AscendC::DumpTensor(out_sequence_tmp, 0, this->align_current_step * this->beam_width);
+      // printf(" out_sequence gm \n");
+      // AscendC::DumpTensor(out_sequence_gm, 0, this->align_beam_width);
+      tl::ascend::copy_ub_to_gm_beam<int32_t>
+                      (out_sequence_gm[request_idx * this->beam_width * this->max_decode_step],
+                         out_sequence_tmp,
+                         0,
+                         this->max_decode_step-this->current_step,
+                         this->current_step, 
+                         this->beam_width);
+      // printf(" out_sequence_gm \n");
+      // AscendC::DumpTensor(out_sequence_gm, 0, this->align_beam_width);
+      // AscendC::DumpTensor(in_token_ids_tmp, 0, this->align_beam_width);
+      LocalTensor<int32_t> out_token_ids_local = out_token_ids_buf.Get<int32_t>();
+      AscendC::DataCopy(out_token_ids_local, in_token_ids_tmp, this->align_beam_width);
+      // printf("out_token_ids_local \n");
+      // AscendC::DumpTensor(out_token_ids_local, 0, this->align_beam_width);
+      // printf("out token_ids_gm \n");
+      // AscendC::DumpTensor(out_token_ids_gm, 0, this->align_beam_width);
+      tl::ascend::copy_ub_to_gm_beam_token<int32_t>(
+        out_sequence_gm[request_idx * this->beam_width * this->max_decode_step + this->current_step -1],
+                  out_token_ids_local,
+                  0,
+                  (this->max_decode_step-1),
+                  1, 
+                  this->beam_width
+      );
+      // printf(" out_sequence_gm \n");
+      // AscendC::DumpTensor(out_sequence_gm, 0, this->align_beam_width);
+      sequence_in_que.FreeTensor(in_sequence_tmp);
+      sequence_out_que.FreeTensor(out_sequence_tmp);
+      in_token_ids_que.FreeTensor(in_token_ids_tmp);
+    }
+  }
+}
 extern "C" __global__ __aicore__ void
-beam_search_group(GM_ADDR log_probs, GM_ADDR top_tokens, GM_ADDR top_probs,
+beam_search_group(GM_ADDR log_probs, GM_ADDR top_tokens, GM_ADDR top_probs, GM_ADDR sequence,
             GM_ADDR out_token_ids, GM_ADDR out_token_index, GM_ADDR out_log_probs, GM_ADDR out_beam_count_prefix_sums,
+            GM_ADDR out_sequence,
             GM_ADDR workspace, GM_ADDR tiling) {
+  KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_VECTOR_CORE);
   GET_TILING_DATA(tiling_data, tiling);
   BeamSearchGroup<int32_t, float> op;
   op.Init(log_probs, top_tokens, top_probs, out_token_ids, out_token_index,
@@ -427,4 +599,11 @@ beam_search_group(GM_ADDR log_probs, GM_ADDR top_tokens, GM_ADDR top_probs,
           tiling_data.core_num, tiling_data.min_size, tiling_data.step_size,
           tiling_data.topkTilingData, tiling_data.topKTilingData1);
   op.Process();
+  AscendC::SyncAll();
+  op.pipe.Destroy();
+  ProcessSequence process_sequence;
+  process_sequence.Init(sequence, out_token_index,out_sequence, out_token_ids,
+                        tiling_data.beam_width, tiling_data.current_step,
+                        tiling_data.max_decode_step,tiling_data.request_num);
+  process_sequence.Process();
 }

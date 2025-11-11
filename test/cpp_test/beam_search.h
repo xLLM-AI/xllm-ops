@@ -117,6 +117,8 @@ class BeamSearchBase {
         torch::zeros({n_sequences_, 1}, opt_i32);
     output_beam_count_prefix_sums_op =
         torch::zeros({n_sequences_, 1}, opt_i32);
+    output_sequence_torch = torch::zeros({n_sequences_, sequence_length_}, opt_i32);
+    output_sequence_op = torch::zeros({n_sequences_, sequence_length_}, opt_i32);
   }
 
   int32_t beam_width_;
@@ -124,6 +126,7 @@ class BeamSearchBase {
   int32_t request_num_;
   int32_t sequence_length_;
   int32_t n_sequences_;
+  int32_t current_step_;
   torch::Tensor token_ids;
   torch::Tensor log_probs;
   torch::Tensor top_tokens;
@@ -136,6 +139,8 @@ class BeamSearchBase {
   torch::Tensor output_log_probs_op;
   torch::Tensor output_beam_count_prefix_sums_torch;
   torch::Tensor output_beam_count_prefix_sums_op;
+  torch::Tensor output_sequence_torch;
+  torch::Tensor output_sequence_op;
 
   TensorShapes shapes;
 
@@ -254,6 +259,19 @@ class BeamSearchTorch {
         torch::stack(index_sorted_list).reshape({-1, 1});
     base.output_beam_count_prefix_sums_torch =
         torch::stack(prefix_list).reshape({-1, 1});
+    // reorder sequences and append next tokens along sequence_length dimension
+    torch::Tensor index_flat =
+        base.output_token_index_torch.view({-1}).to(torch::kLong);
+    torch::Tensor reordered =
+        base.token_ids.index_select(/*dim=*/0, index_flat);
+    // write next token into the last position of sequence_length dimension
+    // cout << "token ids torch " << base.output_token_ids_torch;
+    // cout << "reordered " << reordered;
+    reordered.select(/*dim=*/1, 1)
+        .copy_(base.output_token_ids_torch.view({-1}));
+    // cout << "reordered after" << reordered;
+   base.output_sequence_torch = reordered;
+
   }
 
  private:
@@ -361,10 +379,13 @@ int BeamSearchOp::execute_beam_search_operator(aclTensor* token_ids,
       log_probs,
       top_tokens,
       top_probs,
+      token_ids,
+      2,
       output_token_ids,
       output_token_index,
       output_log_probs,
       output_beam_count_prefix_sums,
+      token_ids,
       &workspaceSize,
       &executor);
   CHECK_ACL_SUCCESS(ret, "aclnn_beam_search_operator get workspace size failed");

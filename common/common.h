@@ -172,11 +172,65 @@ CATLASS_DEVICE void copy_gm_to_ub(LocalTensor<T> dstTensor,
   AscendC::DataCopyPad(dstTensor, srcTensor, dataCopyParams, padParams);
 }
 
+template <typename T>
+CATLASS_DEVICE void copy_gm_to_ub_beam(LocalTensor<T> dstTensor,
+                                  GlobalTensor<T> srcTensor,
+                                  uint32_t srcStride,
+                                  uint32_t dstStride,
+                                  uint32_t dstN = 1,
+                                  uint32_t dstM = 1
+                                ) {
+  AscendC::DataCopyExtParams dataCopyParams(
+      dstM, dstN * sizeof(T), srcStride * sizeof(T), dstStride * sizeof(T), 0);
+  AscendC::DataCopyPadExtParams<T> padParams(true, 0, 0, 0);
+  AscendC::DataCopyPad(dstTensor, srcTensor, dataCopyParams, padParams);
+}
+
+template <typename T>
+CATLASS_DEVICE void copy_gm_to_ub_beam_align(LocalTensor<T> dstTensor,
+                                  GlobalTensor<T> srcTensor,
+                                  uint32_t srcStride,
+                                  uint32_t dstStride,
+                                  uint32_t dstN = 1,
+                                  uint32_t dstM = 1
+                                ) {
+  AscendC::DataCopyExtParams dataCopyParams(
+      dstM, dstN * sizeof(T), srcStride * sizeof(T), dstStride, 0);
+  AscendC::DataCopyPadExtParams<T> padParams(true, 0, dstStride, 0);
+  AscendC::DataCopyPad(dstTensor, srcTensor, dataCopyParams, padParams);
+}
+
 template <typename T, uint32_t dstN, uint32_t srcN, uint32_t srcM = 1>
 CATLASS_DEVICE void copy_ub_to_gm(GlobalTensor<T> dstTensor,
                                   LocalTensor<T> srcTensor) {
   AscendC::DataCopyExtParams dataCopyParams(srcM, srcN * sizeof(T), 0,
                                             (dstN - srcN) * sizeof(T), 0);
+  AscendC::DataCopyPad(dstTensor, srcTensor, dataCopyParams);
+}
+
+template <typename T>
+CATLASS_DEVICE void copy_ub_to_gm_beam(GlobalTensor<T> dstTensor,
+                                  LocalTensor<T> srcTensor,
+                                  uint32_t srcStride,
+                                  uint32_t dstStride,
+                                  uint32_t srcN, 
+                                  uint32_t srcM = 1
+                                ) {
+  AscendC::DataCopyExtParams dataCopyParams(srcM, srcN * sizeof(T), srcStride,
+                                            dstStride * sizeof(T), 0);
+  AscendC::DataCopyPad(dstTensor, srcTensor, dataCopyParams);
+}
+
+template <typename T>
+CATLASS_DEVICE void copy_ub_to_gm_beam_token(GlobalTensor<T> dstTensor,
+                                  LocalTensor<T> srcTensor,
+                                  uint32_t srcStride,
+                                  uint32_t dstStride,
+                                  uint32_t srcN, 
+                                  uint32_t srcM = 1
+                                ) {
+  AscendC::DataCopyExtParams dataCopyParams(srcM, srcN * sizeof(T), srcStride * sizeof(T),
+                                           dstStride * sizeof(T), 0);
   AscendC::DataCopyPad(dstTensor, srcTensor, dataCopyParams);
 }
 
@@ -188,6 +242,34 @@ CATLASS_DEVICE void copy_ub_to_ub(LocalTensor<T1> dstTensor,
   } else {
     AscendC::Cast(dstTensor, srcTensor, AscendC::RoundMode::CAST_RINT, len);
   }
+}
+
+template <typename T1, typename T2>
+CATLASS_DEVICE void copy_ub_to_ub_beam(LocalTensor<T1> dstTensor,
+                                  LocalTensor<T2> srcTensor,
+                                  uint32_t len
+                                ) {
+  if constexpr (std::is_same_v<T1, T2>) {
+    AscendC::DataCopy(dstTensor, srcTensor, len);
+  } else {
+    AscendC::Cast(dstTensor, srcTensor, AscendC::RoundMode::CAST_RINT, len);
+  }
+}
+
+template <typename T1, typename T2>
+CATLASS_DEVICE void copy_ub_to_ub_beam_align(LocalTensor<T1> dstTensor,
+                                  LocalTensor<T2> srcTensor,
+                                  uint32_t count,
+                                  uint32_t len,
+                                  uint32_t srcS,
+                                  uint32_t dstS
+                                ) {
+    AscendC::DataCopyParams dataCopyParams;
+    dataCopyParams.blockCount = count;
+    dataCopyParams.blockLen = len * sizeof(T1)/32;
+    dataCopyParams.srcStride = srcS;
+    dataCopyParams.dstStride = dstS;
+    AscendC::DataCopy(dstTensor, srcTensor, dataCopyParams);
 }
 
 template <typename T, uint32_t M, uint32_t N>

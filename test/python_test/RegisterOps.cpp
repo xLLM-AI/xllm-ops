@@ -83,8 +83,29 @@ at::Tensor x_attention_impl_npu(const at::Tensor& query,
   return attnOut;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> beam_search_group_impl_npu(
+                                const at::Tensor& log_probs,
+                                const at::Tensor& top_tokens,
+                                const at::Tensor& top_probs,
+                                const at::Tensor& sequence,
+                                int64_t current_step
+                              ) {
+  auto output_shape = log_probs.sizes();
+  // Allocate outputs on the same device with appropriate dtypes
+  at::Tensor out_token_ids = at::zeros(output_shape, top_tokens.options());
+  at::Tensor out_token_index = at::zeros(output_shape, top_tokens.options());
+  at::Tensor out_log_probs = at::zeros(output_shape, log_probs.options());
+  at::Tensor out_beam_count_prefix_sums = at::zeros(output_shape, top_tokens.options());
+  at::Tensor out_sequence = at::zeros(sequence.sizes(), top_tokens.options());
+  EXEC_NPU_CMD(aclnnBeamSearchGroup,
+               log_probs, top_tokens, top_probs, sequence,current_step,
+               out_token_ids, out_token_index, out_log_probs, out_beam_count_prefix_sums, out_sequence);
+  return std::make_tuple(out_token_ids, out_token_index, out_log_probs, out_beam_count_prefix_sums, out_sequence);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("select_unshared_kv", &select_unshared_kv_impl_npu, "select_unshared_kv");
   m.def("cache_unshared_kv", &cache_unshared_kv_impl_npu, "cache_unshared_kv");
   m.def("x_attention", &x_attention_impl_npu, "x_attention");
+  m.def("beam_search_group", &beam_search_group_impl_npu, "beam_search_group");
 }

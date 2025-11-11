@@ -3,6 +3,10 @@ add_ops_compile_options(
         OPTIONS --cce-auto-sync=on
                 -Wno-deprecated-declarations
                 -Werror
+                -I${CMAKE_SOURCE_DIR}/third_party/catlass/include
+                -I${CMAKE_SOURCE_DIR}/common
+                -sanitizer
+                # -g
 )
 
 target_sources(op_host_aclnn PRIVATE
