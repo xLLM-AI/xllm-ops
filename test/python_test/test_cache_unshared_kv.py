@@ -36,20 +36,22 @@ def test_cache_unshared_kv_npu(dtype):
     beam_size = 512
     head_num = 8
     head_dim = 128
+    block_num = 30
 
     x_key_block_npu = torch.zeros(
-        [batch * beam_size, head_num, max_decode_step, head_dim], dtype=dtype
+        [block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype
     ).npu()
     x_value_block_npu = torch.zeros(
-        [batch * beam_size, head_num, max_decode_step, head_dim], dtype=dtype
+        [block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype
     ).npu()
     x_key_block = torch.zeros(
-        [batch * beam_size, head_num, max_decode_step, head_dim], dtype=dtype
+        [block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype
     )
     x_value_block = torch.zeros(
-        [batch * beam_size, head_num, max_decode_step, head_dim], dtype=dtype
+        [block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype
     )
 
+    block_table = torch.randperm(block_num)[:batch].to(torch.int32)
     atol_div = 1e-6
 
     for decode_step in range(1, max_decode_step + 1):
@@ -58,8 +60,10 @@ def test_cache_unshared_kv_npu(dtype):
         real_index = decode_step - 1
 
         # Fill key/value for this step
-        x_key_block[:, :, real_index, :] = curr_key
-        x_value_block[:, :, real_index, :] = curr_value
+        for b_idx in range(batch):
+            block_index = block_table[b_idx]
+            x_key_block[block_index, :, :, real_index, :] = curr_key[b_idx * beam_size : (b_idx * beam_size + beam_size)]
+            x_value_block[block_index, :, :, real_index, :] = curr_value[b_idx * beam_size : (b_idx * beam_size + beam_size)]
 
         decode_step_tensor = torch.tensor([decode_step], dtype=torch.int32)
 
@@ -69,6 +73,7 @@ def test_cache_unshared_kv_npu(dtype):
             x_value_block_npu,
             curr_key.npu(),
             curr_value.npu(),
+            block_table.npu(),
             decode_step_tensor.npu(),
         )
 

@@ -17,7 +17,7 @@ limitations under the License.
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(SelectUnsharedKVTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, total_tokens);
+  TILING_DATA_FIELD_DEF(uint32_t, total_beam);
   TILING_DATA_FIELD_DEF(uint32_t, head_num);
   TILING_DATA_FIELD_DEF(uint32_t, head_dim);
   TILING_DATA_FIELD_DEF(uint32_t, copy_head_num_per_loop);
@@ -25,12 +25,14 @@ BEGIN_TILING_DATA_DEF(SelectUnsharedKVTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, copy_head_num_tail);
   TILING_DATA_FIELD_DEF(uint32_t, max_decode_step);
   TILING_DATA_FIELD_DEF(uint32_t, used_core_num);
-  TILING_DATA_FIELD_DEF(uint32_t, block_beam_stride);
-  TILING_DATA_FIELD_DEF(uint32_t, block_batch_stride);
-  TILING_DATA_FIELD_DEF(uint32_t, block_head_stride);
+  TILING_DATA_FIELD_DEF(uint64_t, block_beam_stride);
+  TILING_DATA_FIELD_DEF(uint64_t, block_batch_stride);
+  TILING_DATA_FIELD_DEF(uint64_t, block_head_stride);
+  TILING_DATA_FIELD_DEF(uint64_t, block_layer_stride);
   TILING_DATA_FIELD_DEF(uint32_t, decode_step);
   TILING_DATA_FIELD_DEF(uint32_t, beam_size);
   TILING_DATA_FIELD_DEF(uint32_t, batch);
+  TILING_DATA_FIELD_DEF(uint32_t, layer_num);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(SelectUnsharedKV, SelectUnsharedKVTilingData)

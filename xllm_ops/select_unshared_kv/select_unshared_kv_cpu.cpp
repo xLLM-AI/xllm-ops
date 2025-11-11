@@ -22,9 +22,8 @@ enum InputIndex {
     BEAM_INDEX = 0,
     X_KEY_BLOCK,
     X_VALUE_BLOCK,
-    GROUP_TOKEN_NUM,
-    DECODE_STEP,
-    BEAM_SIZE
+    BLOCK_TABLE,
+    GROUP_TOKEN_NUM
 };
 
 constexpr uint64_t DIM_0 = 0;
@@ -43,17 +42,22 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 
     SelectUnsharedKVTilingData tiling;
     const gert::StorageShape* x_key_block_shape = context->GetInputShape(X_KEY_BLOCK);
-    uint32_t total_tokens = x_key_block_shape->GetStorageShape().GetDim(0);
-    uint32_t head_num = x_key_block_shape->GetStorageShape().GetDim(1);
-    uint32_t max_decode_step = x_key_block_shape->GetStorageShape().GetDim(2);
-    uint32_t head_dim = x_key_block_shape->GetStorageShape().GetDim(3);
+    const gert::StorageShape* block_table_shape = context->GetInputShape(BLOCK_TABLE);
+
+    uint32_t layer_num = x_key_block_shape->GetStorageShape().GetDim(0);
+    uint32_t block_num = x_key_block_shape->GetStorageShape().GetDim(1);
+    uint32_t head_num = x_key_block_shape->GetStorageShape().GetDim(3);
+    uint32_t max_decode_step = x_key_block_shape->GetStorageShape().GetDim(4);
+    uint32_t head_dim = x_key_block_shape->GetStorageShape().GetDim(5);
     uint32_t decode_step = static_cast<uint32_t>(*(context->GetAttrs()->GetAttrPointer<int>(0)));
     uint32_t beam_size = static_cast<uint32_t>(*(context->GetAttrs()->GetAttrPointer<int>(1)));
-    uint32_t batch = total_tokens / beam_size;
-    uint32_t used_core_num = std::min(total_tokens, core_num);
-    uint32_t block_head_stride = max_decode_step * head_dim;
-    uint32_t block_beam_stride = head_num * block_head_stride;
-    uint32_t block_batch_stride = block_beam_stride * beam_size;
+    uint32_t batch = block_table_shape->GetStorageShape().GetDim(0);
+    uint32_t total_beam = batch * beam_size;
+    uint32_t used_core_num = std::min(total_beam, core_num);
+    uint64_t block_head_stride = max_decode_step * head_dim;
+    uint64_t block_beam_stride = head_num * block_head_stride;
+    uint64_t block_batch_stride = block_beam_stride * beam_size;
+    uint64_t block_layer_stride = block_batch_stride * block_num;
     uint32_t copy_head_num_per_loop = MAX_USED_UB_SIZE / sizeof(int16_t) / head_dim;
     uint32_t copy_repeat_times = (head_num + copy_head_num_per_loop - 1) / copy_head_num_per_loop;
     uint32_t copy_head_num_tail = head_num % copy_head_num_per_loop;
@@ -66,7 +70,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
         copy_head_num_tail = copy_head_num_per_loop;
     }
 
-    tiling.set_total_tokens(total_tokens);
+    tiling.set_total_beam(total_beam);
     tiling.set_head_num(head_num);
     tiling.set_head_dim(head_dim);
     tiling.set_max_decode_step(max_decode_step);
@@ -80,6 +84,9 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_decode_step(decode_step);
     tiling.set_beam_size(beam_size);
     tiling.set_batch(batch);
+    tiling.set_layer_num(layer_num);
+    tiling.set_block_layer_stride(block_layer_stride);
+    
     context->SetBlockDim(used_core_num);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
@@ -127,6 +134,11 @@ public:
         this->Input("x_value_block")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
+        this->Input("block_table")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("group_token_num")

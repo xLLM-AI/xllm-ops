@@ -29,6 +29,11 @@ BEGIN_TILING_DATA_DEF(CacheUnsharedKvTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, used_core_num);
   TILING_DATA_FIELD_DEF(uint32_t, block_beam_stride);
   TILING_DATA_FIELD_DEF(uint32_t, block_head_stride);
+  TILING_DATA_FIELD_DEF(uint32_t, batch);
+  TILING_DATA_FIELD_DEF(uint32_t, beam_size);
+  TILING_DATA_FIELD_DEF(uint32_t, task_num_per_batch);
+  TILING_DATA_FIELD_DEF(uint32_t, copy_beam_tail);
+  TILING_DATA_FIELD_DEF(uint32_t, block_batch_stride);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(CacheUnsharedKv, CacheUnsharedKvTilingData)

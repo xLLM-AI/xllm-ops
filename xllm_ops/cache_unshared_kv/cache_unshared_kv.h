@@ -37,6 +37,7 @@ public:
     GlobalTensor<T> x_value_block_gm_;
     GlobalTensor<T> cur_key_gm_;
     GlobalTensor<T> cur_value_gm_;
+    GlobalTensor<int32_t> block_table_gm_;
     GlobalTensor<int32_t> decode_step_gm_;
     GlobalTensor<T> select_key_block_gm_;
     GlobalTensor<T> select_value_block_gm_;
@@ -50,7 +51,7 @@ public:
     __aicore__ inline CacheUnsharedKvKernel(AscendC::TPipe *pipe) {pipe_ = pipe;}
 
     __aicore__ inline void Init(GM_ADDR x_key_block, GM_ADDR x_value_block,
-                                GM_ADDR cur_key, GM_ADDR cur_value, GM_ADDR decode_step,
+                                GM_ADDR cur_key, GM_ADDR cur_value, GM_ADDR block_table, GM_ADDR decode_step,
                                 const CacheUnsharedKvTilingData *tiling,
                                 GM_ADDR select_key_block, GM_ADDR select_value_block)
     {
@@ -61,6 +62,7 @@ public:
         x_value_block_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(x_value_block));
         cur_key_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(cur_key));
         cur_value_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(cur_value));
+        block_table_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(block_table));
         select_key_block_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(select_key_block));
         select_value_block_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(select_value_block));
         pipe_->InitBuffer(ubuf_, TOTAL_UB_SIZE);
@@ -78,11 +80,15 @@ public:
         // Task layer loop
         for (size_t task_idx = core_id; task_idx < tiling_.total_task; task_idx+=used_core_num)
         {
-            uint32_t copy_tokens = (task_idx == tiling_.total_task - 1) ? 
-                                   (tiling_.total_tokens - task_idx * tiling_.copy_beam_per_task) : 
+            uint32_t batch_idx = task_idx / tiling_.task_num_per_batch;
+            uint32_t inner_idx = task_idx % tiling_.task_num_per_batch;
+            uint32_t block_idx = block_table_gm_.GetValue(batch_idx);
+            uint32_t copy_tokens = (inner_idx == tiling_.task_num_per_batch - 1) ? 
+                                   tiling_.copy_beam_tail : 
                                    tiling_.copy_beam_per_task;
-            uint32_t beam_src_offset = task_idx * tiling_.copy_beam_per_task * tiling_.head_num * tiling_.head_dim;
-            uint32_t beam_dst_offset = beam_src_offset * tiling_.max_decode_step;
+            uint32_t beam_src_offset = batch_idx * tiling_.beam_size * tiling_.head_num * tiling_.head_dim +
+                                       inner_idx * tiling_.copy_beam_per_task * tiling_.head_num * tiling_.head_dim;
+            uint32_t beam_dst_offset = block_idx * tiling_.block_batch_stride + inner_idx * tiling_.copy_beam_per_task * tiling_.block_beam_stride;
 
             // head_num loop
             for (size_t inner_loop_idx = 0; inner_loop_idx < tiling_.copy_repeat_times; inner_loop_idx++)

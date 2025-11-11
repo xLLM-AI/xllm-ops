@@ -21,6 +21,7 @@ std::tuple<at::Tensor&, at::Tensor&> select_unshared_kv_impl_npu(
     const at::Tensor& beam_index,
     at::Tensor& x_key_block,
     at::Tensor& x_value_block,
+    const at::Tensor& block_table,
     const at::Tensor& group_token_num,
     int64_t decode_step,
     int64_t beam_size) {
@@ -28,6 +29,7 @@ std::tuple<at::Tensor&, at::Tensor&> select_unshared_kv_impl_npu(
                beam_index,
                x_key_block,
                x_value_block,
+               block_table,
                group_token_num,
                decode_step,
                beam_size,
@@ -41,12 +43,14 @@ std::tuple<at::Tensor&, at::Tensor&> cache_unshared_kv_impl_npu(
     at::Tensor& x_value_block,
     const at::Tensor& curr_key,
     const at::Tensor& curr_value,
+    const at::Tensor& block_table,
     const at::Tensor& decode_step) {
   EXEC_NPU_CMD(aclnnCacheUnsharedKv,
                x_key_block,
                x_value_block,
                curr_key,
                curr_value,
+               block_table,
                decode_step,
                x_key_block,
                x_value_block);
