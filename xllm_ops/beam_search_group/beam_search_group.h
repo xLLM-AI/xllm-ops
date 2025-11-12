@@ -17,6 +17,8 @@ limitations under the License.
 #include "kernel_tiling/kernel_tiling.h"
 #include "common.h"
 
+constexpr uint32_t FLOAT_BLOCK_SIZE = 8;
+
 using namespace AscendC;
 template <typename TokenIdType, typename LogProbType> class BeamSearchGroup {
 public:
@@ -119,10 +121,12 @@ class ProcessSequence{
  public:
   __aicore__ inline ProcessSequence() {}
   __aicore__ inline void
-  Init(GM_ADDR sequence, GM_ADDR token_index, GM_ADDR out_sequence, GM_ADDR out_token_ids,
+  Init(GM_ADDR sequence, GM_ADDR token_index, GM_ADDR out_sequence, GM_ADDR out_token_ids, GM_ADDR top_tokens,
      int32_t beam_width, int32_t current_step, int32_t max_decode_step, int32_t request_num);
   __aicore__ inline void
   Process();
+  __aicore__ inline void
+  SubProcessSeqPrefill(int32_t request_idx);
   
  private:
   int32_t beam_width;
@@ -131,15 +135,22 @@ class ProcessSequence{
   int32_t request_num;
   int32_t align_beam_width;
   int32_t align_current_step;
+  int32_t sequence_buf_alignsize;
+  int32_t top_k;
   AscendC::GlobalTensor<int32_t> sequence_gm;
   AscendC::GlobalTensor<int32_t> out_sequence_gm;
   AscendC::GlobalTensor<int32_t> token_index_gm;
   AscendC::GlobalTensor<int32_t> out_token_ids_gm;
+  AscendC::GlobalTensor<int32_t> top_tokens_gm;
+  AscendC::LocalTensor<int32_t> in_sequence_local_origin;
+  AscendC::LocalTensor<int32_t> gatherb_offset_local;
+  AscendC::LocalTensor<int32_t> out_sequence_local;
   AscendC::TPipe pipe;
   AscendC::TQue<AscendC::QuePosition::VECIN, 1> sequence_in_que;
   AscendC::TQue<AscendC::QuePosition::VECOUT, 1> sequence_out_que;
   AscendC::TQue<AscendC::QuePosition::VECIN, 1> in_token_ids_que;
   AscendC::TBuf<AscendC::TPosition::VECCALC> sequence_buf;
   AscendC::TBuf<AscendC::TPosition::VECCALC> token_index_buf;
+  AscendC::TBuf<AscendC::TPosition::VECCALC> top_tokens_buf;
   AscendC::TBuf<AscendC::TPosition::VECOUT> out_token_ids_buf;
 };

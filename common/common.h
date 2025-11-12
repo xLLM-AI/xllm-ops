@@ -229,7 +229,7 @@ CATLASS_DEVICE void copy_ub_to_gm_beam_token(GlobalTensor<T> dstTensor,
                                   uint32_t srcN, 
                                   uint32_t srcM = 1
                                 ) {
-  AscendC::DataCopyExtParams dataCopyParams(srcM, srcN * sizeof(T), srcStride * sizeof(T),
+  AscendC::DataCopyExtParams dataCopyParams(srcM, srcN * sizeof(T), srcStride,
                                            dstStride * sizeof(T), 0);
   AscendC::DataCopyPad(dstTensor, srcTensor, dataCopyParams);
 }

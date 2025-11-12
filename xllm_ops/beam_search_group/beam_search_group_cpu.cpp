@@ -69,7 +69,11 @@ ge::graphStatus TilingBeamSearchGroupFunc::Init() {
   num_sequences_ = token_ids_shape.GetDim(token_ids_shape.GetDimNum() - 2);
   sequence_length_ = token_ids_shape.GetDim(token_ids_shape.GetDimNum() - 1);
   top_k_ = top_tokens_shape.GetDim(top_tokens_shape.GetDimNum() - 1);
-  beam_width_ = top_k_;
+  if (current_step_ == 0 && top_k_ != 1) {
+      OP_LOGE(context->GetNodeName(), "if current_step = 0, top_k must be 1");
+      return ge::GRAPH_FAILED;
+  }
+  beam_width_ = sequence_shape.GetDim(sequence_shape.GetDimNum() - 2);
   request_num_ = num_sequences_ / beam_width_;
   core_num_ = aiv_num;
   int32_t block_size1 = 32/sizeof(float);
@@ -190,32 +194,32 @@ namespace ops {
 class BeamSearchGroup : public OpDef {
  public:
   explicit BeamSearchGroup(const char* name) : OpDef(name) {
-    this->Input("log_probs")
+    this->Input("log_probs")   
         .ParamType(REQUIRED)
         .DataType({ge::DT_FLOAT})
         .Format({ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND});
-    this->Input("top_tokens")
+    this->Input("top_tokens") 
         .ParamType(REQUIRED)
         .DataType({ge::DT_INT32})
         .Format({ge::FORMAT_ND})
-        .UnknownShapeFormat({ge::FORMAT_ND});
-    this->Input("top_probs")
+        .UnknownShapeFormat({ge::FORMAT_ND}); 
+    this->Input("top_probs")  
         .ParamType(REQUIRED)
         .DataType({ge::DT_FLOAT})
         .Format({ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND});
-    this->Input("sequence")
+    this->Input("sequence")   
         .ParamType(REQUIRED)
         .DataType({ge::DT_INT32})
         .Format({ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND});
-    this->Output("out_token_ids")
+    this->Output("out_token_ids") 
         .ParamType(REQUIRED)
         .DataType({ge::DT_INT32})
         .Format({ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND});
-    this->Output("out_token_index")
+    this->Output("out_token_index")  
         .ParamType(REQUIRED)
         .DataType({ge::DT_INT32})
         .Format({ge::FORMAT_ND})
