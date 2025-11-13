@@ -22,6 +22,6 @@ extern "C" __global__ __aicore__ void select_unshared_kv(GM_ADDR beam_index, GM_
     GET_TILING_DATA(tiling_data, tiling);
     TPipe pipe;
     kernels::SelectUnsharedKVKernel<DTYPE_X_KEY_BLOCK, DTYPE_BEAM_INDEX> op(&pipe);
-    op.Init(beam_index, x_key_block, x_value_block, block_table, group_token_num, workspace, &tiling_data, select_key_block, select_value_block);
+    op.Init(beam_index, x_key_block, x_value_block, block_table, group_token_num, workspace, &tiling_data);
     op.process();
 }

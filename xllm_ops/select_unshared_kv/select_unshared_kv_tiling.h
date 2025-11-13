@@ -28,7 +28,6 @@ BEGIN_TILING_DATA_DEF(SelectUnsharedKVTilingData)
   TILING_DATA_FIELD_DEF(uint64_t, block_beam_stride);
   TILING_DATA_FIELD_DEF(uint64_t, block_batch_stride);
   TILING_DATA_FIELD_DEF(uint64_t, block_head_stride);
-  TILING_DATA_FIELD_DEF(uint64_t, block_layer_stride);
   TILING_DATA_FIELD_DEF(uint32_t, decode_step);
   TILING_DATA_FIELD_DEF(uint32_t, beam_size);
   TILING_DATA_FIELD_DEF(uint32_t, batch);

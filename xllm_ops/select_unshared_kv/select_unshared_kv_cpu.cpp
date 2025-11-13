@@ -41,23 +41,23 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     uint32_t core_num = ascendcPlatform.GetCoreNumAiv();
 
     SelectUnsharedKVTilingData tiling;
-    const gert::StorageShape* x_key_block_shape = context->GetInputShape(X_KEY_BLOCK);
+    const gert::StorageShape* x_key_block_shape = context->GetDynamicInputShape(X_KEY_BLOCK, 0);
     const gert::StorageShape* block_table_shape = context->GetInputShape(BLOCK_TABLE);
 
-    uint32_t layer_num = x_key_block_shape->GetStorageShape().GetDim(0);
-    uint32_t block_num = x_key_block_shape->GetStorageShape().GetDim(1);
-    uint32_t head_num = x_key_block_shape->GetStorageShape().GetDim(3);
-    uint32_t max_decode_step = x_key_block_shape->GetStorageShape().GetDim(4);
-    uint32_t head_dim = x_key_block_shape->GetStorageShape().GetDim(5);
+    uint32_t block_num = x_key_block_shape->GetStorageShape().GetDim(0);
+    uint32_t head_num = x_key_block_shape->GetStorageShape().GetDim(2);
+    uint32_t max_decode_step = x_key_block_shape->GetStorageShape().GetDim(3);
+    uint32_t head_dim = x_key_block_shape->GetStorageShape().GetDim(4);
     uint32_t decode_step = static_cast<uint32_t>(*(context->GetAttrs()->GetAttrPointer<int>(0)));
     uint32_t beam_size = static_cast<uint32_t>(*(context->GetAttrs()->GetAttrPointer<int>(1)));
+    uint32_t layer_num = static_cast<uint32_t>(*(context->GetAttrs()->GetAttrPointer<int>(2)));
+
     uint32_t batch = block_table_shape->GetStorageShape().GetDim(0);
     uint32_t total_beam = batch * beam_size;
     uint32_t used_core_num = std::min(total_beam, core_num);
     uint64_t block_head_stride = max_decode_step * head_dim;
     uint64_t block_beam_stride = head_num * block_head_stride;
     uint64_t block_batch_stride = block_beam_stride * beam_size;
-    uint64_t block_layer_stride = block_batch_stride * block_num;
     uint32_t copy_head_num_per_loop = MAX_USED_UB_SIZE / sizeof(int16_t) / head_dim;
     uint32_t copy_repeat_times = (head_num + copy_head_num_per_loop - 1) / copy_head_num_per_loop;
     uint32_t copy_head_num_tail = head_num % copy_head_num_per_loop;
@@ -85,7 +85,6 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_beam_size(beam_size);
     tiling.set_batch(batch);
     tiling.set_layer_num(layer_num);
-    tiling.set_block_layer_stride(block_layer_stride);
     
     context->SetBlockDim(used_core_num);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
@@ -98,20 +97,27 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* key_block_shape = context->GetInputShape(X_KEY_BLOCK);
-    const gert::Shape* value_block_shape = context->GetInputShape(X_VALUE_BLOCK);
-    gert::Shape* select_key_shape = context->GetOutputShape(0);
-    gert::Shape* select_value_shape = context->GetOutputShape(1);
-    *select_key_shape = *key_block_shape;
-    *select_value_shape = *value_block_shape;
+    uint32_t layer_num = static_cast<uint32_t>(*(context->GetAttrs()->GetAttrPointer<int>(2)));
+    for (size_t i = 0; i < layer_num; i++) {
+        const gert::Shape* key_block_shape = context->GetDynamicInputShape(X_KEY_BLOCK, i);
+        const gert::Shape* value_block_shape = context->GetDynamicInputShape(X_VALUE_BLOCK, i);
+        gert::Shape* select_key_shape = context->GetOutputShape(i);
+        gert::Shape* select_value_shape = context->GetOutputShape(i + layer_num);
+        *select_key_shape = *key_block_shape;
+        *select_value_shape = *value_block_shape;
+    }
+
     return GRAPH_SUCCESS;
 }
 
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-    const auto inputDataType = context->GetInputDataType(X_KEY_BLOCK);
-    context->SetOutputDataType(0, inputDataType);
-    context->SetOutputDataType(1, inputDataType);
+    uint32_t layer_num = static_cast<uint32_t>(*(context->GetAttrs()->GetAttrPointer<int>(2)));
+    const auto inputDataType = context->GetDynamicInputDataType(X_KEY_BLOCK, 0);
+    for (size_t i = 0; i < layer_num; i++) {
+        context->SetOutputDataType(i, inputDataType);
+        context->SetOutputDataType(i + layer_num, inputDataType);
+    }
     return ge::GRAPH_SUCCESS;
 }
 }
@@ -127,12 +133,12 @@ public:
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("x_key_block")
-            .ParamType(REQUIRED)
+            .ParamType(DYNAMIC)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("x_value_block")
-            .ParamType(REQUIRED)
+            .ParamType(DYNAMIC)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
@@ -147,17 +153,18 @@ public:
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Output("select_key_block")
-            .ParamType(REQUIRED)
+            .ParamType(DYNAMIC)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Output("select_value_block")
-            .ParamType(REQUIRED)
+            .ParamType(DYNAMIC)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Attr("decode_step").Int(0);
         this->Attr("beam_size").Int(0);
+        this->Attr("layer_num").Int(0);
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 

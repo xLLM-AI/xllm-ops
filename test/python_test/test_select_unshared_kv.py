@@ -16,6 +16,7 @@
 
 import pytest
 import torch
+from typing import List
 
 
 torch_npu = pytest.importorskip("torch_npu")
@@ -24,7 +25,7 @@ custom_ops = pytest.importorskip("custom_ops")
 
 def _select_unshared_kv(
     global_index: torch.Tensor,
-    unshared_kv_cache: torch.Tensor,
+    unshared_kv_cache_list: List[torch.Tensor],
     token_idxs: torch.Tensor,
     block_table: torch.Tensor,
     decode_step: int,
@@ -37,32 +38,37 @@ def _select_unshared_kv(
 ):
     # Store token_idx of this step into global_index
     global_index[:, :, decode_step - 1] = token_idxs.reshape([batch, beam_size])
+    select_kv_cache_list = []
 
-    select_kv_cache = torch.zeros(
-        [layer_num, batch, beam_size, head_num, decode_step, head_dim],
-        dtype=unshared_kv_cache.dtype,
-    )
+    for layer_idx in range(layer_num):
+        unshared_kv_cache = unshared_kv_cache_list[layer_idx]
 
-    # Iteratively search back in time
-    for batch_idx in range(batch):
-        prev_step_token_index = token_idxs[batch_idx * beam_size : batch_idx * beam_size + beam_size]
-        block_index = block_table[batch_idx]
-        for i in range(decode_step, 0, -1):
-            real_idx = i - 1
-            # Find indices for this step
-            if i == decode_step:
-                cur_step_token_index = prev_step_token_index
-            else:
-                cur_step_token_index = global_index[batch_idx, prev_step_token_index, real_idx]
-                prev_step_token_index = cur_step_token_index
-            # Gather KV for this step based on indices
-            batch_kv_cache = unshared_kv_cache[:, block_index, ...]
-            cur_step_kv = batch_kv_cache[:, cur_step_token_index, :, real_idx, :]
-            select_kv_cache[
-                :, batch_idx, :, :, real_idx, :
-            ] = cur_step_kv
+        select_kv_cache = torch.zeros(
+            [batch, beam_size, head_num, decode_step, head_dim],
+            dtype=unshared_kv_cache.dtype,
+        )
 
-    return select_kv_cache
+        # Iteratively search back in time
+        for batch_idx in range(batch):
+            prev_step_token_index = token_idxs[batch_idx * beam_size : batch_idx * beam_size + beam_size]
+            block_index = block_table[batch_idx]
+            for i in range(decode_step, 0, -1):
+                real_idx = i - 1
+                # Find indices for this step
+                if i == decode_step:
+                    cur_step_token_index = prev_step_token_index
+                else:
+                    cur_step_token_index = global_index[batch_idx, prev_step_token_index, real_idx]
+                    prev_step_token_index = cur_step_token_index
+                # Gather KV for this step based on indices
+                batch_kv_cache = unshared_kv_cache[block_index, ...]
+                cur_step_kv = batch_kv_cache[cur_step_token_index, :, real_idx, :]
+                select_kv_cache[
+                    batch_idx, :, :, real_idx, :
+                ] = cur_step_kv
+        select_kv_cache_list.append(select_kv_cache)
+
+    return select_kv_cache_list
 
 
 def _calc_group_num(token_idxs: torch.Tensor, *, batch: int, beam_size: int) -> torch.Tensor:
@@ -102,26 +108,20 @@ def test_select_unshared_kv_npu(dtype,batch,max_decode_step,beam_size,head_num,h
 
     torch.manual_seed(1234)
 
-    # batch = 10
-    # max_decode_step = 3
-    # beam_size = 512
-    # head_num = 8
-    # head_dim = 128
-    # block_num = 30
-    # layer_num = 10
+    x_key_block_npu_list = []
+    x_value_block_npu_list = []
+    x_key_block_list = []
+    x_value_block_list = []
 
-    x_key_block_npu = torch.zeros(
-        [layer_num, block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype
-    ).npu()
-    x_value_block_npu = torch.zeros(
-        [layer_num, block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype
-    ).npu()
-    x_key_block = torch.zeros(
-        [layer_num, block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype
-    )
-    x_value_block = torch.zeros(
-        [layer_num, block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype
-    )
+    for _ in range(layer_num):
+        x_key_block_npu_list.append(torch.zeros(
+                [block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype).npu())
+        x_value_block_npu_list.append(torch.zeros(
+                [block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype).npu())
+        x_key_block_list.append(torch.zeros(
+                [block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype))
+        x_value_block_list.append(torch.zeros(
+                [block_num, beam_size, head_num, max_decode_step, head_dim], dtype=dtype))
 
     block_table = torch.randperm(block_num)[:batch].to(torch.int32)
 
@@ -137,17 +137,19 @@ def test_select_unshared_kv_npu(dtype,batch,max_decode_step,beam_size,head_num,h
         # Fill key/value for this step
         for b_idx in range(batch):
             block_index = block_table[b_idx]
-            x_key_block[:, block_index, :, :, real_index, :] = curr_key[:, b_idx * beam_size : (b_idx * beam_size + beam_size)]
-            x_value_block[:, block_index, :, :, real_index, :] = curr_value[:, b_idx * beam_size : (b_idx * beam_size + beam_size)]
-            x_key_block_npu[:, block_index, :, :, real_index, :] = curr_key[:, b_idx * beam_size : (b_idx * beam_size + beam_size)].npu()
-            x_value_block_npu[:, block_index, :, :, real_index, :] = curr_value[:, b_idx * beam_size : (b_idx * beam_size + beam_size)].npu()
+            for layer_idx in range(layer_num):
+                x_key_block_list[layer_idx][block_index, :, :, real_index, :] = curr_key[layer_idx, b_idx * beam_size : (b_idx * beam_size + beam_size)]
+                x_value_block_list[layer_idx][block_index, :, :, real_index, :] = curr_value[layer_idx, b_idx * beam_size : (b_idx * beam_size + beam_size)]
+                x_key_block_npu_list[layer_idx][block_index, :, :, real_index, :] = curr_key[layer_idx, b_idx * beam_size : (b_idx * beam_size + beam_size)].npu()
+                x_value_block_npu_list[layer_idx][block_index, :, :, real_index, :] = curr_value[layer_idx, b_idx * beam_size : (b_idx * beam_size + beam_size)].npu()
 
-        select_key_golden = _select_unshared_kv(
-            global_index, x_key_block, beam_idxs, block_table, decode_step,
+
+        select_key_golden_list = _select_unshared_kv(
+            global_index, x_key_block_list, beam_idxs, block_table, decode_step,
             layer_num=layer_num, batch=batch, beam_size=beam_size, head_num=head_num, head_dim=head_dim
         )
-        select_value_golden = _select_unshared_kv(
-            global_index, x_value_block, beam_idxs, block_table, decode_step,
+        select_value_golden_list = _select_unshared_kv(
+            global_index, x_value_block_list, beam_idxs, block_table, decode_step,
             layer_num=layer_num, batch=batch, beam_size=beam_size, head_num=head_num, head_dim=head_dim
         )
 
@@ -157,16 +159,20 @@ def test_select_unshared_kv_npu(dtype,batch,max_decode_step,beam_size,head_num,h
         # Run NPU kernel (in-place on x_key_block_npu/x_value_block_npu)
         custom_ops.select_unshared_kv_npu(
             beam_idxs.npu(),
-            x_key_block_npu,
-            x_value_block_npu,
+            x_key_block_npu_list,
+            x_value_block_npu_list,
             block_table.npu(),
             group_num.npu(),
             decode_step,
             beam_size,
+            layer_num
         )
 
-        select_key_npu = x_key_block_npu.cpu()[:, block_table, :, :, :decode_step, :]
-        select_value_npu = x_value_block_npu.cpu()[:, block_table, :, :, :decode_step, :]
+        for layer_idx in range(layer_num):
+            select_key_npu = x_key_block_npu_list[layer_idx].cpu()[block_table, :, :, :decode_step, :]
+            select_value_npu = x_value_block_npu_list[layer_idx].cpu()[block_table, :, :, :decode_step, :]
+            select_key_golden = select_key_golden_list[layer_idx]
+            select_value_golden = select_value_golden_list[layer_idx]
 
-        assert torch.allclose(select_key_npu, select_key_golden, atol=atol_div, rtol=0)
-        assert torch.allclose(select_value_npu, select_value_golden, atol=atol_div, rtol=0)
+            assert torch.allclose(select_key_npu, select_key_golden, atol=atol_div, rtol=0)
+            assert torch.allclose(select_value_npu, select_value_golden, atol=atol_div, rtol=0)

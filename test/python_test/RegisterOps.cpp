@@ -17,25 +17,29 @@ limitations under the License.
 
 #include "pytorch_npu_helper.hpp"
 
-std::tuple<at::Tensor&, at::Tensor&> select_unshared_kv_impl_npu(
+void select_unshared_kv_impl_npu(
     const at::Tensor& beam_index,
-    at::Tensor& x_key_block,
-    at::Tensor& x_value_block,
+    std::vector<at::Tensor> x_key_block,
+    std::vector<at::Tensor> x_value_block,
     const at::Tensor& block_table,
     const at::Tensor& group_token_num,
     int64_t decode_step,
-    int64_t beam_size) {
+    int64_t beam_size,
+    int64_t layer_num) {
+  at::TensorList x_key_block_list = at::TensorList(x_key_block);
+  at::TensorList x_value_block_list = at::TensorList(x_value_block);
   EXEC_NPU_CMD(aclnnSelectUnsharedKV,
                beam_index,
-               x_key_block,
-               x_value_block,
+               x_key_block_list,
+               x_value_block_list,
                block_table,
                group_token_num,
                decode_step,
                beam_size,
-               x_key_block,
-               x_value_block);
-  return std::tuple<at::Tensor&, at::Tensor&>(x_key_block, x_value_block);
+               layer_num,
+               x_key_block_list,
+               x_value_block_list);
+  return ;
 }
 
 std::tuple<at::Tensor&, at::Tensor&> cache_unshared_kv_impl_npu(
