@@ -24,5 +24,7 @@ struct TilingBufferInfo {
 
 TilingBufferInfo GetHostTilingBufferFromCustomPagedAttentionOperation(const Operation *operation);
 
+Status CreatePlanContext(Context **context);
+
 } // namespace customize
 } // namespace atb

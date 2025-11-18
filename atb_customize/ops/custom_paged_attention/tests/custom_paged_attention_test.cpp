@@ -373,7 +373,7 @@ TEST_F(TestCustomPagedAttention, CustomPagedAttentionTest)
 
     // prepare prelaunch context (only once)
     atb::Context *context_prelaunch = nullptr;
-    CHECK_STATUS(atb::CreateContext(&context_prelaunch));
+    CHECK_STATUS(atb::customize::CreatePlanContext(&context_prelaunch));
     atb::Context *context_execute = nullptr;
     CHECK_STATUS(atb::CreateContext(&context_execute));
     
@@ -662,7 +662,7 @@ TEST_F(TestCustomPagedAttention, GraphReplayWithTilingTensor)
     atb::Tensor standardOut = CreateTensor(ACL_FLOAT16, aclFormat::ACL_FORMAT_ND, {NTOKENS, HEAD_NUM, HEAD_SIZE});
     
     atb::Context *context_prelaunch = nullptr;
-    CHECK_STATUS(atb::CreateContext(&context_prelaunch));
+    CHECK_STATUS(atb::customize::CreatePlanContext(&context_prelaunch));
     atb::Context *context_execute = nullptr;
     CHECK_STATUS(atb::CreateContext(&context_execute));
     
