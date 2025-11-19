@@ -31,8 +31,8 @@ limitations under the License.
 using namespace AscendC;
 
 extern "C" __global__ __aicore__ void x_attention(GM_ADDR query, GM_ADDR shared_key_block, GM_ADDR shared_value_block, 
-                        GM_ADDR unshared_key_block, GM_ADDR unshared_value_block, GM_ADDR shared_block_table, GM_ADDR unshared_block_table,
-                        GM_ADDR shared_kv_lens, GM_ADDR decode_step, GM_ADDR attn_out, GM_ADDR workspace, GM_ADDR tiling) {
+                        GM_ADDR unshared_key_block, GM_ADDR unshared_value_block, GM_ADDR unshared_block_table,
+                        GM_ADDR shared_kv_lens, GM_ADDR decode_step, GM_ADDR shared_block_table, GM_ADDR attn_out, GM_ADDR workspace, GM_ADDR tiling) {
     // workspace use; [s,p,oTemp,oUpdate,shared_workspace,unshared_workspace]
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     GET_TILING_DATA(tiling_data, tiling);

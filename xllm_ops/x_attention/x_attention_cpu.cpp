@@ -34,10 +34,10 @@ enum InputIndex {
     SHARED_VALUE_BLOCK,
     UNSHARED_KEY_BLOCK,
     UNSHARED_VALUE_BLOCK,
-    SHARED_BLOCK_TABLE,
     UNSHARED_BLOCK_TABLE,
     SHARED_KV_LENS,
-    DECODE_STEP
+    DECODE_STEP,
+    SHARED_BLOCK_TABLE,
 };
 
 constexpr int32_t NUM2 = 2;
@@ -404,11 +404,6 @@ public:
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
-        this->Input("shared_block_table")
-            .ParamType(OPTIONAL)
-            .DataType({ge::DT_INT32, ge::DT_INT32})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("unshared_block_table")
             .ParamType(OPTIONAL)
             .DataType({ge::DT_INT32, ge::DT_INT32})
@@ -424,12 +419,16 @@ public:
             .DataType({ge::DT_INT32, ge::DT_INT32})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
+        this->Input("shared_block_table")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Output("attn_out")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
-
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
         this->AICore()
