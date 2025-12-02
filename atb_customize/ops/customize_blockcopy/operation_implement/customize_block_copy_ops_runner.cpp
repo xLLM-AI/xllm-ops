@@ -11,8 +11,8 @@
 #include "customize_blockcopy/kernel_implement/include/customizeblockcopy.h"
 #include "atb/utils/log.h"
 #include "atb/utils/tensor_util.h"
-#include "atb/core/operation_register.h"
-#include "atb/core/param_compare.h"
+#include "atb/utils/operation_register.h"
+#include "atb/utils/param_compare.h"
 
 namespace atb {
 CustomizeBlockCopyOpsRunner::CustomizeBlockCopyOpsRunner(const customize::BlockCopyParam &param)

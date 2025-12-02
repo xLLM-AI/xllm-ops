@@ -1,6 +1,6 @@
 #include "custom_paged_attention_function.h"
 #include "atb/context.h"
-#include "atb/core/context_base.h"
+#include "atb/context/context_base.h"
 #include <memory>
 
 namespace atb {

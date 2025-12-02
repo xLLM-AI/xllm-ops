@@ -15,8 +15,8 @@
 #include "atb/utils/tensor_util.h"
 #include "atb/utils/config.h"
 #include "custom_paged_attention_runner_utils.h"
-#include "atb/core/operation_register.h"
-#include "atb/core/param_compare.h"
+#include "atb/utils/operation_register.h"
+#include "atb/utils/param_compare.h"
 
 namespace atb {
 void PATransQViewFunc910a(const Mki::SVector<int64_t> &oldDims, Mki::SVector<int64_t> &newDims)
