@@ -14,7 +14,7 @@
  */
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
-#include "error/ops_error.h"
+#include "../../common/error/ops_error.h"
 
 
 using namespace ge;

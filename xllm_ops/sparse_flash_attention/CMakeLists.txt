@@ -9,10 +9,6 @@ target_sources(op_host_aclnn PRIVATE
         sparse_flash_attention_def.cpp
 )
 
-target_include_directories(optiling PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
 # optiling
 target_sources(optiling PRIVATE
         sparse_flash_attention_tiling.cpp
@@ -20,6 +16,7 @@ target_sources(optiling PRIVATE
 
 target_include_directories(optiling PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../common
 )
 
 
