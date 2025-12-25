@@ -15,6 +15,7 @@ git submodule update --init --recursive
 ########################################################################################################################
 
 CURRENT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
+git config --global --add safe.directory ${CURRENT_DIR}
 BUILD_DIR=${CURRENT_DIR}/build
 OUTPUT_DIR=${CURRENT_DIR}/output
 USER_ID=$(id -u)
