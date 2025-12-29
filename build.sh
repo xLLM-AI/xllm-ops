@@ -9,8 +9,30 @@
 # ======================================================================================================================
 
 set -e
-git config --global --add safe.directory $PWD
-git submodule update --init --recursive
+# Configure git safe.directory for container environments
+# Use git -c flag to set safe.directory without modifying config files
+# This avoids "dubious ownership" error and works in containers where /root/.gitconfig may be busy
+# Try to set safe.directory using git -c (doesn't modify config files)
+# If that doesn't work, try local config, then global config as fallback
+if ! git -c safe.directory="$PWD" rev-parse --git-dir >/dev/null 2>&1; then
+    # Try local config first (for submodule repositories)
+    # When this repository is used as a submodule, the .git directory structure
+    # is different (it's a file pointing to the parent's .git/modules/...).
+    # Using --local config ensures the safe.directory setting is specific to
+    # this submodule instance and doesn't interfere with the parent repository.
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+        if ! git config --local --get-all safe.directory 2>/dev/null | grep -q "^$PWD$"; then
+            git config --local --add safe.directory "$PWD" 2>/dev/null || true
+        fi
+    fi
+    # Fallback to global config (may fail in containers, but we continue anyway)
+    if ! git config --global --get-all safe.directory 2>/dev/null | grep -q "^$PWD$"; then
+        git config --global --add safe.directory "$PWD" 2>/dev/null || true
+    fi
+fi
+
+# Use git -c to ensure safe.directory is set for submodule operations
+git -c safe.directory="$PWD" submodule update --init --recursive
 ########################################################################################################################
 # 预定义变量
 ########################################################################################################################
