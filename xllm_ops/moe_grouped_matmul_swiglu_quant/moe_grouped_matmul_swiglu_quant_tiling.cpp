@@ -119,8 +119,15 @@ graphStatus TilingMoeGMMSwigluQuant(gert::TilingContext *context)
     int64_t row = 0;
     row = CalMaxRowInUb(context, compileInfoPtr->ubSize_, n);
 
+    auto core_num = compileInfoPtr->aicNum_;
+    auto n_task_num = (n + BASEN - 1) / BASEN;
+    auto task_num = m * n_task_num;
+    if (task_num < core_num) {
+        core_num = task_num;
+    }
+
     tilingData.gmmSwigluBaseParams.set_groupNum(groupNum);
-    tilingData.gmmSwigluBaseParams.set_coreNum(compileInfoPtr->aicNum_);
+    tilingData.gmmSwigluBaseParams.set_coreNum(core_num);
     tilingData.gmmSwigluBaseParams.set_K(k);
     tilingData.gmmSwigluBaseParams.set_N(n);
     tilingData.gmmSwigluBaseParams.set_M(m);
@@ -166,7 +173,7 @@ graphStatus TilingMoeGMMSwigluQuant(gert::TilingContext *context)
     bool isSplitWorkSpace = m > mLimit * DOUBLE_WORKSPACE_SPLIT;
     // OP_LOGD(context->GetNodeName(), "grouped_matmul_swiglu_quant_tiling.");
     // OP_LOGD(context->GetNodeName(), "gmmSwigluBaseParams.groupNum:      %ld", groupNum);
-    // OP_LOGD(context->GetNodeName(), "gmmSwigluBaseParams.coreNum:       %u ", compileInfoPtr->aicNum_);
+    // OP_LOGD(context->GetNodeName(), "gmmSwigluBaseParams.coreNum:       %u ", core_num);
     // OP_LOGD(context->GetNodeName(), "gmmSwigluBaseParams.M:             %ld", m);
     // OP_LOGD(context->GetNodeName(), "gmmSwigluBaseParams.K:             %ld", k);
     // OP_LOGD(context->GetNodeName(), "gmmSwigluBaseParams.N:             %ld", n);
@@ -183,7 +190,7 @@ graphStatus TilingMoeGMMSwigluQuant(gert::TilingContext *context)
     // OP_LOGD(context->GetNodeName(), "GMMSWIGLUQUANT_TILING: baseM is %u, baseK is %u, baseN is %u.", BASEM, BASEK, BASEN);
     SetTilingKey(context, isSplitWorkSpace);
     tilingData.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
-    context->SetBlockDim(compileInfoPtr->aicNum_); // block dim is the number of aicube
+    context->SetBlockDim(core_num); // block dim is the number of aicube
     context->GetRawTilingData()->SetDataSize(tilingData.GetDataSize());
     // OP_LOGD(context->GetNodeName(), "End Run GMM Swiglu Tiling.");
     return GRAPH_SUCCESS;
