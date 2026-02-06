@@ -44,6 +44,7 @@ target_compile_options(op_host_aclnn PRIVATE
 target_include_directories(op_host_aclnn SYSTEM PRIVATE
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include>
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn>
+        $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/pkg_inc>
 )
 
 add_library(op_host_aclnnInner SHARED EXCLUDE_FROM_ALL)
@@ -59,6 +60,7 @@ target_compile_options(op_host_aclnnInner PRIVATE
 target_include_directories(op_host_aclnnInner SYSTEM PRIVATE
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include>
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn>
+        $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/pkg_inc>
 )
 
 add_library(op_host_aclnnExc SHARED EXCLUDE_FROM_ALL)
@@ -74,6 +76,7 @@ target_compile_options(op_host_aclnnExc PRIVATE
 target_include_directories(op_host_aclnnExc SYSTEM PRIVATE
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include>
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn>
+        $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/pkg_inc>
 )
 
 # op api
@@ -91,10 +94,12 @@ target_compile_options(opapi PRIVATE
 target_include_directories(opapi PRIVATE
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include>
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn>
+        $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/pkg_inc>
 )
 target_include_directories(opapi SYSTEM PRIVATE
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include>
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn>
+        $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/pkg_inc>
 )
 target_compile_options(opapi PRIVATE
         -Werror=format
@@ -140,6 +145,7 @@ target_compile_options(opsproto PRIVATE
 target_include_directories(opsproto SYSTEM PRIVATE
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include>
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn>
+        $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/pkg_inc>
 )
 target_compile_definitions(opsproto PRIVATE
         LOG_CPP
@@ -182,6 +188,7 @@ target_compile_options(optiling PRIVATE
 target_include_directories(optiling SYSTEM PRIVATE
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include>
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn>
+        $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/pkg_inc>
 )
 target_compile_definitions(optiling PRIVATE
         LOG_CPP
@@ -390,6 +397,7 @@ target_compile_options(ops_aclnn PRIVATE
 target_include_directories(ops_aclnn SYSTEM PRIVATE
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include>
         $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn>
+        $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/pkg_inc>
 )
 target_link_libraries(ops_aclnn PRIVATE
         $<BUILD_INTERFACE:intf_pub>

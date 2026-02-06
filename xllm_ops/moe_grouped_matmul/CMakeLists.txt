@@ -15,7 +15,7 @@ target_include_directories(optiling PRIVATE
         ${ASCEND_CANN_PACKAGE_PATH}/include
         ${ASCEND_CANN_PACKAGE_PATH}/include/external
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment
-        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/platform
+        ${ASCEND_CANN_PACKAGE_PATH}/include/platform
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/metadef
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/msprof
@@ -26,7 +26,7 @@ target_include_directories(opsproto PRIVATE
         ${ASCEND_CANN_PACKAGE_PATH}/include
         ${ASCEND_CANN_PACKAGE_PATH}/include/external
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment
-        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/platform
+        ${ASCEND_CANN_PACKAGE_PATH}/include/platform
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/metadef
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/msprof
@@ -43,7 +43,7 @@ target_include_directories(op_host_aclnnInner PRIVATE
         ${ASCEND_CANN_PACKAGE_PATH}/include
         ${ASCEND_CANN_PACKAGE_PATH}/include/external
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment
-        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/platform
+        ${ASCEND_CANN_PACKAGE_PATH}/include/platform
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/metadef
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
         ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/msprof

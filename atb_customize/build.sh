@@ -30,8 +30,8 @@ function fn_build()
         echo "error: build failed because ATB_HOME_PATH is null, please source nnal set_env.sh first."
         exit 1
     fi
-    if ! grep -q "8.3.RC1" "${ATB_HOME_PATH}/../../version.info"; then
-        echo "error: build failed because this function only support Ascend-cann-atb : 8.2.RC1."
+    if ! grep -q "8.5.0" "${ATB_HOME_PATH}/../../version.info"; then
+        echo "error: build failed because this function only support Ascend-cann-atb : 8.5.0."
         exit 1
     fi
     fn_load_3rdparty_for_compile
@@ -73,7 +73,8 @@ function fn_load_nlohmann_json()
         return 0
     fi
     cd $THIRD_PARTY_DIR
-    git clone --branch v3.11.3 --depth 1 https://github.com/nlohmann/json.git
+    # git clone --branch v3.11.3 --depth 1 https://github.com/nlohmann/json.git
+    git clone --branch v3.11.3 --depth 1 https://gitcode.com/GitHub_Trending/js/json.git
     mv json nlohmannJson
 }
 
@@ -83,7 +84,7 @@ function fn_load_mki()
         return 0
     fi
     cd $THIRD_PARTY_DIR
-    git clone -b br_release_cann_8.3.RC1_20260322 --depth 1 https://gitcode.com/cann/ascend-boost-comm.git Mind-KernelInfra
+    git clone -b br_release_cann_8.5.0_20260527 --depth 1 https://gitcode.com/cann/ascend-boost-comm.git Mind-KernelInfra
 }
 
 function fn_load_atb()
@@ -94,7 +95,8 @@ function fn_load_atb()
     cd $THIRD_PARTY_DIR
     # Fork from https://gitee.com/vallenChen/ascend-transformer-boost.git,
     # Add customized ops release solution for XLLM.
-    git clone -b br_release_cann_8.3.RC1_20260322_JD --depth 1 https://gitcode.com/xLLM-AI/ascend-transformer-boost.git
+    # git clone -b br_release_cann_8.3.RC1_20260322_JD --depth 1 https://gitcode.com/xLLM-AI/ascend-transformer-boost.git
+    git clone -b br_release_cann_8.5.0_20260527-haimbb  --depth 1 https://gitcode.com/haimbb000/ascend-transformer-boost.git
 }
 
 function fn_load_compiler()
@@ -103,7 +105,7 @@ function fn_load_compiler()
         return 0
     fi
     mkdir -p $THIRD_PARTY_DIR/compiler
-    CCEC_COMPILER_DIR=$THIRD_PARTY_DIR/compiler/ccec_compiler
+    CCEC_COMPILER_DIR=$THIRD_PARTY_DIR/tools/ccec_compiler
     TIKCPP_DIR=$THIRD_PARTY_DIR/compiler/tikcpp
     ln -s $ASCEND_HOME_PATH/compiler/ccec_compiler $CCEC_COMPILER_DIR
     ln -s $ASCEND_HOME_PATH/compiler/tikcpp $TIKCPP_DIR

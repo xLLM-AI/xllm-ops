@@ -65,7 +65,7 @@ target_include_directories(intf_pub_utest
             ${ASCEND_CANN_PACKAGE_PATH}/include
             ${ASCEND_CANN_PACKAGE_PATH}/include/external
             ${ASCEND_CANN_PACKAGE_PATH}/include/experiment
-            ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/platform
+            ${ASCEND_CANN_PACKAGE_PATH}/include/platform
             ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/metadef
             ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
             ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/msprof

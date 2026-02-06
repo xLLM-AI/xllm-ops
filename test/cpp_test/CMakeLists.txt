@@ -90,7 +90,7 @@ set(COMMON_INCLUDE_DIRS
   "${INCLUDE_BASE_DIR}"
   "${INCLUDE_BASE_DIR}/aclnn"
   "${INCLUDE_BASE_DIR}/aclnn/op_dev"
-  "${INCLUDE_BASE_DIR}/experiment/platform"
+  "${INCLUDE_BASE_DIR}/platform"
   "${ASCEND_PATH}/x86_64-linux/include/exe_graph/runtime"
   "/usr/local/lib64/python3.11/site-packages/torch_npu/include"
   "/usr/local/lib64/python3.11/site-packages/torch/include"
@@ -104,7 +104,7 @@ set(COMMON_INCLUDE_DIRS
 set(COMMON_COMPILE_OPTS
   -O2
   -std=c++17
-  -D_GLIBCXX_USE_CXX11_ABI=0  # Compatible with Torch
+  -D_GLIBCXX_USE_CXX11_ABI=1  # Compatible with Torch
   -Wall
 )
 
