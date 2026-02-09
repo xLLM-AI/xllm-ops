@@ -93,7 +93,7 @@ function fn_load_atb()
         return 0
     fi
     cd $THIRD_PARTY_DIR
-    # Fork from https://gitcode.com/cann/ascend-transformer-boost.git
+    # Fork from https://gitcode.com/cann/ascend-transformer-boost.git,
     # Add customized ops release solution for XLLM.
     git clone -b br_release_cann_8.5.0_20260527  --depth 1 https://gitcode.com/xLLM-AI/ascend-transformer-boost.git
 }
