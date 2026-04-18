@@ -37,3 +37,18 @@ def causal_conv1d_npu( x, weight, conv_state, bias_opt, query_start_loc_opt,
                     pad_slot_id,
                     run_mode)
 
+# recurrent_gated_delta_rule
+def recurrent_gated_delta_rule_npu(query, key, value, state, beta,
+                                scale,
+                                actual_seq_lengths,
+                                ssm_state_indices,
+                                num_accepted_tokens,
+                                g,
+                                gk):
+    return  custom_ops_lib.recurrent_gated_delta_rule(query, key, value, state, beta,
+                                scale,
+                                actual_seq_lengths,
+                                ssm_state_indices,
+                                num_accepted_tokens,
+                                g,
+                                gk)

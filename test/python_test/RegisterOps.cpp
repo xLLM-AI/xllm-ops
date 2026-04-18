@@ -139,11 +139,33 @@ at::Tensor causal_conv1d(
     return output;
 }
 
+at::Tensor recurrent_gated_delta_rule(
+    const at::Tensor &query,
+    const at::Tensor &key,
+    const at::Tensor &value,
+    at::Tensor &state,
+    const c10::optional<at::Tensor> &beta,
+    const c10::optional<double> scale,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &ssm_state_indices,
+    const c10::optional<at::Tensor> &num_accepted_tokens,
+    const c10::optional<at::Tensor> &g,
+    const c10::optional<at::Tensor> &gk)
+{
+    at::Tensor outResult = at::empty_like(value);
+    float scale_real = static_cast<float>(scale.value());
+
+    EXEC_NPU_CMD(aclnnRecurrentGatedDeltaRule, query, key, value, beta, state, actual_seq_lengths, ssm_state_indices,
+                 g, gk, num_accepted_tokens, scale_real, outResult);
+
+    return outResult;
+}
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("select_unshared_kv", &select_unshared_kv_impl_npu, "select_unshared_kv");
   m.def("cache_unshared_kv", &cache_unshared_kv_impl_npu, "cache_unshared_kv");
   m.def("x_attention", &x_attention_impl_npu, "x_attention");
   m.def("beam_search_group", &beam_search_group_impl_npu, "beam_search_group");
   m.def("causal_conv1d", &causal_conv1d, "causal_conv1d");
+  m.def("recurrent_gated_delta_rule", &recurrent_gated_delta_rule, "recurrent_gated_delta_rule");
 }
 
