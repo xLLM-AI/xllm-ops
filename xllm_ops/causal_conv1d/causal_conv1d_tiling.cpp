@@ -26,44 +26,10 @@ using namespace causal_conv1d_host;
 
 namespace {
 
-uint32_t EncodeFnPlanKeyForDispatch(uint32_t runModeKey, FnExecutionPlan fnExecutionPlan)
+bool HostTilingDebugEnabled()
 {
-    if (runModeKey != CAUSAL_CONV1D_TPL_RUN_MODE_FN) {
-        return CAUSAL_CONV1D_TPL_FN_PLAN_INVALID;
-    }
-    switch (fnExecutionPlan) {
-        case FN_EXECUTION_PLAN_CUTBS:
-            return CAUSAL_CONV1D_TPL_FN_PLAN_CUTBS;
-        case FN_EXECUTION_PLAN_CUTBSD:
-            return CAUSAL_CONV1D_TPL_FN_PLAN_CUTBSD;
-        default:
-            return CAUSAL_CONV1D_TPL_FN_PLAN_INVALID;
-    }
-}
-
-uint32_t EncodeWidthKeyForDispatch(uint32_t runModeKey, int64_t width)
-{
-    if (runModeKey != CAUSAL_CONV1D_TPL_RUN_MODE_FN) {
-        return CAUSAL_CONV1D_TPL_WIDTH_RUNTIME;
-    }
-    switch (width) {
-        case 2:
-            return CAUSAL_CONV1D_TPL_WIDTH_2;
-        case 3:
-            return CAUSAL_CONV1D_TPL_WIDTH_3;
-        case 4:
-            return CAUSAL_CONV1D_TPL_WIDTH_4;
-        default:
-            return CAUSAL_CONV1D_TPL_WIDTH_RUNTIME;
-    }
-}
-
-void ClearFnTokenTilingFields(CausalConv1dTilingData &tiling)
-{
-    tiling.tokenBlockSize = 0;
-    tiling.tokenBlockCnt = 0;
-    tiling.hasExplicitTokenSeqRanges = 0;
-    tiling.explicitTokenSeqRangeCount = 0;
+    const char *value = std::getenv("CAUSAL_CONV1D_HOST_TILING_DEBUG");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
 } // namespace
@@ -117,7 +83,6 @@ static ge::graphStatus CausalConv1dTilingFunc(gert::TilingContext *context)
                 OP_LOGE(context, "invalid dim tile size selection"), return ge::GRAPH_FAILED);
 
     int64_t effectiveGridSize = baseDimChoice.gridSize;
-    ClearFnTokenTilingFields(*tiling);
 
     if (isFn) {
         OP_CHECK_IF(fnHostPlan.caseKind == FN_TILING_CASE_INVALID || fnExecutionPlan == FN_EXECUTION_PLAN_INVALID ||
@@ -178,8 +143,27 @@ static ge::graphStatus CausalConv1dTilingFunc(gert::TilingContext *context)
     context->SetBlockDim(blockDim);
     tiling->baseDim = baseDimChoice.baseDim;
     tiling->baseDimCnt = baseDimChoice.baseDimCnt;
-    const uint32_t fnPlanKey = EncodeFnPlanKeyForDispatch(runModeKey, fnExecutionPlan);
-    const uint32_t widthKey = EncodeWidthKeyForDispatch(runModeKey, tiling->width);
+    const uint32_t fnPlanKey = NormalizeFnPlanTilingKey(runModeKey, fnExecutionPlan);
+    const uint32_t widthKey = NormalizeWidthTilingKey(runModeKey, static_cast<int32_t>(tiling->width));
+
+    if (HostTilingDebugEnabled()) {
+        std::fprintf(stderr,
+                     "CAUSAL_CONV1D_HOST_TILING_DEBUG: runMode=%u inputMode=%lld dim=%lld cuSeqlen=%lld batch=%lld "
+                     "baseDim=%lld baseDimCnt=%lld tokenBlockSize=%lld tokenBlockCnt=%lld explicitRangeCount=%lld "
+                     "blockDim=%u fnPlan=%u widthKey=%u\n",
+                     runModeKey, static_cast<long long>(tiling->inputMode), static_cast<long long>(tiling->dim),
+                     static_cast<long long>(tiling->cuSeqlen), static_cast<long long>(tiling->batch),
+                     static_cast<long long>(tiling->baseDim), static_cast<long long>(tiling->baseDimCnt),
+                     static_cast<long long>(tiling->tokenBlockSize), static_cast<long long>(tiling->tokenBlockCnt),
+                     static_cast<long long>(tiling->explicitTokenSeqRangeCount), blockDim, fnPlanKey, widthKey);
+        const int64_t debugRangeLimit =
+            (tiling->explicitTokenSeqRangeCount < 8) ? tiling->explicitTokenSeqRangeCount : 8;
+        for (int64_t i = 0; i < debugRangeLimit; ++i) {
+            std::fprintf(stderr, "CAUSAL_CONV1D_HOST_TILING_RANGE[%lld]=[%lld,%lld)\n",
+                         static_cast<long long>(i), static_cast<long long>(tiling->tokenTileStartSeq[i]),
+                         static_cast<long long>(tiling->tokenTileEndSeq[i]));
+        }
+    }
 
     OP_CHECK_IF(SetWorkspaceSize(context, 0) != ge::GRAPH_SUCCESS, OP_LOGE(context, "SetWorkspaceSize error"),
                 return ge::GRAPH_FAILED);

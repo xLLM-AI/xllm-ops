@@ -11,16 +11,7 @@
 
 /*!
  * \file causal_conv1d.h
- * \brief CausalConv1D (prefill/extend) AscendC kernel implementation.
- *
- * Design highlights:
- *   - width in [2, 4] (MAX_WIDTH = 4)
- *   - dim is generalized (require dim % 16 == 0 on host for fp16/bf16 alignment)
- *   - dim tiling is chosen by the current host planner and capped by MAX_BLOCK_DIM=4096
- *     - fn: dim <= MAX_BLOCK_DIM keeps dim intact; dim > MAX_BLOCK_DIM splits dim first
- *     - update: uses the canonical candidate set {4096, 2048, 1024, 512, 384, 192}
- *     - the last dim block may be partial (tail handled by kernel)
- *   - 5-slot ring buffer (FP16/BF16 IO + FP32 compute)
+ * \brief
  */
 
 #ifndef CAUSAL_CONV1D_H
@@ -148,9 +139,7 @@ protected:
                                                 int32_t &len) const;
     template <int32_t kWindowMode>
     __aicore__ inline bool ResolveSeqTaskWindowByMode(int32_t seq, int32_t seqLen, int32_t &start, int32_t &len) const;
-    __aicore__ inline bool ResolveSeqCacheIndex(int32_t seq, int32_t &cacheIdx) const;
     __aicore__ inline bool ResolveSeqCacheIndex(int32_t seq, bool hasCacheIndices, int32_t &cacheIdx) const;
-    __aicore__ inline bool ResolveSeqHasInit(int32_t seq) const;
     __aicore__ inline bool ResolveSeqHasInit(int32_t seq, bool hasInitialStateMode) const;
     __aicore__ inline void MaybeWriteBackSeqSplitTailChunk(int32_t chunkStart, int32_t chunkLen, int32_t seqStart,
                                                            int32_t seqLen, int32_t cacheIdx, int32_t channelStart,
@@ -159,12 +148,6 @@ protected:
     template <int32_t kWindowMode>
     __aicore__ inline void ProcessDefaultByWindowMode();
     __aicore__ inline void ProcessVarlenTokenTiled();
-    __aicore__ inline void CopyInFnChunk(int32_t cacheIdx, bool hasInit, int32_t seqStart, int32_t chunkStart,
-                                         int32_t chunkLen, int32_t channelStart, int32_t baseDim, int32_t dim);
-    __aicore__ inline void ComputeFnChunk(int32_t chunkStart, int32_t chunkLen, int32_t channelStart, int32_t baseDim,
-                                          int32_t dim);
-    __aicore__ inline void CopyOutFnChunk(int32_t chunkStart, int32_t chunkLen, int32_t seqStart, int32_t seqLen,
-                                          int32_t cacheIdx, int32_t channelStart, int32_t baseDim, int32_t dim);
     __aicore__ inline void ProcessFnChunk(int32_t cacheIdx, bool hasInit, int32_t seqStart, int32_t seqLen,
                                           int32_t chunkStart, int32_t chunkLen, int32_t channelStart,
                                           int32_t baseDim, int32_t dim);
@@ -283,11 +266,11 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::LoadWeightAndBias(int32_t channelSta
 {
     const int32_t dim = tilingData_->dim;
     const int32_t width = static_cast<int32_t>(tilingData_->width);
-    const int32_t jStart = MAX_WIDTH - width; // Align weight rows to taps.
+    const int32_t jStart = MAX_WIDTH - width;
     const bool hasBias = HasBias();
-    LocalTensor<float> calc = calcBuf.Get<float>();
-    LocalTensor<float> weightF = calc;
-    LocalTensor<float> biasF = weightF[MAX_WIDTH * MAX_BLOCK_DIM];
+    auto cl = CalcBufLayout::FromCalcBuf(calcBuf);
+    LocalTensor<float> &weightF = cl.weightF;
+    LocalTensor<float> &biasF = cl.biasF;
     LocalTensor<T> weightT;
     LocalTensor<T> biasT;
 
@@ -319,7 +302,6 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::LoadWeightAndBias(int32_t channelSta
         }
     }
 
-    // Batch all GM->UB copies for the resident weight/bias tile, then synchronize once before Vector consumes them.
     SetFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
     WaitFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
 
@@ -332,9 +314,6 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::LoadWeightAndBias(int32_t channelSta
         if (hasBias) {
             Cast(biasF, biasT[MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
         }
-        // The resident float tiles are consumed by the next RunSeq almost immediately.
-        // Without an explicit vector drain here, real-device tail tiles can reuse stale
-        // float bias data from the previous channel block (observed on dim=4112 bias-on update tails).
         PipeBarrier<PIPE_V>();
     }
 
@@ -350,7 +329,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::InitRing(int32_t cacheIdx, bool hasI
 {
     const int32_t stateLen = tilingData_->stateLen;
     const int32_t width = static_cast<int32_t>(tilingData_->width);
-    const int32_t ringStart = MAX_WIDTH - width; // Align history tokens to taps.
+    const int32_t ringStart = MAX_WIDTH - width;
     LocalTensor<T> ring = inBuf.Get<T>();
 
     for (int32_t i = 0; i < ringStart; ++i) {
@@ -367,16 +346,12 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::InitRing(int32_t cacheIdx, bool hasI
                 static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(pos) * dim + channelStart;
             DataCopy(ring[(ringStart + i) * MAX_BLOCK_DIM], convStatesGm[stateOffset], baseDim);
         }
-        // Ensure history loads are complete before later Vector reads (Cast/MulAdd) consume ring history slots.
-        // Use an explicit (MTE2 -> V) event instead of PipeBarrier to avoid cross-pipe deadlocks.
         SetFlag<HardEvent::MTE2_V>(stateMte2ToVEvent_);
         WaitFlag<HardEvent::MTE2_V>(stateMte2ToVEvent_);
     } else {
         for (int32_t i = 0; i < (width - 1); ++i) {
             Duplicate(ring[(ringStart + i) * MAX_BLOCK_DIM], static_cast<T>(0), baseDim);
         }
-        // `Duplicate` writes happen on Vector pipe. Ensure the ring slots are fully zero-initialized
-        // before `RunSeq` starts reading them (Cast/MulAdd) to avoid using stale UB contents.
         PipeBarrier<PIPE_V>();
     }
 
@@ -384,12 +359,9 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::InitRing(int32_t cacheIdx, bool hasI
         const int32_t slot0 = SlotCurr(0);
         const int64_t xOffset = static_cast<int64_t>(start) * dim + channelStart;
         DataCopy(ring[slot0 * MAX_BLOCK_DIM], xGm[xOffset], baseDim);
-        // Mark (state + x0) ready for the first token. RunSeq will WaitFlag(MTE2_V) before reading ring[SlotCurr(0)].
         SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[slot0]);
     }
 
-    // Initialize prefetch throttle token so the first MTE2 prefetch can start.
-    // RunSeq uses (V->MTE2) to prevent MTE2 from outrunning V and overwriting ring slots early.
     if (len > 1) {
         SetFlag<HardEvent::V_MTE2>(inputVToMte2Event_);
     }
@@ -406,11 +378,11 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeq(int32_t start, int32_t len, i
 
     const int32_t width = static_cast<int32_t>(tilingData_->width);
     const int32_t jStart = MAX_WIDTH - width;
-    LocalTensor<float> calc = calcBuf.Get<float>();
-    LocalTensor<float> weightF = calc;
-    LocalTensor<float> biasF = weightF[MAX_WIDTH * MAX_BLOCK_DIM];
-    LocalTensor<float> accF = biasF[MAX_BLOCK_DIM];
-    LocalTensor<float> tmpF = accF[MAX_BLOCK_DIM];
+    auto cl = CalcBufLayout::FromCalcBuf(calcBuf);
+    LocalTensor<float> &weightF = cl.weightF;
+    LocalTensor<float> &biasF = cl.biasF;
+    LocalTensor<float> &accF = cl.accF;
+    LocalTensor<float> &tmpF = cl.tmpF;
     LocalTensor<T> ring = inBuf.Get<T>();
     LocalTensor<T> outT = outBuf.Get<T>();
     const bool hasBias = HasBias();
@@ -418,13 +390,10 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeq(int32_t start, int32_t len, i
     for (int32_t t = 0; t < len; ++t) {
         const int32_t slotCurr = SlotCurr(t);
 
-        // Wait for MTE2 to finish loading x[t] (and initial states for t=0) into the ring buffer.
         WaitFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[slotCurr]);
 
-        // Prefetch x[t+1] into the 5-slot ring buffer to overlap with Vector compute.
-        // Use (V->MTE2) throttling to prevent MTE2 from outrunning V and overwriting ring slots too early.
         if (t + 1 < len) {
-            const int32_t slotNext = SlotPrefetch(t); // == SlotCurr(t+1)
+            const int32_t slotNext = SlotPrefetch(t);
             const int64_t xOffsetNext = static_cast<int64_t>(start + t + 1) * dim + channelStart;
             WaitFlag<HardEvent::V_MTE2>(inputVToMte2Event_);
             DataCopy(ring[slotNext * MAX_BLOCK_DIM], xGm[xOffsetNext], baseDim);
@@ -433,20 +402,11 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeq(int32_t start, int32_t len, i
 
         bool accInitialized = false;
         if (hasBias) {
-            // Real device dispatch proved that local->local DataCopy here can drop the resident bias tile.
-            // Use an explicit vector copy so accF is reliably initialized from biasF before accumulation.
             Adds(accF, biasF, 0.0f, baseDim);
             PipeBarrier<PIPE_V>();
             accInitialized = true;
         }
 
-        // Align with vLLM/Triton causal conv1d convention (PyTorch conv1d correlation):
-        //   weight[j] * X_{t-(K-1)+j}, where K == width.
-        //
-        // weight rows are aligned to taps by jStart:
-        //   width=4 -> jStart=0  => use j=0..3 (tap=3..0)
-        //   width=3 -> jStart=1  => use j=1..3 (tap=2..0)
-        //   width=2 -> jStart=2  => use j=2..3 (tap=1..0)
         for (int32_t j = jStart; j < MAX_WIDTH; ++j) {
             const int32_t tap = (MAX_WIDTH - 1) - j;
             const int32_t slot = (tap == 0) ? slotCurr : SlotHist(t, tap);
@@ -460,18 +420,15 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeq(int32_t start, int32_t len, i
             }
         }
 
+        PipeBarrier<PIPE_V>();
+
         if (hasActivation) {
             Silu(tmpF, accF, baseDim);
-        } else {
-            // Large-dim update cases can consume the final accumulator tile too early on real device
-            // when the no-activation path casts accF directly to the output buffer.
-            PipeBarrier<PIPE_V>();
         }
 
         const int32_t outSlot = t & 1;
         LocalTensor<T> outSlotT = outT[outSlot * MAX_BLOCK_DIM];
         if (t >= 2) {
-            // Each out slot is first used without waiting, then reused every other token.
             WaitFlag<HardEvent::MTE3_V>(outMte3ToVEvent_[outSlot]);
         }
 
@@ -489,19 +446,15 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeq(int32_t start, int32_t len, i
             }
         }
 
-        // Signal that the Vector engine has finished writing to outT.
         SetFlag<HardEvent::V_MTE3>(outVToMte3Event_[outSlot]);
 
         const int64_t outOffset = static_cast<int64_t>(start + t) * dim + channelStart;
-        // Ensure outT is ready before MTE3 reads it.
         WaitFlag<HardEvent::V_MTE3>(outVToMte3Event_[outSlot]);
         DataCopy(yGm[outOffset], outSlotT, baseDim);
         if (t + 2 < len) {
-            // Only publish availability when this slot will be reused later in the same task.
             SetFlag<HardEvent::MTE3_V>(outMte3ToVEvent_[outSlot]);
         }
 
-        // Release MTE2 throttle token for the next prefetch (t+1), if any.
         if (t + 2 < len) {
             SetFlag<HardEvent::V_MTE2>(inputVToMte2Event_);
         }
@@ -515,12 +468,12 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RestoreFnLocalPartials(int32_t baseD
         return;
     }
 
-    LocalTensor<float> calc = calcBuf.Get<float>();
-    LocalTensor<float> weightF = calc;
-    LocalTensor<float> state2F = weightF[MAX_WIDTH * MAX_BLOCK_DIM];
-    LocalTensor<float> state1F = state2F[MAX_BLOCK_DIM];
-    LocalTensor<float> state0F = state1F[MAX_BLOCK_DIM];
-    LocalTensor<float> currF = state0F[MAX_BLOCK_DIM];
+    auto cl = CalcBufLayout::FromCalcBuf(calcBuf);
+    LocalTensor<float> &weightF = cl.weightF;
+    LocalTensor<float> &state2F = cl.biasF;
+    LocalTensor<float> &state1F = cl.accF;
+    LocalTensor<float> &state0F = cl.tmpF;
+    LocalTensor<float> &currF = cl.currF;
     LocalTensor<T> ring = inBuf.Get<T>();
     constexpr int32_t ringStart = MAX_WIDTH - kTemplateWidth;
     constexpr int32_t w0Idx = MAX_WIDTH - kTemplateWidth;
@@ -580,14 +533,11 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::ComputeFnRollingOutput(int32_t slotC
         return;
     }
 
-    LocalTensor<float> calc = calcBuf.Get<float>();
-    LocalTensor<float> weightF = calc;
-    LocalTensor<float> state2F = weightF[MAX_WIDTH * MAX_BLOCK_DIM];
-    LocalTensor<float> state1F = state2F[MAX_BLOCK_DIM];
-    LocalTensor<float> state0F = state1F[MAX_BLOCK_DIM];
-    LocalTensor<float> currF = state0F[MAX_BLOCK_DIM];
+    auto cl = CalcBufLayout::FromCalcBuf(calcBuf);
+    LocalTensor<float> &weightF = cl.weightF;
+    LocalTensor<float> &state0F = cl.tmpF;
+    LocalTensor<float> &currF = cl.currF;
     LocalTensor<T> ring = inBuf.Get<T>();
-    (void)state2F;
 
     Cast(currF, ring[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
     PipeBarrier<PIPE_V>();
@@ -596,7 +546,9 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::ComputeFnRollingOutput(int32_t slotC
 
     const bool hasActivation = HasActivation();
     if (hasActivation) {
+        PipeBarrier<PIPE_V>();
         Silu(currF, state0F, baseDim);
+        PipeBarrier<PIPE_V>();
     }
 }
 
@@ -607,12 +559,12 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::AdvanceFnLocalPartials(int32_t slotC
         return;
     }
 
-    LocalTensor<float> calc = calcBuf.Get<float>();
-    LocalTensor<float> weightF = calc;
-    LocalTensor<float> state2F = weightF[MAX_WIDTH * MAX_BLOCK_DIM];
-    LocalTensor<float> state1F = state2F[MAX_BLOCK_DIM];
-    LocalTensor<float> state0F = state1F[MAX_BLOCK_DIM];
-    LocalTensor<float> currF = state0F[MAX_BLOCK_DIM];
+    auto cl = CalcBufLayout::FromCalcBuf(calcBuf);
+    LocalTensor<float> &weightF = cl.weightF;
+    LocalTensor<float> &state2F = cl.biasF;
+    LocalTensor<float> &state1F = cl.accF;
+    LocalTensor<float> &state0F = cl.tmpF;
+    LocalTensor<float> &currF = cl.currF;
     LocalTensor<T> ring = inBuf.Get<T>();
     constexpr int32_t w0Idx = MAX_WIDTH - kTemplateWidth;
 
@@ -654,12 +606,9 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeqFnRolling(int32_t start, int32
         return;
     }
 
-    LocalTensor<float> calc = calcBuf.Get<float>();
-    LocalTensor<float> weightF = calc;
-    LocalTensor<float> state2F = weightF[MAX_WIDTH * MAX_BLOCK_DIM];
-    LocalTensor<float> state1F = state2F[MAX_BLOCK_DIM];
-    LocalTensor<float> state0F = state1F[MAX_BLOCK_DIM];
-    LocalTensor<float> currF = state0F[MAX_BLOCK_DIM];
+    auto cl = CalcBufLayout::FromCalcBuf(calcBuf);
+    LocalTensor<float> &state0F = cl.tmpF;
+    LocalTensor<float> &currF = cl.currF;
     LocalTensor<T> ring = inBuf.Get<T>();
     LocalTensor<T> outT = outBuf.Get<T>();
     const bool hasActivation = HasActivation();
@@ -720,7 +669,6 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeqFnRolling(int32_t start, int32
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>
 __aicore__ inline void CAUSAL_CONV1D_CLASS::DrainTaskMte3()
 {
-    // Fence all outstanding MTE3 traffic before the next task reuses the shared UB.
     SetFlag<HardEvent::MTE3_V>(stateWritebackMte3ToVEvent_);
     WaitFlag<HardEvent::MTE3_V>(stateWritebackMte3ToVEvent_);
     SetFlag<HardEvent::MTE3_MTE2>(stateWritebackMte3ToMte2Event_);
@@ -756,12 +704,6 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx,
                                                                int32_t channelStart, int32_t baseDim, int32_t dim)
 {
     const int32_t width = static_cast<int32_t>(tilingData_->width);
-    // vLLM speculative decoding semantics (width=4):
-    // - conv_states stores a sliding buffer of length (width-1) + (len-1) = len + 2.
-    // - token offset selects which 3-token window is treated as "current history".
-    // - After forward, update conv_states to:
-    //     [old[offset+1], old[offset+2], x[0], x[1], ..., x[len-1]]
-    //   i.e., shift by 1 then append the whole segment.
     const int32_t stateLen = tilingData_->stateLen;
     if (len <= 0) {
         return;
@@ -772,10 +714,9 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx,
         return;
     }
 
-    constexpr int32_t keep = MAX_WIDTH - 2; // == 2 for width=4
-    const int32_t reqStateLen = keep + len; // == len + 2 for width=4
+    constexpr int32_t keep = MAX_WIDTH - 2;
+    const int32_t reqStateLen = keep + len;
     if (reqStateLen > stateLen) {
-        // Fallback to normal semantics if conv_states is not large enough.
         WriteBackState(cacheIdx, len, channelStart, baseDim, dim);
         return;
     }
@@ -784,7 +725,6 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx,
     LocalTensor<T> buf0 = ring[0 * MAX_BLOCK_DIM];
     LocalTensor<T> buf1 = ring[1 * MAX_BLOCK_DIM];
 
-    // 1) Write shifted history tokens: [old[offset+1], old[offset+2]]
     if (hasInit) {
         const int32_t srcPos0 = stateTokenOffset + 1;
         const int32_t srcPos1 = stateTokenOffset + 2;
@@ -818,8 +758,6 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx,
         WaitFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
     }
 
-    // 2) Append current segment tokens with a ping-pong MTE2/MTE3 pipeline:
-    //    while MTE3 writes buf[t], MTE2 can prefetch x[t+1] into the alternate buffer.
     const int64_t xOffset0 = static_cast<int64_t>(start) * dim + channelStart;
     DataCopy(buf0, xGm[xOffset0], baseDim);
     SetFlag<HardEvent::MTE2_MTE3>(specWritebackMte2ToMte3Event_[0]);
@@ -892,12 +830,6 @@ __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqTaskWindowByMode(int32_t s
 }
 
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>
-__aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqCacheIndex(int32_t seq, int32_t &cacheIdx) const
-{
-    return ResolveSeqCacheIndex(seq, tilingData_->hasCacheIndices != 0, cacheIdx);
-}
-
-template <CAUSAL_CONV1D_TEMPLATE_ARGS>
 __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqCacheIndex(int32_t seq, bool hasCacheIndices,
                                                                  int32_t &cacheIdx) const
 {
@@ -912,12 +844,6 @@ __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqCacheIndex(int32_t seq, bo
     }
     cacheIdx = static_cast<int32_t>(cacheIdx64);
     return true;
-}
-
-template <CAUSAL_CONV1D_TEMPLATE_ARGS>
-__aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqHasInit(int32_t seq) const
-{
-    return ResolveSeqHasInit(seq, tilingData_->hasInitialStateMode != 0);
 }
 
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>
@@ -951,7 +877,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessDefaultByWindowMode()
 {
     const int32_t dim = tilingData_->dim;
     const int32_t batch = tilingData_->batch;
-    const int32_t seqLen = tilingData_->seqLen; // 3D batch / decode(mode=1) 多 token 使用
+    const int32_t seqLen = tilingData_->seqLen;
     const int32_t baseDim = static_cast<int32_t>(tilingData_->baseDim);
     const int32_t baseDimCnt = static_cast<int32_t>(tilingData_->baseDimCnt);
     const int32_t width = static_cast<int32_t>(tilingData_->width);
@@ -1014,9 +940,6 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessDefaultByWindowMode()
         RunSeq(start, len, channelStart, curBaseDim, dim);
 
         if (isSpecDecodingGlobal) {
-            // Spec writeback launches another MTE3-heavy tail on the same task.
-            // Drain the final y store from RunSeq first, otherwise the last token output can be
-            // corrupted when numAcceptedTokens-spec writeback starts reusing the MTE3 pipeline.
             DrainTaskMte3();
             WriteBackStateSpec(cacheIdx, hasInit, stateTokenOffset, start, len, channelStart, curBaseDim, dim);
         } else {

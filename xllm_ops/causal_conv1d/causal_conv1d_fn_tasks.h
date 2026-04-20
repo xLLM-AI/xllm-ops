@@ -147,9 +147,9 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::InitRingSeqSplit(int32_t cacheIdx, b
 }
 
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>
-__aicore__ inline void CAUSAL_CONV1D_CLASS::CopyInFnChunk(int32_t cacheIdx, bool hasInit, int32_t seqStart,
-                                                          int32_t chunkStart, int32_t chunkLen,
-                                                          int32_t channelStart, int32_t baseDim, int32_t dim)
+__aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessFnChunk(int32_t cacheIdx, bool hasInit, int32_t seqStart,
+                                                           int32_t seqLen, int32_t chunkStart, int32_t chunkLen,
+                                                           int32_t channelStart, int32_t baseDim, int32_t dim)
 {
     const bool weightCacheHit = weightCacheValid_ && (cachedC0_ == channelStart) && (cachedDimTileSize_ == baseDim);
     if (!weightCacheHit) {
@@ -160,32 +160,9 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::CopyInFnChunk(int32_t cacheIdx, bool
     }
 
     InitRingSeqSplit(cacheIdx, hasInit, seqStart, chunkStart, chunkLen, channelStart, baseDim, dim);
-}
-
-template <CAUSAL_CONV1D_TEMPLATE_ARGS>
-__aicore__ inline void CAUSAL_CONV1D_CLASS::ComputeFnChunk(int32_t chunkStart, int32_t chunkLen,
-                                                           int32_t channelStart, int32_t baseDim, int32_t dim)
-{
     RunSeq(chunkStart, chunkLen, channelStart, baseDim, dim);
-}
-
-template <CAUSAL_CONV1D_TEMPLATE_ARGS>
-__aicore__ inline void
-CAUSAL_CONV1D_CLASS::CopyOutFnChunk(int32_t chunkStart, int32_t chunkLen, int32_t seqStart, int32_t seqLen,
-                                    int32_t cacheIdx, int32_t channelStart, int32_t baseDim, int32_t dim)
-{
     MaybeWriteBackSeqSplitTailChunk(chunkStart, chunkLen, seqStart, seqLen, cacheIdx, channelStart, baseDim, dim);
     DrainTaskMte3();
-}
-
-template <CAUSAL_CONV1D_TEMPLATE_ARGS>
-__aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessFnChunk(int32_t cacheIdx, bool hasInit, int32_t seqStart,
-                                                           int32_t seqLen, int32_t chunkStart, int32_t chunkLen,
-                                                           int32_t channelStart, int32_t baseDim, int32_t dim)
-{
-    CopyInFnChunk(cacheIdx, hasInit, seqStart, chunkStart, chunkLen, channelStart, baseDim, dim);
-    ComputeFnChunk(chunkStart, chunkLen, channelStart, baseDim, dim);
-    CopyOutFnChunk(chunkStart, chunkLen, seqStart, seqLen, cacheIdx, channelStart, baseDim, dim);
 }
 
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>

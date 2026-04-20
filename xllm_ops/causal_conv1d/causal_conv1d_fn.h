@@ -40,13 +40,12 @@ public:
     __aicore__ inline void Process()
     {
         const auto *tilingData = this->GetTilingData();
-        if (tilingData != nullptr && tilingData->baseDimCnt > 1) {
+        if (tilingData != nullptr && (tilingData->baseDimCnt > 1 || tilingData->inputMode != 0)) {
             this->ProcessDefault();
         } else {
-            //this->ProcessVarlenTokenTiled();
-	    this->ProcessDefault();
+            this->ProcessVarlenTokenTiled();
         }
-        this->ReleaseEvents();
+	this->ReleaseEvents();
     }
 };
 

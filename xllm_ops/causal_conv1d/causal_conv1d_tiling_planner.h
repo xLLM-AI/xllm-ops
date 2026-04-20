@@ -87,6 +87,21 @@ inline int64_t ResolveFnTokenCoreBudget(int64_t baseDimCnt, FnExecutionPlan fnEx
 inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t baseDimCnt,
                                                       FnExecutionPlan fnExecutionPlan, uint32_t coreNum);
 
+inline VarlenTokenTileChoice BuildFnSingleTokenBlockChoice(const CausalConv1dTilingData &tiling,
+                                                           const DimTileChoice &baseDimChoice)
+{
+    VarlenTokenTileChoice tokenBlockChoice;
+    if (tiling.cuSeqlen <= 0 || baseDimChoice.baseDimCnt <= 0) {
+        return tokenBlockChoice;
+    }
+
+    tokenBlockChoice.enabled = true;
+    tokenBlockChoice.tokenBlockSize = tiling.cuSeqlen;
+    tokenBlockChoice.tokenBlockCnt = 1;
+    tokenBlockChoice.gridSize = baseDimChoice.baseDimCnt;
+    return tokenBlockChoice;
+}
+
 inline int64_t ComputeFnUbLimitedBaseDim(uint64_t ubSize)
 {
     if (ubSize <= static_cast<uint64_t>(FN_UB_RESERVED_BYTES)) {
@@ -226,6 +241,16 @@ inline VarlenTokenTileChoice ChooseUnifiedFnTokenBlockPlan(gert::TilingContext *
     }
     if (tiling.hasNumAcceptedTokens != 0) {
         OP_LOGD(context, "Varlen token tiling disabled: speculative decode still uses the existing seq mapping.");
+        return tokenBlockChoice;
+    }
+
+    if (tiling.hasInitialStateMode != 0) {
+        tokenBlockChoice = BuildFnSingleTokenBlockChoice(tiling, baseDimChoice);
+        OP_LOGD(context,
+                "FnTokenTile(plan=%ld): initialStateMode present, collapse token tiling to a single block: "
+                "cuSeqlen[%ld], baseDimCnt[%ld], tokenBlockSize[%ld], tokenBlockCnt[%ld], gridSize[%ld].",
+                static_cast<int64_t>(fnExecutionPlan), tiling.cuSeqlen, baseDimChoice.baseDimCnt,
+                tokenBlockChoice.tokenBlockSize, tokenBlockChoice.tokenBlockCnt, tokenBlockChoice.gridSize);
         return tokenBlockChoice;
     }
 
