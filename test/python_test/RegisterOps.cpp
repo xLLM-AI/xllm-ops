@@ -110,6 +110,35 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> beam_sear
   return std::make_tuple(out_token_ids, out_token_index, out_log_probs, out_beam_count_prefix_sums, out_sequence);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+beam_search_rec_final_select_impl_npu(const at::Tensor& log_probs,
+                                      const at::Tensor& top_tokens,
+                                      const at::Tensor& top_probs,
+                                      const at::Tensor& sequence,
+                                      int64_t current_step,
+                                      int64_t result_width) {
+  auto output_shape = log_probs.sizes().vec();
+  output_shape[0] = sequence.size(0) * result_width;
+  at::Tensor out_token_ids = at::zeros(output_shape, top_tokens.options());
+  at::Tensor out_token_index = at::zeros(output_shape, top_tokens.options());
+  at::Tensor out_log_probs = at::zeros(output_shape, log_probs.options());
+  at::Tensor out_sequence =
+      at::zeros({sequence.size(0), result_width, sequence.size(2)},
+                top_tokens.options());
+  EXEC_NPU_CMD(aclnnOnerecFinalBeamSelect,
+               log_probs,
+               top_tokens,
+               top_probs,
+               sequence,
+               current_step,
+               out_token_ids,
+               out_token_index,
+               out_log_probs,
+               out_sequence);
+  return std::make_tuple(
+      out_token_ids, out_token_index, out_log_probs, out_sequence);
+}
+
 at::Tensor causal_conv1d(
     const at::Tensor& x,
     const at::Tensor& weight,
@@ -208,6 +237,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cache_unshared_kv", &cache_unshared_kv_impl_npu, "cache_unshared_kv");
   m.def("x_attention", &x_attention_impl_npu, "x_attention");
   m.def("beam_search_group", &beam_search_group_impl_npu, "beam_search_group");
+  m.def("beam_search_rec_final_select",
+        &beam_search_rec_final_select_impl_npu,
+        "beam_search_rec_final_select");
   m.def("causal_conv1d", &causal_conv1d, "causal_conv1d");
   m.def("recurrent_gated_delta_rule", &recurrent_gated_delta_rule, "recurrent_gated_delta_rule");
   m.def("rec_constrained_topk", &rec_constrained_topk_impl_npu, "rec_constrained_topk");

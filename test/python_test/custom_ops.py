@@ -21,6 +21,19 @@ def select_unshared_kv_npu(beam_index, x_key_block, x_value_block, block_table, 
 def beam_search_group_npu(log_probs, top_tokens, top_probs, sequence, current_step, top_k):
     return custom_ops_lib.beam_search_group(log_probs, top_tokens, top_probs, sequence, current_step, top_k)
 
+
+def beam_search_rec_final_select_npu(log_probs: torch.Tensor,
+                                     top_tokens: torch.Tensor,
+                                     top_probs: torch.Tensor,
+                                     sequence: torch.Tensor,
+                                     current_step: int,
+                                     result_width: int
+                                     ) -> tuple[torch.Tensor, torch.Tensor,
+                                                torch.Tensor, torch.Tensor]:
+    return custom_ops_lib.beam_search_rec_final_select(
+        log_probs, top_tokens, top_probs, sequence, current_step, result_width
+    )
+
 # causal_conv1d_fn
 def causal_conv1d_npu( x, weight, conv_state, bias_opt, query_start_loc_opt,
                     cache_indices_opt,
