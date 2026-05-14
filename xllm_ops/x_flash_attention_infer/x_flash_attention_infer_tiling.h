@@ -51,7 +51,7 @@ constexpr int32_t NUM4 = 4;
 constexpr int32_t NUM5 = 5;
 constexpr uint32_t Q_TILE_CEIL = 128;
 constexpr uint32_t NZ_LAST_DIM = 16;
-constexpr uint32_t MAX_KV_STACK_LEN = 1024;
+constexpr uint32_t MAX_KV_STACK_LEN = 512;
 const uint32_t SIZE_OF_32BIT = 4;
 constexpr int32_t WORKSPACE_BLOCK_SIZE_DB = Q_TILE_CEIL * MAX_KV_STACK_LEN;
 uint32_t GetQNBlockTile(int64_t qSeqlen, uint32_t groupSize)
@@ -131,4 +131,3 @@ class XFAInferTiling {
 
 }  // namespace optiling
 #endif  // __X_FLASH_ATTENTION_INFER_TILINGDATA_H__
-
