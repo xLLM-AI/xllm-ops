@@ -14,7 +14,7 @@ set -e
 ########################################################################################################################
 
 CURRENT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
-BUILD_DIR=${CURRENT_DIR}/build
+BUILD_DIR=${XLLM_OPS_BUILD_DIR:-${CURRENT_DIR}/build}
 OUTPUT_DIR=${CURRENT_DIR}/output
 USER_ID=$(id -u)
 PARENT_JOB="false"
@@ -124,16 +124,6 @@ function set_env()
 
 function clean()
 {
-    if [ -n "${BUILD_DIR}" ];then
-        rm -rf ${BUILD_DIR}
-    fi
-
-    if [ -z "${TEST}" ] && [ -z "${EXAMPLE}" ];then
-        if [ -n "${OUTPUT_DIR}" ];then
-            rm -rf ${OUTPUT_DIR}
-        fi
-    fi
-
     mkdir -p ${BUILD_DIR} ${OUTPUT_DIR}
 }
 
@@ -143,7 +133,7 @@ function cmake_config()
     log "Info: cmake config ${CUSTOM_OPTION} ${extra_option} ."
     opts=$(python3 $CURRENT_DIR/cmake/util/preset_parse.py $CURRENT_DIR/CMakePresets.json)
     echo $opts
-    cmake .. $opts ${CUSTOM_OPTION} ${extra_option}
+    cmake ${CURRENT_DIR} $opts ${CUSTOM_OPTION} ${extra_option}
 }
 
 function build()

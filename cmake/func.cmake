@@ -335,6 +335,7 @@ function(add_ops_src_copy)
                 COMMAND mkdir -p ${SRC_COPY_DST}
                 COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
                 COMMAND touch ${_BUILD_FLAG}
+                DEPENDS ${SRC_FILES}
         )
 
         add_custom_target(${SRC_COPY_TARGET_NAME}
@@ -499,6 +500,7 @@ function(add_bin_compile_target)
         if (_compile_flag)
             set(_BUILD_COMMAND)
             set(_BUILD_FLAG ${GEN_OUT_DIR}/${OP_TARGET_NAME}_${op_index}.done)
+            set(_SRC_COPY_DONE ${SRC_OUT_DIR}/${op_file}/${OP_TARGET_NAME}_src_copy.done)
             if (ENABLE_OPS_HOST)
                 list(APPEND _BUILD_COMMAND export ASCEND_CUSTOM_OPP_PATH=${CUSTOM_DIR} &&)
             endif ()
@@ -514,6 +516,7 @@ function(add_bin_compile_target)
                     COMMAND ${_BUILD_COMMAND}
                     COMMAND touch ${_BUILD_FLAG}
                     WORKING_DIRECTORY ${GEN_OUT_DIR}
+                    DEPENDS ${_SRC_COPY_DONE}
             )
 
             add_custom_target(${OP_TARGET_NAME}_${op_index}
