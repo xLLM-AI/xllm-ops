@@ -1,39 +1,19 @@
-add_ops_compile_options(
-	OP_NAME XAttentionTl
-        OPTIONS --cce-auto-sync=on
-                -Wno-deprecated-declarations
-                # -g
-                # -O0
-                -I${CMAKE_SOURCE_DIR}/third_party/catlass/include
-                -I${CMAKE_SOURCE_DIR}/common
-                # -sanitizer
-)
+# -----------------------------------------------------------------------------------------------------------
+# Copyright (c) 2025 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
 
-target_sources(op_host_aclnn PRIVATE
-        x_attention_tl_cpu.cpp
-)
-
-# optiling
-target_sources(optiling PRIVATE
-        x_attention_tl_cpu.cpp
-)
-
-target_include_directories(optiling PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-
-# opproto
-target_sources(opsproto PRIVATE
-    x_attention_tl_cpu.cpp
-)
-# include_directories(${CMAKE_CURRENT_SOURCE_DIR})
-
-# if(ASCEND_CUSTOM_COMPILE_OPTIONS)
-#     set(ASCEND_CUSTOM_COMPILE_OPTIONS 
-#         "${ASCEND_CUSTOM_COMPILE_OPTIONS} -I${CMAKE_CURRENT_SOURCE_DIR}")
-# endif()
-install(FILES x_attention_tl.cpp
-        DESTINATION ${ASCEND_IMPL_OUT_DIR}/dynamic)
-
-
+file(GLOB CURRENT_DIRS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/*)
+if(NOT ENABLE_TEST AND NOT BENCHMARK)
+    list(REMOVE_ITEM CURRENT_DIRS tests)
+endif()
+foreach(SUB_DIR ${CURRENT_DIRS})
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${SUB_DIR}/CMakeLists.txt")
+        add_subdirectory(${SUB_DIR})
+    endif()
+endforeach()

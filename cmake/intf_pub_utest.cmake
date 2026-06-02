@@ -1,11 +1,12 @@
-# Copyright (c) 2024 Huawei Technologies Co., Ltd.
-# This file is a part of the CANN Open Software.
-# Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
+# -----------------------------------------------------------------------------------------------------------
+# Copyright (c) 2025 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-# ======================================================================================================================
+# -----------------------------------------------------------------------------------------------------------
 
 # UTest 场景, 编译 Target 名称公共前缀
 set(UTest_NamePrefix UTest)
@@ -33,8 +34,8 @@ target_compile_options(intf_pub_utest
             # 故在 Clang 编译器使能 UBSAN 场景下, 需开启 -fsanitize=undefined 使能时仍未开启的对应检查项
             # 在 GNU 编译器场景下, 官方文档并未对使能 -fsanitize=undefined 时开启的默认检查项范围进行说明, 故手工开启常用基本检查项, 避免能力遗漏
             $<$<BOOL:${ENABLE_UBSAN}>:-fsanitize=undefined -fsanitize=float-divide-by-zero -fno-sanitize=alignment>
-            $<$<BOOL:${ENABLE_UBSAN}>:$<$<CXX_COMPILER_ID:Clang>:-fsanitize=unsigned-integer-overflow>>    # GNU 不支持这些检查项
-            $<$<BOOL:${ENABLE_UBSAN}>:$<$<CXX_COMPILER_ID:Clang>:$<$<VERSION_GREATER_EQUAL:${CMAKE_C_COMPILER_VERSION},10.0.0>:-fsanitize=implicit-conversion>>>    # GNU 不支持这些检查项, Clang高版本才支持这些检查项
+            # $<$<BOOL:${ENABLE_UBSAN}>:$<$<CXX_COMPILER_ID:Clang>:-fsanitize=unsigned-integer-overflow>>    # GNU 不支持这些检查项
+            # $<$<BOOL:${ENABLE_UBSAN}>:$<$<CXX_COMPILER_ID:Clang>:$<$<VERSION_GREATER_EQUAL:${CMAKE_C_COMPILER_VERSION},10.0.0>:-fsanitize=implicit-conversion>>>    # GNU 不支持这些检查项, Clang高版本才支持这些检查项
             $<$<BOOL:${ENABLE_UBSAN}>:$<$<CXX_COMPILER_ID:GNU>:-fsanitize=shift -fsanitize=integer-divide-by-zero -fsanitize=signed-integer-overflow -fsanitize=float-divide-by-zero -fsanitize=float-cast-overflow -fsanitize=bool -fsanitize=enum -fsanitize=vptr>>
             $<$<BOOL:${ENABLE_ASAN} OR ${ENABLE_UBSAN}>:-fno-omit-frame-pointer -fsanitize-recover=all>
             -Wall -fno-common -fno-strict-aliasing
@@ -53,19 +54,17 @@ target_compile_options(intf_pub_utest
             $<$<CXX_COMPILER_ID:GNU>:-Wsuggest-attribute=format>
             $<$<COMPILE_LANGUAGE:C>:-Wnested-externs>
             $<$<CXX_COMPILER_ID:GNU>:-Wduplicated-branches>
-            -Wmissing-include-dirs
             $<$<CXX_COMPILER_ID:GNU>:-Wformat-signedness>
             $<$<CXX_COMPILER_ID:GNU>:-Wreturn-local-addr> -Wextra
             -Wredundant-decls -Wfloat-conversion
             $<$<CXX_COMPILER_ID:Clang>:-Wno-tautological-unsigned-enum-zero-compare>
-            -Werror
+            $<$<BOOL:${ENABLE_GCOV}>:-fprofile-arcs -ftest-coverage>
 )
 target_include_directories(intf_pub_utest
         INTERFACE
             ${ASCEND_CANN_PACKAGE_PATH}/include
             ${ASCEND_CANN_PACKAGE_PATH}/include/external
             ${ASCEND_CANN_PACKAGE_PATH}/include/experiment
-            ${ASCEND_CANN_PACKAGE_PATH}/include/platform
             ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/metadef
             ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
             ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/msprof

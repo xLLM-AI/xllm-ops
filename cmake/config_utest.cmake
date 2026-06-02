@@ -1,11 +1,12 @@
-# Copyright (c) 2024 Huawei Technologies Co., Ltd.
-# This file is a part of the CANN Open Software.
-# Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
+# -----------------------------------------------------------------------------------------------------------
+# Copyright (c) 2025 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-# ======================================================================================================================
+# -----------------------------------------------------------------------------------------------------------
 
 ########################################################################################################################
 # 预定义变量
@@ -14,36 +15,16 @@
 # 所使用的产品类型
 set(OPS_ADV_UTEST_OPS_TEST_ASCEND_PRODUCT_TYPE ascend910B1)
 
-if ("${CMAKE_C_COMPILER_ID}" STREQUAL "Clang")
-    if (ENABLE_ASAN OR ENABLE_UBSAN)
-        message(WARNING "Asan(${ENABLE_ASAN}) or Ubsan(${ENABLE_UBSAN}) not supported in Clang, auto turn off.")
-    endif ()
-    set(ENABLE_ASAN OFF)
-    set(ENABLE_UBSAN OFF)
-endif ()
 
 ########################################################################################################################
 # 环境检查
 ########################################################################################################################
 
-find_package(GTest CONFIG)
-if (NOT ${GTest_FOUND})
-    get_filename_component(ASCEND_3RD_LIB_PATH "$ENV{ASCEND_3RD_LIB_PATH}" REALPATH)
-    if (EXISTS "${ASCEND_3RD_LIB_PATH}/cmake/modules")
-        list(APPEND CMAKE_MODULE_PATH ${ASCEND_3RD_LIB_PATH}/cmake/modules)
-    endif ()
-    if (EXISTS "${ASCEND_3RD_LIB_PATH}/gtest/lib/cmake/GTest")
-        list(APPEND CMAKE_PREFIX_PATH ${ASCEND_3RD_LIB_PATH}/gtest/lib/cmake/GTest)
-        find_package(GTest CONFIG REQUIRED)
-    endif ()
-endif ()
-if (NOT ${GTest_FOUND})
-    message(FATAL_ERROR "Can't find any googletest.")
-endif ()
-message(STATUS "Use googletest from ${GTest_DIR}")
-get_target_property(GTEST_GTEST_INC GTest::gtest INTERFACE_INCLUDE_DIRECTORIES)
-
-list(APPEND CMAKE_PREFIX_PATH ${ASCEND_CANN_PACKAGE_PATH}/toolkit/tools/tikicpulib/lib/cmake)
+if (EXISTS ${ASCEND_CANN_PACKAGE_PATH}/tools/tikicpulib/lib/cmake)
+    list(APPEND CMAKE_PREFIX_PATH ${ASCEND_CANN_PACKAGE_PATH}/tools/tikicpulib/lib/cmake)
+else()
+    list(APPEND CMAKE_PREFIX_PATH ${ASCEND_CANN_PACKAGE_PATH}/toolkit/tools/tikicpulib/lib/cmake)
+endif()
 find_package(tikicpulib REQUIRED)
 
 # ASAN / UBSAN 场景随编译执行用例场景下, 将相关检查在编译前执行, 避免出现编译完成后又无法执行的情况, 影响使用体验.

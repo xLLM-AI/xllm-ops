@@ -1,11 +1,12 @@
-# Copyright (c) 2024 Huawei Technologies Co., Ltd.
-# This file is a part of the CANN Open Software.
-# Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
+# -----------------------------------------------------------------------------------------------------------
+# Copyright (c) 2025 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-# ======================================================================================================================
+# -----------------------------------------------------------------------------------------------------------
 
 ########################################################################################################################
 # 环境检查
@@ -46,8 +47,8 @@ set(OP_DEBUG_CONFIG               "false"                         CACHE   STRING
 # 路径配置
 #   源码树相关路径
 get_filename_component(OPS_ADV_DIR                  "${CMAKE_CURRENT_SOURCE_DIR}"           REALPATH)
-get_filename_component(OPS_ADV_CMAKE_DIR            "${OPS_ADV_DIR}/cmake"                  REALPATH)
-# get_filename_component(OPS_ADV_UTILS_KERNEL_INC     "${OPS_ADV_DIR}/src/common/inc/kernel"   REALPATH)
+get_filename_component(OPS_ADV_CMAKE_DIR            "${OPS_ADV_DIR}/../cmake"                  REALPATH)
+get_filename_component(OPS_ADV_UTILS_KERNEL_INC     "${OPS_ADV_DIR}/../common/include/kernel"   REALPATH)
 
 
 #   构建树相关路径
@@ -65,21 +66,31 @@ file(REMOVE ${ASCEND_CUSTOM_TILING_KEYS})
 file(TOUCH ${ASCEND_CUSTOM_TILING_KEYS})
 file(REMOVE ${ASCEND_CUSTOM_OPC_OPTIONS})
 file(TOUCH ${ASCEND_CUSTOM_OPC_OPTIONS})
-if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/tools/ascend_project/cmake)
-    set(ASCEND_PROJECT_DIR       ${ASCEND_CANN_PACKAGE_PATH}/tools/ascend_project)
+if (BUILD_OPEN_PROJECT)
+    if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/${SYSTEM_PREFIX}/tikcpp/ascendc_kernel_cmake)
+        set(ASCEND_PROJECT_DIR       ${ASCEND_CANN_PACKAGE_PATH}/${SYSTEM_PREFIX}/tikcpp/ascendc_kernel_cmake)
+    endif()
+    set(ASCEND_CMAKE_DIR         ${ASCEND_PROJECT_DIR}/cmake   CACHE   STRING   "ascend project cmake")
+    set(IMPL_INSTALL_DIR         packages/vendors/${VENDOR_NAME}_xllm_math/op_impl/ai_core/tbe/${VENDOR_NAME}_xllm_math_impl)
+    set(IMPL_DYNAMIC_INSTALL_DIR packages/vendors/${VENDOR_NAME}_xllm_math/op_impl/ai_core/tbe/${VENDOR_NAME}_xllm_math_impl/dynamic)
+    set(ACLNN_INC_INSTALL_DIR           packages/vendors/${VENDOR_NAME}_xllm_math/op_api/include/aclnnop)
+    set(ACLNN_INC_LEVEL2_INSTALL_DIR    packages/vendors/${VENDOR_NAME}_xllm_math/op_api/include/aclnnop/level2)
 else()
-    set(ASCEND_PROJECT_DIR       ${ASCEND_CANN_PACKAGE_PATH}/tools/op_project_templates/ascendc/customize)
+    set(ASCEND_CMAKE_DIR         ${TOP_DIR}/asl/ops/cann/ops/built-in/ascendc/samples/customize/cmake   CACHE   STRING   "ascend project cmake")
+    set(IMPL_INSTALL_DIR         lib/ascendc/impl)
+    set(IMPL_DYNAMIC_INSTALL_DIR lib/ascendc/impl/dynamic)
+    set(ACLNN_INC_INSTALL_DIR    lib/include)
+    set(OPS_STATIC_TYPES         infer train)
+    set(OPS_STATIC_SCRIPT        ${TOP_DIR}/asl/ops/cann/ops/built-in/kernel/binary_script/build_opp_kernel_static.py)
+endif ()
+if (EXISTS ${OPS_ADV_CMAKE_DIR}/scripts/util)
+    set(ASCENDC_CMAKE_UTIL_DIR       ${OPS_ADV_CMAKE_DIR}/scripts/util)
+else()
+    set(ASCENDC_CMAKE_UTIL_DIR       ${ASCEND_CMAKE_DIR}/util)
 endif()
-set(ASCEND_CMAKE_DIR         ${ASCEND_PROJECT_DIR}/cmake   CACHE   STRING   "ascend project cmake")
-set(IMPL_INSTALL_DIR         packages/vendors/${VENDOR_NAME}/op_impl/ai_core/tbe/${VENDOR_NAME}_impl)
-set(IMPL_DYNAMIC_INSTALL_DIR packages/vendors/${VENDOR_NAME}/op_impl/ai_core/tbe/${VENDOR_NAME}_impl/dynamic)
-set(ACLNN_INC_INSTALL_DIR    packages/vendors/${VENDOR_NAME}/op_api/include)
-set(ASCENDC_CMAKE_UTIL_DIR       ${ASCEND_CMAKE_DIR}/util)
 set(CUSTOM_DIR         ${CMAKE_BINARY_DIR}/custom)
 set(TILING_CUSTOM_DIR  ${CUSTOM_DIR}/op_impl/ai_core/tbe/op_tiling)
 set(TILING_CUSTOM_FILE ${TILING_CUSTOM_DIR}/liboptiling.so)
-set(ASCEND_AUTOGEN_PATH ${CMAKE_BINARY_DIR}/autogen)
-set(ASCEND_FRAMEWORK_TYPE tensorflow)
 
 # 兼容ascendc变更临时适配，待切换新版本ascendc新版本后删除
 if(EXISTS ${ASCENDC_CMAKE_UTIL_DIR}/ascendc_gen_options.py)
@@ -109,6 +120,16 @@ if (BUILD_OPEN_PROJECT)
     #           1. 单配置生成器(Single-configuration generator)场景下，如果构建类型(CMAKE_BUILD_TYPE)未指定，则默认为 Debug ;
     #           2. 多配置生成器(Multi-configuration generator)场景下，如果构建阶段可选的构建类型(CMAKE_CONFIGURATION_TYPES)未指定，
     #              则默认将其指定为CMake允许的构建类型全集 [Debug;Release;MinSizeRel;RelWithDebInfo]
+    if (NOT BUILD_OPS_RTY_KERNEL)
+        if (ENABLE_TEST)
+            set(DEFAULT_BUILD_TYPE "Debug")
+        else()
+            set(DEFAULT_BUILD_TYPE "Release")
+        endif()
+        if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+            set(CMAKE_BUILD_TYPE "${DEFAULT_BUILD_TYPE}" CACHE STRING "Choose the build type: Release/Debug" FORCE)
+        endif()
+    endif()
     get_property(GENERATOR_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
     if (GENERATOR_IS_MULTI_CONFIG)
         if (NOT CMAKE_CONFIGURATION_TYPES)
@@ -165,6 +186,8 @@ if (BUILD_OPEN_PROJECT)
     message(STATUS "TILING_KEY=${TILING_KEY}")
     message(STATUS "TESTS_UT_OPS_TEST=${TESTS_UT_OPS_TEST}")
     message(STATUS "TESTS_EXAMPLE_OPS_TEST=${TESTS_EXAMPLE_OPS_TEST}")
+    message(STATUS "CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
+    message(STATUS "VERSION=${VERSION}")
 endif ()
 
 ########################################################################################################################
@@ -173,6 +196,7 @@ endif ()
 if (BUILD_OPEN_PROJECT)
     # 与基础 CANN 配套关系检查
     option(CHECK_COMPATIBLE      "check compatibility"         ON)
+    set(CHECK_COMPATIBLE                                      OFF)
     if (CHECK_COMPATIBLE)
         set(_param
                 "--cann_path=${ASCEND_CANN_PACKAGE_PATH}"
@@ -181,7 +205,7 @@ if (BUILD_OPEN_PROJECT)
                 "--code_version_info_file=${CMAKE_CURRENT_SOURCE_DIR}/version.info"
         )
         execute_process(
-                COMMAND ${HI_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/check_version_compatible.py ${_param}
+                COMMAND ${HI_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/scripts/check_version_compatible.py ${_param}
                 RESULT_VARIABLE result
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 OUTPUT_VARIABLE CANN_VERSION
@@ -192,6 +216,8 @@ if (BUILD_OPEN_PROJECT)
             string(TOLOWER ${CANN_VERSION} CANN_VERSION)
         endif ()
     endif ()
+
+    string(REPLACE "," ";" ASCEND_OP_NAME "${ASCEND_OP_NAME}")
 
     if (NOT PREPARE_BUILD AND ENABLE_OPS_KERNEL)
         if (TILING_KEY)
@@ -207,7 +233,10 @@ if (BUILD_OPEN_PROJECT)
         endif ()
 
         string(REPLACE ";" "::" EP_ASCEND_COMPUTE_UNIT "${ASCEND_COMPUTE_UNIT}")
-        execute_process(COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/prepare.sh
+
+        string(REPLACE ";" "::" EP_ASCEND_OP_NAME "${ASCEND_OP_NAME}")
+
+        execute_process(COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/scripts/prepare.sh
                 -s ${CMAKE_CURRENT_SOURCE_DIR}
                 -b ${CMAKE_CURRENT_BINARY_DIR}/prepare_build
                 -p ${ASCEND_CANN_PACKAGE_PATH}
@@ -221,7 +250,17 @@ if (BUILD_OPEN_PROJECT)
                 --ops-compile-options ${EP_OPS_COMPILE_OPTIONS}
                 --check-compatible ${CHECK_COMPATIBLE}
                 --ascend-compute_unit ${EP_ASCEND_COMPUTE_UNIT}
+                --ascend-op_name ${EP_ASCEND_OP_NAME}
                 --op_debug_config ${OP_DEBUG_CONFIG}
+                --build_ops_rty_kernel ${BUILD_OPS_RTY_KERNEL}
+                --enable_built_in ${ENABLE_BUILT_IN}
+                --enable_static ${ENABLE_STATIC}
+                --enable_experimental ${ENABLE_EXPERIMENTAL}
+                --enable_ccache ${ENABLE_CCACHE}
+                --cann_3rd_lib_path ${CANN_3RD_LIB_PATH}
+                --build_type ${BUILD_TYPE}
+                --version ${VERSION}
+                --enable_oom ${ENABLE_OOM}
                 RESULT_VARIABLE result
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 OUTPUT_VARIABLE PREPARE_BUILD_OUTPUT_VARIABLE)

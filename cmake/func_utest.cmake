@@ -1,11 +1,12 @@
-# Copyright (c) 2024 Huawei Technologies Co., Ltd.
-# This file is a part of the CANN Open Software.
-# Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
+# -----------------------------------------------------------------------------------------------------------
+# Copyright (c) 2025 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-# ======================================================================================================================
+# -----------------------------------------------------------------------------------------------------------
 
 ########################################################################################################################
 # 预定义变量
@@ -22,8 +23,9 @@ target_compile_options(_OpsTestUt_OpApi_Wno
             $<$<CXX_COMPILER_ID:GNU>:-Wno-format-signedness>
             -Wno-extra
             -Wno-redundant-decls
-            -Werror
 )
+
+add_definitions(-DNOT_DYNAMIC_COMPILE)
 
 # 缓存所有算子 UTest 场景 OpProto 动态库相关信息
 set(_OpsTestUt_OpProtoSources            "" CACHE INTERNAL "" FORCE)  # Sources
@@ -42,7 +44,6 @@ target_compile_options(_OpsTestUt_OpTiling_Wno
             -Wno-shadow
             $<$<CXX_COMPILER_ID:GNU>:-Wno-format-signedness>
             -Wno-extra
-            -Werror
 )
 
 # 缓存当前算子 UTest 场景 OpKernel 目标
@@ -62,8 +63,9 @@ target_compile_options(_OpsTestUt_OpKernel_Wno
             -Wno-extra
             -Wno-float-conversion
             -Wno-parentheses
-            -Werror
 )
+# 缓存当前算子 UTest 场景 UTestCommon 目标
+set(_OpsTestUt_UTestCommonLibrary        "" CACHE INTERNAL "" FORCE)
 
 # 缓存所有算子 UTest 场景 UTest用例 动态库相关信息
 set(_OpsTestUt_UTestCaseLibraries        "" CACHE INTERNAL "" FORCE)
@@ -72,7 +74,6 @@ add_library(_OpsTestUt_UTestCaseStatic_Wno INTERFACE)
 target_compile_options(_OpsTestUt_UTestCaseStatic_Wno
         INTERFACE
             $<$<CXX_COMPILER_ID:Clang>:-Wno-vla>
-            -Werror
 )
 
 # GTest 版本兼容性保证
@@ -80,7 +81,6 @@ add_library(_OpsTestUt_GTest_Wno INTERFACE)
 target_compile_options(_OpsTestUt_GTest_Wno
         INTERFACE
             -Wno-undef
-            -Werror
 )
 
 ########################################################################################################################
@@ -91,7 +91,7 @@ target_compile_options(_OpsTestUt_GTest_Wno
 #[[
 调用参数:
   one_value_keywords:
-      SUB_SYSTEM : 必选参数, 用于指定算子所属子系统, 如 transformer
+      SUB_SYSTEM : 必选参数, 用于指定算子所属子系统, 如 xllm
       BRIEF : 必选参数, 用于指定算子缩略名(建议以大驼峰命名, 与算子实际名称无强制对应关系), 如 Fag/Fas/Fa
       SNAKE : 必选参数, 用于指定算子全名, 如 flash_attention_score_grad
   multi_value_keywords:
@@ -100,9 +100,9 @@ target_compile_options(_OpsTestUt_GTest_Wno
       PRIVATE_LINK_LIBRARIES_EXT    : 可选参数, 额外链接库
 备注说明:
   本函数提供编译算子对应 opapi.so 的功能. 下面介绍在调用本函数时所需了解的一些背景知识和注意事项.
-  1. 本函数假设算子对应 OpApi 的源文件位于 'src/${SUB_SYSTEM}/${SNAKE}/ophost' 路径, 并自动添加以下内容:
+  1. 本函数假设算子对应 OpApi 的源文件位于 'src/${SUB_SYSTEM}/${SNAKE}/op_host' 路径, 并自动添加以下内容:
      a) 源文件: ${SNAKE}.cpp, aclnn_${SNAKE}.cpp
-     b) 头文件搜索路径: 'src/${SUB_SYSTEM}/${SNAKE}/ophost'
+     b) 头文件搜索路径: 'src/${SUB_SYSTEM}/${SNAKE}/op_host'
   2. 若算子 '需要额外的源文件’ 或 ‘源文件不满足上述约定的默认路径', 则可通过 SOURCES_EXT 参数指定 '额外的源文件';
   3. 若算子 '需要额外头文件搜索路径’ 或 ‘本函数现有实现的头文件搜索路径设置不满足',
      则可通过 PRIVATE_INCLUDES_EXT 参数指定 '额外的头文件搜索路径'; 参数 PRIVATE_LINK_LIBRARIES_EXT 设置逻辑同理;
@@ -116,15 +116,15 @@ function(OpsTest_Level1_AddOpApiShared)
             ""
             ${ARGN}
     )
-    get_filename_component(_L0_Src "${OPS_ADV_DIR}/src/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/ophost/${TMP_SNAKE}.cpp" REALPATH)
+    get_filename_component(_L0_Src "${OPS_ADV_DIR}/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/op_host/${TMP_SNAKE}.cpp" REALPATH)
     if (NOT EXISTS "${_L0_Src}")
         set(_L0_Src)
     endif ()
-    get_filename_component(_L2_Src "${OPS_ADV_DIR}/src/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/ophost/aclnn_${TMP_SNAKE}.cpp" REALPATH)
+    get_filename_component(_L2_Src "${OPS_ADV_DIR}/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/op_host/aclnn_${TMP_SNAKE}.cpp" REALPATH)
     if (NOT EXISTS "${_L2_Src}")
         set(_L2_Src)
     endif ()
-    get_filename_component(_Inc "${OPS_ADV_DIR}/src/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/ophost/" REALPATH)
+    get_filename_component(_Inc "${OPS_ADV_DIR}/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/op_host/" REALPATH)
     if (NOT EXISTS "${_Inc}")
         set(_Inc)
     endif ()
@@ -158,9 +158,10 @@ function(OpsTest_AddOpApiShared)
     )
     target_include_directories(${_Target}
             PRIVATE
-                ${ASCEND_CANN_PACKAGE_PATH}/include/aclnn
-                ${ASCEND_CANN_PACKAGE_PATH}/include/aclnn_kernels
+                ${OPAPI_INCLUDE}
                 ${_OpsTestUt_OpApiPrivateIncludesExt}
+                ${ASCEND_CANN_PACKAGE_PATH}/runtime/pkg_inc
+                ${ASCEND_CANN_PACKAGE_PATH}/runtime/pkg_inc/profiling
     )
     target_compile_options(${_Target}
             PRIVATE
@@ -179,7 +180,7 @@ function(OpsTest_AddOpApiShared)
                 $<BUILD_INTERFACE:intf_pub_utest>
                 $<BUILD_INTERFACE:_OpsTestUt_OpApi_Wno>
                 -Wl,--no-whole-archive
-                -lopapi
+                PRIVATE $<$<BOOL:${BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG}>:$<BUILD_INTERFACE:opapi_math>>
                 nnopbase
                 profapi
                 ge_common_base
@@ -194,7 +195,7 @@ endfunction()
 #[[
 调用参数:
   one_value_keywords:
-      SUB_SYSTEM : 必选参数, 用于指定算子所属子系统, 如 transformer
+      SUB_SYSTEM : 必选参数, 用于指定算子所属子系统, 如 xllm
       BRIEF : 必选参数, 用于指定算子缩略名(建议以大驼峰命名, 与算子实际名称无强制对应关系), 如 Fag/Fas/Fa
       SNAKE : 必选参数, 用于指定算子全名, 如 flash_attention_score_grad
   multi_value_keywords:
@@ -203,9 +204,9 @@ endfunction()
       PRIVATE_LINK_LIBRARIES_EXT    : 可选参数, 额外链接库
 备注说明:
   本函数提供编译算子对应 OpProto.so 的功能. 下面介绍在调用本函数时所需了解的一些背景知识和注意事项.
-  1. 本函数假设算子对应 OpProto 的源文件位于 'src/${SUB_SYSTEM}/${SNAKE}/ophost' 路径, 并自动添加以下内容:
+  1. 本函数假设算子对应 OpProto 的源文件位于 'src/${SUB_SYSTEM}/${SNAKE}/op_host' 路径, 并自动添加以下内容:
      a) 源文件: ${SNAKE}_proto.cpp
-     b) 头文件搜索路径: 'src/${SUB_SYSTEM}/${SNAKE}/ophost'
+     b) 头文件搜索路径: 'src/${SUB_SYSTEM}/${SNAKE}/op_host'
   2. 若算子 '需要额外的源文件’ 或 ‘源文件不满足上述约定的默认路径', 则可通过 SOURCES_EXT 参数指定 '额外的源文件';
   3. 若算子 '需要额外头文件搜索路径’ 或 ‘本函数现有实现的头文件搜索路径设置不满足',
      则可通过 PRIVATE_INCLUDES_EXT 参数指定 '额外的头文件搜索路径'; 参数 PRIVATE_LINK_LIBRARIES_EXT 设置逻辑同理;
@@ -219,11 +220,11 @@ function(OpsTest_Level1_AddOpProtoShared)
             ""
             ${ARGN}
     )
-    get_filename_component(_Src "${OPS_ADV_DIR}/src/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/ophost/${TMP_SNAKE}_proto.cpp" REALPATH)
+    get_filename_component(_Src "${OPS_ADV_DIR}/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/op_host/${TMP_SNAKE}_proto.cpp" REALPATH)
     if (NOT EXISTS "${_Src}")
         set(_Src)
     endif ()
-    get_filename_component(_Inc "${OPS_ADV_DIR}/src/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/ophost/" REALPATH)
+    get_filename_component(_Inc "${OPS_ADV_DIR}/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/op_host/" REALPATH)
     if (NOT EXISTS "${_Inc}")
         set(_Inc)
     endif ()
@@ -257,6 +258,7 @@ function(OpsTest_AddOpProtoShared)
     )
     target_include_directories(${_Target}
             PRIVATE
+                ${OPBASE_INC_DIRS}
                 ${_OpsTestUt_OpProtoPrivateIncludesExt}
     )
     target_compile_options(${_Target}
@@ -273,6 +275,9 @@ function(OpsTest_AddOpProtoShared)
                 -Wl,--whole-archive
                 ${_OpsTestUt_OpProtoLinkLibrariesExt}
                 $<BUILD_INTERFACE:intf_pub_utest>
+                $<BUILD_INTERFACE:ops_xllm_utils_proto_headers>
+                $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:alog_headers>>
+                $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:dlog_headers>>
                 -Wl,--no-whole-archive
                 ascendalog
     )
@@ -283,7 +288,7 @@ endfunction()
 #[[
 调用参数:
   one_value_keywords:
-      SUB_SYSTEM : 必选参数, 用于指定算子所属子系统, 如 transformer
+      SUB_SYSTEM : 必选参数, 用于指定算子所属子系统, 如 xllm
       BRIEF : 必选参数, 用于指定算子缩略名(建议以大驼峰命名, 与算子实际名称无强制对应关系), 如 Fag/Fas/Fa
       SNAKE : 必选参数, 用于指定算子全名, 如 flash_attention_score_grad
   multi_value_keywords:
@@ -292,7 +297,7 @@ endfunction()
       PRIVATE_LINK_LIBRARIES_EXT    : 可选参数, 额外链接库
 备注说明:
   本函数提供编译算子对应 OpTiling.so 的功能. 下面介绍在调用本函数时所需了解的一些背景知识和注意事项.
-  1. 本函数假设算子对应 OpTiling 的源文件位于 'src/${SUB_SYSTEM}/${SNAKE}/ophost/${SNAKE}_tiling.cpp/.cc' 路径;
+  1. 本函数假设算子对应 OpTiling 的源文件位于 'src/${SUB_SYSTEM}/${SNAKE}/op_host/${SNAKE}_tiling.cpp/.cc' 路径;
   2. 若算子 '需要额外的源文件’ 或 ‘源文件不满足上述约定的默认路径', 则可通过 SOURCES_EXT 参数指定 '额外的源文件';
   3. 若算子 '需要额外头文件搜索路径’ 或 ‘本函数现有实现的头文件搜索路径设置不满足',
      则可通过 PRIVATE_INCLUDES_EXT 参数指定 '额外的头文件搜索路径'; 参数 PRIVATE_LINK_LIBRARIES_EXT 设置逻辑同理;
@@ -306,11 +311,11 @@ function(OpsTest_Level1_AddOpTilingShared)
             ""
             ${ARGN}
     )
-    file(GLOB _Src1 "${OPS_ADV_DIR}/src/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/ophost/${TMP_SNAKE}_tiling.cc")
-    file(GLOB _Src2 "${OPS_ADV_DIR}/src/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/ophost/${TMP_SNAKE}_tiling.cpp")
+    file(GLOB _Src1 "${OPS_ADV_DIR}/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/op_host/${TMP_SNAKE}_tiling.cc")
+    file(GLOB _Src2 "${OPS_ADV_DIR}/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/op_host/${TMP_SNAKE}_tiling.cpp")
     list(APPEND _Sources ${TMP_SOURCES_EXT} ${_Src1} ${_Src2})
     list(REMOVE_DUPLICATES _Sources)
-    get_filename_component(_Inc "${OPS_ADV_DIR}/src/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/ophost/" REALPATH)
+    get_filename_component(_Inc "${OPS_ADV_DIR}/${TMP_SUB_SYSTEM}/${TMP_SNAKE}/op_host/" REALPATH)
     if (NOT EXISTS "${_Inc}")
         set(_Inc)
     endif ()
@@ -335,11 +340,13 @@ function(OpsTest_AddOpTilingShared)
     target_sources(${_Target}
             PRIVATE
                 ${_OpsTestUt_OpTilingSources}
-                ${OPS_ADV_DIR}/tests/ut/ops_test/framework/stubs/tiling/tiling_templates_registry.cpp
+                ${OPS_ADV_DIR}/tests/ut/framework_special/stubs/tiling/tiling_templates_registry.cpp
     )
     target_include_directories(${_Target}
             PRIVATE
+                ${OPBASE_INC_DIRS}
                 ${_OpsTestUt_OpTilingPrivateIncludesExt}
+                ${OPS_XLLM_DIR}/../common/include
     )
     target_compile_definitions(${_Target}
             PRIVATE
@@ -358,6 +365,9 @@ function(OpsTest_AddOpTilingShared)
                 ${_OpsTestUt_OpTilingLinkLibrariesExt}
                 $<BUILD_INTERFACE:intf_pub_utest>
                 $<BUILD_INTERFACE:_OpsTestUt_OpTiling_Wno>
+                $<BUILD_INTERFACE:ops_xllm_utils_tiling_headers>
+                $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:alog_headers>>
+                $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:dlog_headers>>
                 graph
                 graph_base
                 exe_graph
@@ -374,12 +384,13 @@ endfunction()
 #[[
 调用参数:
   one_value_keywords:
-      SUB_SYSTEM : 必选参数, 用于指定算子所属子系统, 如 transformer
+      SUB_SYSTEM : 必选参数, 用于指定算子所属子系统, 如 xllm
       BRIEF : 必选参数, 用于指定算子缩略名(建议以大驼峰命名, 与算子实际名称无强制对应关系), 如 Fag/Fas/Fa
       SNAKE : 必选参数, 用于指定算子全名, 如 flash_attention_score_grad
   multi_value_keywords:
       SOURCES_EXT                       : 可选参数, 额外源文件
       TILING_DATA_DEF_H                 : 可选参数, 算子 Kernel 所需 TilingData 定义头文件
+      PRIVATE_INCLUDES_EXT              : 可选参数, 额外头文件搜索路径
       PRIVATE_COMPILE_DEFINITIONS_EXT   : 可选参数, 额外编译宏
 备注说明:
   本函数提供编译算子对应 kernel.a 的功能. 下面介绍在调用本函数时所需了解的一些背景知识和注意事项.
@@ -406,7 +417,7 @@ function(OpsTest_Level1_AddOpKernelStatic)
             TMP
             ""
             "SUB_SYSTEM;BRIEF;SNAKE"
-            "SOURCES_EXT;TILING_DATA_DEF_H;PRIVATE_COMPILE_DEFINITIONS_EXT"
+            "SOURCES_EXT;TILING_DATA_DEF_H;PRIVATE_INCLUDES_EXT;PRIVATE_COMPILE_DEFINITIONS_EXT"
             ""
             ${ARGN}
     )
@@ -415,7 +426,7 @@ function(OpsTest_Level1_AddOpKernelStatic)
     set(_tmp_files ${TMP_TILING_DATA_DEF_H})
     list(REMOVE_DUPLICATES _tmp_files)
     set(_ori_files)
-    set(_define_py ${OPS_ADV_DIR}/cmake/scripts/utest/gen_tiling_data_stub.py)
+    set(_define_py ${OPS_ADV_DIR}/../cmake/scripts/utest/gen_tiling_data_stub.py)
     foreach (_tmp ${_tmp_files})
         if (EXISTS ${_tmp})
             list(APPEND _ori_files "-s=${_tmp}")
@@ -431,17 +442,25 @@ function(OpsTest_Level1_AddOpKernelStatic)
     )
     set(_Target ${UTest_NamePrefix}_${TMP_BRIEF}_OpTilingDataDef)
     add_library(${_Target} INTERFACE)
-    target_include_directories(${_Target} INTERFACE ${_OpsTest_GenDirInc})
+    target_include_directories(${_Target} INTERFACE ${_OpsTest_GenDirInc} ${OPS_ADV_UTILS_KERNEL_INC})
 
     # 编译变量处理
     set(_TargetPrefix  ${UTest_NamePrefix}_${TMP_BRIEF}_OpKernel)
-    aux_source_directory(${OPS_ADV_DIR}/src/${TMP_SUB_SYSTEM}/${TMP_SNAKE} _Sources)
+    aux_source_directory(${OPS_ADV_DIR}/${TMP_SUB_SYSTEM}/${TMP_SNAKE} _Sources)
     list(APPEND _Sources ${TMP_SOURCES_EXT})
     set(_PrivateIncludeDirectories
             ${_OpsTest_GenDirInc}
-            # ${OPS_ADV_DIR}/src/common/inc/kernel
+            ${TMP_PRIVATE_INCLUDES_EXT}
+            <ASCEND_CANN_PACKAGE_PATH>/${SYSTEM_PREFIX}/ascendc/include/basic_api
+            <ASCEND_CANN_PACKAGE_PATH>/${SYSTEM_PREFIX}/ascendc/include/basic_api/impl
+            <ASCEND_CANN_PACKAGE_PATH>/${SYSTEM_PREFIX}/ascendc/include/basic_api/interface
+            <ASCEND_CANN_PACKAGE_PATH>/tools/tikicpulib/lib/include
+            <ASCEND_CANN_PACKAGE_PATH>/include/ascendc
+            <ASCEND_CANN_PACKAGE_PATH>/x86_64-linux/include/ascendc/highlevel_api
+            <ASCEND_CANN_PACKAGE_PATH>/pkg_inc/runtime/runtime
+            <ASCEND_CANN_PACKAGE_PATH>/runtime/pkg_inc
     )
-    get_filename_component(_Inc "${OPS_ADV_DIR}/src/${TMP_SUB_SYSTEM}/${TMP_SNAKE}" REALPATH)
+    get_filename_component(_Inc "${OPS_ADV_DIR}/${TMP_SUB_SYSTEM}/${TMP_SNAKE}" REALPATH)
     if (EXISTS "${_Inc}")
         list(APPEND _PrivateIncludeDirectories ${_Inc})
     endif ()
@@ -510,85 +529,126 @@ function(OpsTest_Level1_AddOpKernelStatic)
     set(_OpsTestUt_OpKernelLibraries ${_OpKernelLibraries} CACHE INTERNAL "" FORCE)
 endfunction()
 
+# Level1, 添加算子 UTest 用例 Common 静态库
+#[[
+调用参数:
+  one_value_keywords:
+      BRIEF : 必选参数, 用于指定算子缩略名(建议以大驼峰命名, 与算子实际名称无强制对应关系), 如 Fag/Fas/Fa
+      SNAKE : 必选参数, 用于指定算子全名, 如 flash_attention_score_grad
+      TILING_DATA_DEF_BRIEF: 可选参数, 用于指定链接的 TilingData 头文件目标
+  multi_value_keywords:
+      SOURCES_EXT                  : 可选参数, 额外源文件
+      SOURCES_EXT_FORCE            : 可选参数, 强制使用 SOURCES_EXT 指定的额外源文件 (Common), 不再自动寻找 comm 下源文件
+      PUBLIC_INCLUDES_EXT          : 可选参数, 额外头文件搜索路径(public)
+      PRIVATE_INCLUDES_EXT         : 可选参数, 额外头文件搜索路径
+      PRIVATE_LINK_LIBRARIES_EXT   : 可选参数, 额外链接库
+      PRIVATE_COMPILE_DEFINITIONS  : 可选参数, 额外的编译宏定义
+]]
+function(OpsTest_Level1_AddUTestCommonStatic)
+    cmake_parse_arguments(
+            TMP
+            ""
+            "BRIEF;SNAKE;TILING_DATA_DEF_BRIEF"
+            "SOURCES_EXT;SOURCES_EXT_FORCE;PUBLIC_INCLUDES_EXT;PRIVATE_INCLUDES_EXT;PRIVATE_LINK_LIBRARIES_EXT;PRIVATE_COMPILE_DEFINITIONS"
+            ""
+            ${ARGN}
+    )
+    if (NOT TMP_TILING_DATA_DEF_BRIEF)
+        set(TMP_TILING_DATA_DEF_BRIEF ${TMP_BRIEF})
+    endif ()
+
+    # 强制指定源码处理
+    set(_Src1)
+    set(_Src2)
+    set(_Common_Sources ${TMP_SOURCES_EXT})
+    if (NOT TMP_SOURCES_EXT_FORCE)
+        if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/comm)
+            if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/comm/inc)
+                aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/comm/src _Src1)
+            else ()
+                file(GLOB_RECURSE _Src1 "${CMAKE_CURRENT_SOURCE_DIR}/comm/*.cc")
+                file(GLOB_RECURSE _Src2 "${CMAKE_CURRENT_SOURCE_DIR}/comm/*.cpp")
+            endif ()
+        endif ()
+    endif ()
+    list(APPEND _Common_Sources ${_Src1} ${_Src2})
+    list(REMOVE_DUPLICATES _Common_Sources)
+
+    set(_Target_UTest_Common)
+    if (_Common_Sources)
+        set(_Target_UTest_Common ${UTest_NamePrefix}_${TMP_BRIEF}_UTest_Common)
+        add_library(${_Target_UTest_Common} STATIC)
+        target_sources(${_Target_UTest_Common} PRIVATE ${_Common_Sources})
+        if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/comm/inc)
+            target_include_directories(${_Target_UTest_Common} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/comm/inc)
+        elseif (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/comm)
+            target_include_directories(${_Target_UTest_Common} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/comm)
+        endif ()
+        target_include_directories(${_Target_UTest_Common}
+                PUBLIC
+                    ${TMP_PUBLIC_INCLUDES_EXT}
+                PRIVATE
+                    ${OPBASE_INC_DIRS}
+                    ${OPS_XLLM_DIR}/../common/include
+                    ${ASCEND_CANN_PACKAGE_PATH}/include
+                    ${TMP_PRIVATE_INCLUDES_EXT}
+        )
+        target_compile_definitions(${_Target_UTest_Common}
+                PRIVATE
+                    ${TMP_PRIVATE_COMPILE_DEFINITIONS}
+        )
+        target_link_libraries(${_Target_UTest_Common}
+                PRIVATE
+                    -Wl,--as-needed
+                    -Wl,--no-whole-archive
+                    platform
+                    register
+                    opp_registry
+                    error_manager
+                    metadef
+                    tiling_api
+                    $<BUILD_INTERFACE:intf_pub_utest>
+                    $<BUILD_INTERFACE:_OpsTestUt_UTestCaseStatic_Wno>
+                    $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:alog_headers>>
+                    $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:dlog_headers>>
+                    tikicpulib::${OPS_ADV_UTEST_OPS_TEST_ASCEND_PRODUCT_TYPE}
+                    ${UTest_NamePrefix}_${TMP_TILING_DATA_DEF_BRIEF}_OpTilingDataDef
+                    ${UTest_NamePrefix}_Utils
+                    ${TMP_PRIVATE_LINK_LIBRARIES_EXT}
+                    ${_OpsTestUt_OpKernelLibraries}  # 当前各算子 common 内以 extern 方式声明 kernel 入口, 故添加依赖
+        )
+    endif ()
+    set(_OpsTestUt_UTestCommonLibrary ${_Target_UTest_Common} CACHE INTERNAL "" FORCE)
+endfunction()
+
 # Level1, 添加算子 UTest 用例静态库
 #[[
 调用参数:
   one_value_keywords:
       BRIEF : 必选参数, 用于指定算子缩略名(建议以大驼峰命名, 与算子实际名称无强制对应关系), 如 Fag/Fas/Fa
       SNAKE : 必选参数, 用于指定算子全名, 如 flash_attention_score_grad
+      TILING_DATA_DEF_BRIEF: 可选参数, 用于指定链接的 TilingData 头文件目标
   multi_value_keywords:
-      COMMON_PRIVATE_INCLUDES_EXT         : 可选参数, 额外头文件搜索路径 (Common)
-      COMMON_PRIVATE_LINK_LIBRARIES_EXT   : 可选参数, 额外链接库 (Common)
-      COMMON_PRIVATE_COMPILE_DEFINITIONS  : 可选参数, 额外的编译宏定义 (Common)
-      SOURCES_EXT                         : 可选参数, 额外源文件 (UTest)
+      SOURCES_EXT                         : 可选参数, 额外源文件
       SOURCES_EXT_FORCE                   : 可选参数, 强制使用 SOURCES_EXT 指定的额外源文件 (UTest), 不再自动寻找 utest 下源文件
-      PRIVATE_INCLUDES_EXT                : 可选参数, 额外头文件搜索路径 (UTest)
-      PRIVATE_LINK_LIBRARIES_EXT          : 可选参数, 额外链接库 (UTest)
-      PRIVATE_COMPILE_DEFINITIONS         : 可选参数, 额外的编译宏定义 (UTest)
-      ACLNN_SOURCES_EXT                   : 可选参数, 额外源文件 (UTest_Aclnn)
-      ACLNN_SOURCES_EXT_FORCE             : 可选参数, 强制使用 ACLNN_SOURCES_EXT 指定的额外源文件 (UTest_Aclnn), 不再自动寻找 utest_aclnn 下源文件
-      ACLNN_PRIVATE_INCLUDES_EXT          : 可选参数, 额外头文件搜索路径 (UTest_Aclnn)
-      ACLNN_PRIVATE_COMPILE_DEFINITIONS   : 可选参数, 额外的编译宏定义 (UTest_Aclnn)
-      ACLNN_PRIVATE_LINK_LIBRARIES_EXT    : 可选参数, 额外链接库 (UTest_Aclnn)
-
-备注说明:
-  本函数提供编译算子对应 UTest 静态库 的功能.
-  1. 在 UTest 场景下, 本函数将会将 comm (可选) 编译成一个作为 aclnn UTest 用例及普通 UTest 用例共用的静态库;
-  2. 将 utest 及 utest_aclnn 路径下所有源文件分别编译成静态库, 在所有算子的静态库编译完成后,
-     在 OpsTestUt_AddLaunch 函数内链接这些对应静态库(_OpsTestUt_UTestCaseLibraries/_OpsTestUt_UTestAclnnCaseLibraries)
-     并添加 GTest 所需的 main 函数, 统一编译成一个可执行程序;
+      PRIVATE_INCLUDES_EXT                : 可选参数, 额外头文件搜索路径
+      PRIVATE_LINK_LIBRARIES_EXT          : 可选参数, 额外链接库
+      PRIVATE_COMPILE_DEFINITIONS         : 可选参数, 额外的编译宏定义
 ]]
 function(OpsTest_Level1_AddUTestCaseStatic)
     cmake_parse_arguments(
             TMP
             ""
-            "BRIEF;SNAKE"
-            "COMMON_PRIVATE_INCLUDES_EXT;COMMON_PRIVATE_LINK_LIBRARIES_EXT;COMMON_PRIVATE_COMPILE_DEFINITIONS;SOURCES_EXT;SOURCES_EXT_FORCE;PRIVATE_INCLUDES_EXT;PRIVATE_LINK_LIBRARIES_EXT;PRIVATE_COMPILE_DEFINITIONS;ACLNN_SOURCES_EXT;ACLNN_SOURCES_EXT_FORCE;ACLNN_PRIVATE_INCLUDES_EXT;ACLNN_PRIVATE_COMPILE_DEFINITIONS;ACLNN_PRIVATE_LINK_LIBRARIES_EXT"
+            "BRIEF;SNAKE;TILING_DATA_DEF_BRIEF"
+            "SOURCES_EXT;SOURCES_EXT_FORCE;PRIVATE_INCLUDES_EXT;PRIVATE_LINK_LIBRARIES_EXT;PRIVATE_COMPILE_DEFINITIONS"
             ""
             ${ARGN}
     )
-
-    set(_PrivateLinkLibraries
-            -Wl,--as-needed
-            -Wl,--no-whole-archive
-            $<BUILD_INTERFACE:intf_pub_utest>
-            $<BUILD_INTERFACE:_OpsTestUt_UTestCaseStatic_Wno>
-            tikicpulib::${OPS_ADV_UTEST_OPS_TEST_ASCEND_PRODUCT_TYPE}
-            ${UTest_NamePrefix}_${TMP_BRIEF}_OpTilingDataDef
-            ${UTest_NamePrefix}_Utils
-    )
-
-    set(_Target_UTest_Common)
-    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/comm)
-        set(_Target_UTest_Common ${UTest_NamePrefix}_${TMP_BRIEF}_UTest_Common)
-        add_library(${_Target_UTest_Common} STATIC)
-        if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/comm/inc)
-            aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/comm/src _Common_Sources)
-            target_sources(${_Target_UTest_Common} PRIVATE ${_Common_Sources})
-            target_include_directories(${_Target_UTest_Common} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/comm/inc)
-        else ()
-            file(GLOB_RECURSE _Src1 "${CMAKE_CURRENT_SOURCE_DIR}/comm/*.cc")
-            file(GLOB_RECURSE _Src2 "${CMAKE_CURRENT_SOURCE_DIR}/comm/*.cpp")
-            target_sources(${_Target_UTest_Common} PRIVATE ${_Src1} ${_Src2})
-            target_include_directories(${_Target_UTest_Common} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/comm)
-        endif ()
-        target_include_directories(${_Target_UTest_Common}
-                PRIVATE
-                    ${ASCEND_CANN_PACKAGE_PATH}/include
-                    ${TMP_COMMON_PRIVATE_INCLUDES_EXT}
-        )
-        target_compile_definitions(${_Target_UTest_Common}
-                PRIVATE
-                    ${TMP_COMMON_PRIVATE_COMPILE_DEFINITIONS}
-        )
-        target_link_libraries(${_Target_UTest_Common}
-                PRIVATE
-                    ${_PrivateLinkLibraries}
-                    ${TMP_COMMON_PRIVATE_LINK_LIBRARIES_EXT}
-                    ${_OpsTestUt_OpKernelLibraries}  # 当前各算子 common 内以 extern 方式声明 kernel 入口, 故添加依赖
-        )
+    if (NOT TMP_TILING_DATA_DEF_BRIEF)
+        set(TMP_TILING_DATA_DEF_BRIEF ${TMP_BRIEF})
     endif ()
 
+    # 强制指定源码处理
     set(_UTest_Sources ${TMP_SOURCES_EXT})
     if (NOT TMP_SOURCES_EXT_FORCE)
         file(GLOB_RECURSE _Src1 "${CMAKE_CURRENT_SOURCE_DIR}/utest/*.cc")
@@ -612,17 +672,55 @@ function(OpsTest_Level1_AddUTestCaseStatic)
         )
         target_link_libraries(${_Target_UTest}
                 PRIVATE
-                    ${_PrivateLinkLibraries}
+                    -Wl,--as-needed
+                    -Wl,--no-whole-archive
+                    gtest
+                    $<BUILD_INTERFACE:intf_pub_utest>
+                    $<BUILD_INTERFACE:_OpsTestUt_UTestCaseStatic_Wno>
+                    $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:alog_headers>>
+                    $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:dlog_headers>>
+                    tikicpulib::${OPS_ADV_UTEST_OPS_TEST_ASCEND_PRODUCT_TYPE}
+                    ${UTest_NamePrefix}_${TMP_TILING_DATA_DEF_BRIEF}_OpTilingDataDef
+                    ${UTest_NamePrefix}_Utils
                     $<BUILD_INTERFACE:_OpsTestUt_GTest_Wno>
                     ${UTest_NamePrefix}_Utest
                     ${TMP_PRIVATE_LINK_LIBRARIES_EXT}
-                    ${_Target_UTest_Common}
+                    ${_OpsTestUt_UTestCommonLibrary}
         )
         set(_OpsTestUt_UTestCaseLibraries ${_OpsTestUt_UTestCaseLibraries} ${_Target_UTest} CACHE INTERNAL "" FORCE)
     endif ()
+endfunction()
 
-    set(_UTest_Aclnn_Sources ${TMP_ACLNN_SOURCES_EXT})
-    if (NOT TMP_ACLNN_SOURCES_EXT_FORCE)
+# Level1, 添加算子 UTest 用例(Aclnn)静态库
+#[[
+调用参数:
+  one_value_keywords:
+      BRIEF : 必选参数, 用于指定算子缩略名(建议以大驼峰命名, 与算子实际名称无强制对应关系), 如 Fag/Fas/Fa
+      SNAKE : 必选参数, 用于指定算子全名, 如 flash_attention_score_grad
+      TILING_DATA_DEF_BRIEF: 可选参数, 用于指定链接的 TilingData 头文件目标
+  multi_value_keywords:
+      SOURCES_EXT                   : 可选参数, 额外源文件
+      SOURCES_EXT_FORCE             : 可选参数, 强制使用 SOURCES_EXT 指定的额外源文件 (UTest_Aclnn), 不再自动寻找 utest_aclnn 下源文件
+      PRIVATE_INCLUDES_EXT          : 可选参数, 额外头文件搜索路径
+      PRIVATE_COMPILE_DEFINITIONS   : 可选参数, 额外的编译宏定义
+      PRIVATE_LINK_LIBRARIES_EXT    : 可选参数, 额外链接库
+]]
+function(OpsTest_Level1_AddUTestAclnnCaseStatic)
+    cmake_parse_arguments(
+            TMP
+            ""
+            "BRIEF;SNAKE;TILING_DATA_DEF_BRIEF"
+            "SOURCES_EXT;SOURCES_EXT_FORCE;PRIVATE_INCLUDES_EXT;PRIVATE_COMPILE_DEFINITIONS;PRIVATE_LINK_LIBRARIES_EXT"
+            ""
+            ${ARGN}
+    )
+    if (NOT TMP_TILING_DATA_DEF_BRIEF)
+        set(TMP_TILING_DATA_DEF_BRIEF ${TMP_BRIEF})
+    endif ()
+
+    # 强制指定源码处理
+    set(_UTest_Aclnn_Sources ${TMP_SOURCES_EXT})
+    if (NOT TMP_SOURCES_EXT_FORCE)
         file(GLOB_RECURSE _Src1 "${CMAKE_CURRENT_SOURCE_DIR}/utest_aclnn/*.cc")
         file(GLOB_RECURSE _Src2 "${CMAKE_CURRENT_SOURCE_DIR}/utest_aclnn/*.cpp")
         list(APPEND _UTest_Aclnn_Sources ${_Src1} ${_Src2})
@@ -635,20 +733,29 @@ function(OpsTest_Level1_AddUTestCaseStatic)
         target_include_directories(${_Target_UTest_Aclnn}
                 PRIVATE
                     ${ASCEND_CANN_PACKAGE_PATH}/include
-                    ${TMP_ACLNN_PRIVATE_INCLUDES_EXT}
+                    ${TMP_PRIVATE_INCLUDES_EXT}
                     ${CMAKE_CURRENT_SOURCE_DIR}/utest_aclnn
         )
         target_compile_definitions(${_Target_UTest_Aclnn}
                 PRIVATE
-                    ${TMP_ACLNN_PRIVATE_COMPILE_DEFINITIONS}
+                    ${TMP_PRIVATE_COMPILE_DEFINITIONS}
         )
         target_link_libraries(${_Target_UTest_Aclnn}
                 PRIVATE
-                    ${_PrivateLinkLibraries}
+                    -Wl,--as-needed
+                    -Wl,--no-whole-archive
+                    gtest
+                    $<BUILD_INTERFACE:intf_pub_utest>
+                    $<BUILD_INTERFACE:_OpsTestUt_UTestCaseStatic_Wno>
+                    $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:alog_headers>>
+                    $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:dlog_headers>>
+                    tikicpulib::${OPS_ADV_UTEST_OPS_TEST_ASCEND_PRODUCT_TYPE}
+                    ${UTest_NamePrefix}_${TMP_TILING_DATA_DEF_BRIEF}_OpTilingDataDef
+                    ${UTest_NamePrefix}_Utils
                     $<BUILD_INTERFACE:_OpsTestUt_GTest_Wno>
                     ${UTest_NamePrefix}_Utest
-                    ${TMP_ACLNN_PRIVATE_LINK_LIBRARIES_EXT}
-                    ${_Target_UTest_Common}
+                    ${TMP_PRIVATE_LINK_LIBRARIES_EXT}
+                    ${_OpsTestUt_UTestCommonLibrary}
         )
         set(_OpsTestUt_UTestAclnnCaseLibraries ${_OpsTestUt_UTestAclnnCaseLibraries} ${_Target_UTest_Aclnn} CACHE INTERNAL "" FORCE)
     endif ()
@@ -658,9 +765,10 @@ endfunction()
 #[[
 调用参数:
   one_value_keywords:
-      SUB_SYSTEM : 必选参数, 用于指定算子所属子系统, 如 transformer
+      SUB_SYSTEM : 必选参数, 用于指定算子所属子系统, 如 xllm
       BRIEF : 必选参数, 用于指定算子缩略名(建议以大驼峰命名, 与算子实际名称无强制对应关系), 如 Fag/Fas/Fa
       SNAKE : 必选参数, 用于指定算子全名, 如 flash_attention_score_grad
+      TILING_DATA_DEF_BRIEF: 可选参数, 用于指定链接的 TilingData 头文件目标
   multi_value_keywords:
       OPAPI_SOURCES_EXT                         : 透传参数, 详情参见 OpsTest_Level1_AddOpApiShared 函数说明
       OPAPI_PRIVATE_INCLUDES_EXT                : 透传参数, 详情参见 OpsTest_Level1_AddOpApiShared 函数说明
@@ -673,54 +781,58 @@ endfunction()
       TILING_PRIVATE_LINK_LIBRARIES_EXT         : 透传参数, 详情参见 OpsTest_Level1_AddOpTilingShared 函数说明
       KERNEL_SOURCES_EXT                        : 透传参数, 详情参见 OpsTest_Level1_AddOpKernelStatic 函数说明
       KERNEL_TILING_DATA_DEF_H                  : 透传参数, 详情参见 OpsTest_Level1_AddOpKernelStatic 函数说明
+      KERNEL_PRIVATE_INCLUDES_EXT               : 透传参数, 详情参见 OpsTest_Level1_AddOpKernelStatic 函数说明
       KERNEL_PRIVATE_COMPILE_DEFINITIONS_EXT    : 透传参数, 详情参见 OpsTest_Level1_AddOpKernelStatic 函数说明
-      UTEST_COMMON_PRIVATE_INCLUDES_EXT         : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
-      UTEST_COMMON_PRIVATE_COMPILE_DEFINITIONS  : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
-      UTEST_COMMON_PRIVATE_LINK_LIBRARIES_EXT   : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
+      UTEST_COMMON_SOURCES_EXT                  : 透传参数, 详情参见 OpsTest_Level1_AddUTestCommonStatic 函数说明
+      UTEST_COMMON_SOURCES_EXT_FORCE            : 透传参数, 详情参见 OpsTest_Level1_AddUTestCommonStatic 函数说明
+      UTEST_COMMON_PUBLIC_INCLUDES_EXT          : 透传参数, 详情参见 OpsTest_Level1_AddUTestCommonStatic 函数说明
+      UTEST_COMMON_PRIVATE_INCLUDES_EXT         : 透传参数, 详情参见 OpsTest_Level1_AddUTestCommonStatic 函数说明
+      UTEST_COMMON_PRIVATE_COMPILE_DEFINITIONS  : 透传参数, 详情参见 OpsTest_Level1_AddUTestCommonStatic 函数说明
+      UTEST_COMMON_PRIVATE_LINK_LIBRARIES_EXT   : 透传参数, 详情参见 OpsTest_Level1_AddUTestCommonStatic 函数说明
       UTEST_SOURCES_EXT                         : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
       UTEST_SOURCES_EXT_FORCE                   : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
       UTEST_PRIVATE_INCLUDES_EXT                : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
       UTEST_PRIVATE_COMPILE_DEFINITIONS         : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
       UTEST_PRIVATE_LINK_LIBRARIES_EXT          : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
-      UTEST_ACLNN_SOURCES_EXT                   : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
-      UTEST_ACLNN_SOURCES_EXT_FORCE             : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
-      UTEST_ACLNN_PRIVATE_INCLUDES_EXT          : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
-      UTEST_ACLNN_PRIVATE_COMPILE_DEFINITIONS   : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
-      UTEST_ACLNN_PRIVATE_LINK_LIBRARIES_EXT    : 透传参数, 详情参见 OpsTest_Level1_AddUTestCaseStatic 函数说明
+      UTEST_ACLNN_SOURCES_EXT                   : 透传参数, 详情参见 OpsTest_Level1_AddUTestAclnnCaseStatic 函数说明
+      UTEST_ACLNN_SOURCES_EXT_FORCE             : 透传参数, 详情参见 OpsTest_Level1_AddUTestAclnnCaseStatic 函数说明
+      UTEST_ACLNN_PRIVATE_INCLUDES_EXT          : 透传参数, 详情参见 OpsTest_Level1_AddUTestAclnnCaseStatic 函数说明
+      UTEST_ACLNN_PRIVATE_COMPILE_DEFINITIONS   : 透传参数, 详情参见 OpsTest_Level1_AddUTestAclnnCaseStatic 函数说明
+      UTEST_ACLNN_PRIVATE_LINK_LIBRARIES_EXT    : 透传参数, 详情参见 OpsTest_Level1_AddUTestAclnnCaseStatic 函数说明
 ]]
 function(OpsTest_Level2_AddOp)
     cmake_parse_arguments(
             TMP
             ""
-            "SUB_SYSTEM;BRIEF;SNAKE"
-            "OPAPI_SOURCES_EXT;OPAPI_PRIVATE_INCLUDES_EXT;OPAPI_PRIVATE_LINK_LIBRARIES_EXT;PROTO_SOURCES_EXT;PROTO_PRIVATE_INCLUDES_EXT;PROTO_PRIVATE_LINK_LIBRARIES_EXT;TILING_SOURCES_EXT;TILING_PRIVATE_INCLUDES_EXT;TILING_PRIVATE_LINK_LIBRARIES_EXT;KERNEL_SOURCES_EXT;KERNEL_TILING_DATA_DEF_H;KERNEL_PRIVATE_COMPILE_DEFINITIONS_EXT;UTEST_COMMON_PRIVATE_INCLUDES_EXT;UTEST_COMMON_PRIVATE_COMPILE_DEFINITIONS;UTEST_COMMON_PRIVATE_LINK_LIBRARIES_EXT;UTEST_SOURCES_EXT;UTEST_SOURCES_EXT_FORCE;UTEST_PRIVATE_INCLUDES_EXT;UTEST_PRIVATE_COMPILE_DEFINITIONS;UTEST_PRIVATE_LINK_LIBRARIES_EXT;UTEST_ACLNN_SOURCES_EXT;UTEST_ACLNN_SOURCES_EXT_FORCE;UTEST_ACLNN_PRIVATE_INCLUDES_EXT;UTEST_ACLNN_PRIVATE_COMPILE_DEFINITIONS;UTEST_ACLNN_PRIVATE_LINK_LIBRARIES_EXT"
+            "SUB_SYSTEM;BRIEF;SNAKE;TILING_DATA_DEF_BRIEF"
+            "OPAPI_SOURCES_EXT;OPAPI_PRIVATE_INCLUDES_EXT;OPAPI_PRIVATE_LINK_LIBRARIES_EXT;PROTO_SOURCES_EXT;PROTO_PRIVATE_INCLUDES_EXT;PROTO_PRIVATE_LINK_LIBRARIES_EXT;TILING_SOURCES_EXT;TILING_PRIVATE_INCLUDES_EXT;TILING_PRIVATE_LINK_LIBRARIES_EXT;KERNEL_SOURCES_EXT;KERNEL_TILING_DATA_DEF_H;KERNEL_PRIVATE_INCLUDES_EXT;KERNEL_PRIVATE_COMPILE_DEFINITIONS_EXT;UTEST_COMMON_SOURCES_EXT;UTEST_COMMON_SOURCES_EXT_FORCE;UTEST_COMMON_PUBLIC_INCLUDES_EXT;UTEST_COMMON_PRIVATE_INCLUDES_EXT;UTEST_COMMON_PRIVATE_COMPILE_DEFINITIONS;UTEST_COMMON_PRIVATE_LINK_LIBRARIES_EXT;UTEST_SOURCES_EXT;UTEST_SOURCES_EXT_FORCE;UTEST_PRIVATE_INCLUDES_EXT;UTEST_PRIVATE_COMPILE_DEFINITIONS;UTEST_PRIVATE_LINK_LIBRARIES_EXT;UTEST_ACLNN_SOURCES_EXT;UTEST_ACLNN_SOURCES_EXT_FORCE;UTEST_ACLNN_PRIVATE_INCLUDES_EXT;UTEST_ACLNN_PRIVATE_COMPILE_DEFINITIONS;UTEST_ACLNN_PRIVATE_LINK_LIBRARIES_EXT"
             ""
             ${ARGN}
     )
 
     OpsTest_Level1_AddOpApiShared(
-            SUB_SYSTEM                  ${TMP_SUB_SYSTEM}
-            BRIEF                       ${TMP_BRIEF}
-            SNAKE                       ${TMP_SNAKE}
-            SOURCES_EXT                 ${TMP_OPAPI_SOURCES_EXT}
-            PRIVATE_INCLUDES_EXT        ${TMP_OPAPI_PRIVATE_INCLUDES_EXT}
-            PRIVATE_LINK_LIBRARIES_EXT  ${TMP_OPAPI_PRIVATE_LINK_LIBRARIES_EXT}
+            SUB_SYSTEM                          ${TMP_SUB_SYSTEM}
+            BRIEF                               ${TMP_BRIEF}
+            SNAKE                               ${TMP_SNAKE}
+            SOURCES_EXT                         ${TMP_OPAPI_SOURCES_EXT}
+            PRIVATE_INCLUDES_EXT                ${TMP_OPAPI_PRIVATE_INCLUDES_EXT}
+            PRIVATE_LINK_LIBRARIES_EXT          ${TMP_OPAPI_PRIVATE_LINK_LIBRARIES_EXT}
     )
     OpsTest_Level1_AddOpProtoShared(
-            SUB_SYSTEM                  ${TMP_SUB_SYSTEM}
-            BRIEF                       ${TMP_BRIEF}
-            SNAKE                       ${TMP_SNAKE}
-            SOURCES_EXT                 ${TMP_PROTO_SOURCES_EXT}
-            PRIVATE_INCLUDES_EXT        ${TMP_PROTO_PRIVATE_INCLUDES_EXT}
-            PRIVATE_LINK_LIBRARIES_EXT  ${TMP_PROTO_PRIVATE_LINK_LIBRARIES_EXT}
+            SUB_SYSTEM                          ${TMP_SUB_SYSTEM}
+            BRIEF                               ${TMP_BRIEF}
+            SNAKE                               ${TMP_SNAKE}
+            SOURCES_EXT                         ${TMP_PROTO_SOURCES_EXT}
+            PRIVATE_INCLUDES_EXT                ${TMP_PROTO_PRIVATE_INCLUDES_EXT}
+            PRIVATE_LINK_LIBRARIES_EXT          ${TMP_PROTO_PRIVATE_LINK_LIBRARIES_EXT}
     )
     OpsTest_Level1_AddOpTilingShared(
-            SUB_SYSTEM                  ${TMP_SUB_SYSTEM}
-            BRIEF                       ${TMP_BRIEF}
-            SNAKE                       ${TMP_SNAKE}
-            SOURCES_EXT                 ${TMP_TILING_SOURCES_EXT}
-            PRIVATE_INCLUDES_EXT        ${TMP_TILING_PRIVATE_INCLUDES_EXT}
-            PRIVATE_LINK_LIBRARIES_EXT  ${TMP_TILING_PRIVATE_LINK_LIBRARIES_EXT}
+            SUB_SYSTEM                          ${TMP_SUB_SYSTEM}
+            BRIEF                               ${TMP_BRIEF}
+            SNAKE                               ${TMP_SNAKE}
+            SOURCES_EXT                         ${TMP_TILING_SOURCES_EXT}
+            PRIVATE_INCLUDES_EXT                ${TMP_TILING_PRIVATE_INCLUDES_EXT}
+            PRIVATE_LINK_LIBRARIES_EXT          ${TMP_TILING_PRIVATE_LINK_LIBRARIES_EXT}
     )
     OpsTest_Level1_AddOpKernelStatic(
             SUB_SYSTEM                       ${TMP_SUB_SYSTEM}
@@ -728,25 +840,75 @@ function(OpsTest_Level2_AddOp)
             SNAKE                            ${TMP_SNAKE}
             SOURCES_EXT                      ${TMP_KERNEL_SOURCES_EXT}
             TILING_DATA_DEF_H                ${TMP_KERNEL_TILING_DATA_DEF_H}
+            PRIVATE_INCLUDES_EXT             ${TMP_KERNEL_PRIVATE_INCLUDES_EXT}
             PRIVATE_COMPILE_DEFINITIONS_EXT  ${TMP_KERNEL_PRIVATE_COMPILE_DEFINITIONS_EXT}
     )
-    OpsTest_Level1_AddUTestCaseStatic(
-            BRIEF                                   ${TMP_BRIEF}
-            SNAKE                                   ${TMP_SNAKE}
-            COMMON_PRIVATE_INCLUDES_EXT             ${TMP_UTEST_COMMON_PRIVATE_INCLUDES_EXT}
-            COMMON_PRIVATE_COMPILE_DEFINITIONS      ${TMP_UTEST_COMMON_PRIVATE_COMPILE_DEFINITIONS}
-            COMMON_PRIVATE_LINK_LIBRARIES_EXT       ${TMP_UTEST_COMMON_PRIVATE_LINK_LIBRARIES_EXT}
-            SOURCES_EXT                             ${TMP_UTEST_SOURCES_EXT}
-            SOURCES_EXT_FORCE                       ${TMP_UTEST_SOURCES_EXT_FORCE}
-            PRIVATE_INCLUDES_EXT                    ${TMP_UTEST_PRIVATE_INCLUDES_EXT}
-            PRIVATE_COMPILE_DEFINITIONS             ${TMP_UTEST_PRIVATE_COMPILE_DEFINITIONS}
-            PRIVATE_LINK_LIBRARIES_EXT              ${TMP_UTEST_PRIVATE_LINK_LIBRARIES_EXT}
-            ACLNN_SOURCES_EXT                       ${TMP_UTEST_ACLNN_SOURCES_EXT}
-            ACLNN_SOURCES_EXT_FORCE                 ${TMP_UTEST_ACLNN_SOURCES_EXT_FORCE}
-            ACLNN_PRIVATE_INCLUDES_EXT              ${TMP_UTEST_ACLNN_PRIVATE_INCLUDES_EXT}
-            ACLNN_PRIVATE_COMPILE_DEFINITIONS       ${TMP_UTEST_ACLNN_PRIVATE_COMPILE_DEFINITIONS}
-            ACLNN_PRIVATE_LINK_LIBRARIES_EXT        ${TMP_UTEST_ACLNN_PRIVATE_LINK_LIBRARIES_EXT}
+    OpsTest_Level1_AddUTestCommonStatic(
+            BRIEF                               ${TMP_BRIEF}
+            SNAKE                               ${TMP_SNAKE}
+            SOURCES_EXT                         ${TMP_UTEST_COMMON_SOURCES_EXT}
+            SOURCES_EXT_FORCE                   ${TMP_UTEST_COMMON_SOURCES_EXT_FORCE}
+            TILING_DATA_DEF_BRIEF               ${TMP_TILING_DATA_DEF_BRIEF}
+            PUBLIC_INCLUDES_EXT                 ${TMP_UTEST_COMMON_PUBLIC_INCLUDES_EXT}
+            PRIVATE_INCLUDES_EXT                ${TMP_UTEST_COMMON_PRIVATE_INCLUDES_EXT}
+            PRIVATE_COMPILE_DEFINITIONS         ${TMP_UTEST_COMMON_PRIVATE_COMPILE_DEFINITIONS}
+            PRIVATE_LINK_LIBRARIES_EXT          ${TMP_UTEST_COMMON_PRIVATE_LINK_LIBRARIES_EXT}
     )
+    OpsTest_Level1_AddUTestCaseStatic(
+            BRIEF                               ${TMP_BRIEF}
+            SNAKE                               ${TMP_SNAKE}
+            TILING_DATA_DEF_BRIEF               ${TMP_TILING_DATA_DEF_BRIEF}
+            SOURCES_EXT                         ${TMP_UTEST_SOURCES_EXT}
+            SOURCES_EXT_FORCE                   ${TMP_UTEST_SOURCES_EXT_FORCE}
+            PRIVATE_INCLUDES_EXT                ${TMP_UTEST_PRIVATE_INCLUDES_EXT}
+            PRIVATE_COMPILE_DEFINITIONS         ${TMP_UTEST_PRIVATE_COMPILE_DEFINITIONS}
+            PRIVATE_LINK_LIBRARIES_EXT          ${TMP_UTEST_PRIVATE_LINK_LIBRARIES_EXT}
+    )
+    OpsTest_Level1_AddUTestAclnnCaseStatic(
+            BRIEF                               ${TMP_BRIEF}
+            SNAKE                               ${TMP_SNAKE}
+            TILING_DATA_DEF_BRIEF               ${TMP_TILING_DATA_DEF_BRIEF}
+            SOURCES_EXT                         ${TMP_UTEST_ACLNN_SOURCES_EXT}
+            SOURCES_EXT_FORCE                   ${TMP_UTEST_ACLNN_SOURCES_EXT_FORCE}
+            PRIVATE_INCLUDES_EXT                ${TMP_UTEST_ACLNN_PRIVATE_INCLUDES_EXT}
+            PRIVATE_COMPILE_DEFINITIONS         ${TMP_UTEST_ACLNN_PRIVATE_COMPILE_DEFINITIONS}
+            PRIVATE_LINK_LIBRARIES_EXT          ${TMP_UTEST_ACLNN_PRIVATE_LINK_LIBRARIES_EXT}
+    )
+endfunction()
+
+function(op_add_ut_subdirectory OP_UT_LIST OP_UT_DIR_LIST)
+    set(_OP_UT_LIST)
+    set(_OP_UT_DIR_LIST)
+
+    file(GLOB OP_HOST_CMAKE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/**/**/tests/CMakeLists.txt")
+
+    foreach(OP_CMAKE_FILE ${OP_HOST_CMAKE_FILES})
+        if ("${OP_CMAKE_FILE}" MATCHES "tests")
+            get_filename_component(OP_HOST_DIR "${OP_CMAKE_FILE}" DIRECTORY)
+            get_filename_component(OP_DIR "${OP_HOST_DIR}" DIRECTORY)
+        else()
+            get_filename_component(OP_DIR "${OP_CMAKE_FILE}" DIRECTORY)
+        endif()
+        get_filename_component(OP_NAME "${OP_DIR}" NAME)
+
+        if (DEFINED ASCEND_OP_NAME AND NOT "${ASCEND_OP_NAME}" STREQUAL "")
+            if (NOT "${ASCEND_OP_NAME}" STREQUAL "all" AND NOT "${ASCEND_OP_NAME}" STREQUAL "ALL")
+                if (NOT ${OP_NAME} IN_LIST ASCEND_OP_NAME)
+                    continue()
+                endif ()
+            endif ()
+        endif ()        
+
+        list(APPEND _OP_UT_LIST ${OP_NAME})
+        list(APPEND _OP_UT_DIR_LIST ${OP_DIR})
+    endforeach()
+
+    list(REMOVE_DUPLICATES _OP_UT_LIST)
+    list(REMOVE_DUPLICATES _OP_UT_DIR_LIST)
+    list(SORT _OP_UT_LIST)
+    list(SORT _OP_UT_DIR_LIST)
+    set(${OP_UT_LIST} ${_OP_UT_LIST} PARENT_SCOPE)
+    set(${OP_UT_DIR_LIST} ${_OP_UT_DIR_LIST} PARENT_SCOPE)
 endfunction()
 
 # 私有函数, 外部不可直接调用, 用于执行包含多个算子的 UT 可执行程序
@@ -761,7 +923,7 @@ function(OpsTest_RunLaunch)
             ""
             ${ARGN}
     )
-    if (NOT UT_NO_EXEC)
+    if (ENABLE_UT_EXEC)
         set(LD_LIBRARY_PATH_ "LD_LIBRARY_PATH=$ENV{LD_LIBRARY_PATH}:${ASCEND_CANN_PACKAGE_PATH}/compiler/lib64:${ASCEND_CANN_PACKAGE_PATH}/toolkit/tools/simulator/Ascend910B1/lib")
         if (ENABLE_ASAN OR ENABLE_UBSAN)
             if (ENABLE_ASAN)
@@ -828,7 +990,7 @@ function(OpsTest_GenerateCoverage)
             ""
             ${ARGN}
     )
-    if (NOT UT_NO_EXEC)
+    if (ENABLE_UT_EXEC)
         if (ENABLE_GCOV)
             find_program(LCOV lcov REQUIRED)
             get_filename_component(GEN_COV_PY ${OPS_ADV_CMAKE_DIR}/scripts/utest/gen_coverage.py REALPATH)
@@ -846,19 +1008,16 @@ function(OpsTest_GenerateCoverage)
             else ()
                 get_filename_component(SYS_ROOT "${_SUFFIX}/usr/include" REALPATH)
             endif ()
-            set(_FilterCmds
-                    "-f=${SYS_ROOT}"
-                    "-f=${GTEST_GTEST_INC}"
-                    "-f=${OPS_ADV_DIR}/tests"
-                    "-f=${ASCEND_CANN_PACKAGE_PATH_PARENT}"
-            )
-            foreach (_dir ${TMP_FILTER_DIRECTORIES})
-                list(APPEND _FilterCmds "-f=${_dir}")
-            endforeach ()
             list(REMOVE_DUPLICATES _FilterCmds)
             add_custom_command(
                     TARGET ${TMP_TARGET} POST_BUILD
-                    COMMAND ${HI_PYTHON} ${GEN_COV_PY} "-s=${OPS_ADV_DIR}" "-c=${GEM_COV_DATA_DIR}" ${_FilterCmds}
+                    COMMAND ${HI_PYTHON} ${GEN_COV_PY}
+                        "-s=${OPS_ADV_DIR}"
+                        "-c=${GEM_COV_DATA_DIR}"
+                        "-f=/tmp/*"
+                        "-f=/usr/include/*"
+                        "-f=${ASCEND_CANN_PACKAGE_PATH_PARENT}/*"
+                        "-y=${OPS_ADV_DIR}/tests/test_config.yaml"
                     COMMENT "Generate coverage for ${TMP_TARGET}"
             )
         endif ()
@@ -869,6 +1028,8 @@ endfunction()
 #[[
 ]]
 function(OpsTest_AddLaunch)
+    add_custom_target(ops_test_utest)
+
     if (NOT _OpsTestUt_UTestCaseLibraries AND NOT _OpsTestUt_UTestAclnnCaseLibraries)
         # 当 _OpsTestUt_UTestCaseLibraries 与 _OpsTestUt_UTestAclnnCaseLibraries 都为空时
         # 说明区分领域的 TESTS_UT_OPS_TEST 选项被错误设置, 需排查对应触发 ut 的 python 脚本逻辑及 build.sh.
@@ -883,8 +1044,7 @@ function(OpsTest_AddLaunch)
     set(_UTest_OpTilingLibrary)
     set(_UTest_Main)                     # UTest 用例可执行程序(常规)
     set(_UTest_Main_Aclnn)               # UTest 用例可执行程序(Aclnn)
-    set(_Utest_Executable)               # 为提高PR场景执行效率, PR场景各可执行文件并行执行, 否则串行执行
-    add_custom_target(ops_test_utest)
+    set(_Utest_ExecutableList)               # 为提高PR场景执行效率, PR场景各可执行文件并行执行, 否则串行执行
 
     # OpApi 动态库(可选)
     OpsTest_AddOpApiShared()
@@ -905,14 +1065,14 @@ function(OpsTest_AddLaunch)
 
             set(_UTest_Main ${UTest_NamePrefix}_Main_Normal_${_OpBrief})
             add_executable(${_UTest_Main})
-            target_sources(${_UTest_Main} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/framework/main.cpp)
+            target_sources(${_UTest_Main} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/ut/framework_special/main.cpp)
             target_compile_options(${_UTest_Main} PRIVATE -fPIC)
             target_link_libraries(${_UTest_Main}
                     PRIVATE
                         -Wl,--no-as-needed
                         -Wl,--whole-archive
                         $<BUILD_INTERFACE:intf_pub_utest>
-                        GTest::gtest
+                        gtest
                         $<BUILD_INTERFACE:_OpsTestUt_GTest_Wno>
                         ${_OpsTestUt_UTestCaseLibrary}
                         ${UTest_NamePrefix}_Stubs
@@ -927,65 +1087,58 @@ function(OpsTest_AddLaunch)
             if (TESTS_UT_OPS_TEST_CI_PR)
                 OpsTest_RunLaunch(TARGET ${_UTest_Main} EXECUTABLE ${_UTest_Main})
             else ()
-                list(APPEND _Utest_Executable ${_UTest_Main})
+                list(APPEND _Utest_ExecutableList ${_UTest_Main})
             endif ()
         endforeach ()
     endif ()
 
     # UTest 用例可执行程序(Aclnn)
-    set(_ACLNN_UTEST_SUPPORTED OFF)
     set(_param
             "--cann_path=${ASCEND_CANN_PACKAGE_PATH}"
             "--cann_package_name=opp"
             "get_package_version"
     )
-    execute_process(
-            COMMAND ${HI_PYTHON} ${OPS_ADV_DIR}/cmake/scripts/check_version_compatible.py ${_param}
-            RESULT_VARIABLE result
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            OUTPUT_VARIABLE _UTEST_OPP_CANN_VERSION
-    )
-    if (result)
-        message(FATAL_ERROR "Get package version failed.")
-    else ()
-        string(TOLOWER ${_UTEST_OPP_CANN_VERSION} _UTEST_OPP_CANN_VERSION)
-        string(REPLACE "t" "" _UTEST_OPP_CANN_VERSION ${_UTEST_OPP_CANN_VERSION})
-        if (${_UTEST_OPP_CANN_VERSION} VERSION_GREATER "7.3.10.0")
-            set(_ACLNN_UTEST_SUPPORTED ON)
-        endif ()
-    endif ()
-    if (_OpsTestUt_UTestAclnnCaseLibraries AND _ACLNN_UTEST_SUPPORTED)
-        set(_UTest_Main_Aclnn ${UTest_NamePrefix}_Main_Aclnn)
-        add_executable(${_UTest_Main_Aclnn})
-        target_sources(${_UTest_Main_Aclnn} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/framework/main_aclnn.cpp)
-        target_compile_options(${_UTest_Main_Aclnn} PRIVATE -fPIC)
-        target_link_libraries(${_UTest_Main_Aclnn}
-                PRIVATE
-                    -Wl,--no-as-needed
-                    -Wl,--whole-archive
-                    $<BUILD_INTERFACE:intf_pub_utest>
-                    GTest::gtest
-                    $<BUILD_INTERFACE:_OpsTestUt_GTest_Wno>
-                    ${_OpsTestUt_UTestAclnnCaseLibraries}
-                    ${UTest_NamePrefix}_Stubs
-                    ${UTest_NamePrefix}_Utils
-                    ${_UTest_OpApiLibrary}
-                    -Wl,--as-needed
-                    -Wl,--no-whole-archive
-                    c_sec
-        )
-        add_dependencies(${_UTest_Main_Aclnn} ${_UTest_OpProtoLibrary} ${_UTest_OpTilingLibrary})
-        add_dependencies(ops_test_utest ${_UTest_Main_Aclnn})
-        if (TESTS_UT_OPS_TEST_CI_PR)
-            OpsTest_RunLaunch(TARGET ${_UTest_Main_Aclnn} EXECUTABLE ${_UTest_Main_Aclnn})
-        else ()
-            list(APPEND _Utest_Executable ${_UTest_Main_Aclnn})
-        endif ()
+
+    if (_OpsTestUt_UTestAclnnCaseLibraries)
+        # 支持按算子分离可执行文件, 便于彼此冲突的 Kernel 侧编译宏设置
+        foreach (_OpsTestUt_UTestAclnnCaseLibrary ${_OpsTestUt_UTestAclnnCaseLibraries})
+            # 获取算子工程名
+            string(REPLACE "_UTest_Case_Aclnn" "" _OpBrief ${_OpsTestUt_UTestAclnnCaseLibrary})
+            string(REPLACE "UTest_" "" _OpBrief ${_OpBrief})
+            set(_UTest_Main_Aclnn ${UTest_NamePrefix}_Main_Aclnn_${_OpBrief})
+            add_executable(${_UTest_Main_Aclnn})
+            target_sources(${_UTest_Main_Aclnn} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/ut/framework_special/main_aclnn.cpp)
+            target_compile_options(${_UTest_Main_Aclnn} PRIVATE -fPIC)
+            target_link_libraries(${_UTest_Main_Aclnn}
+                    PRIVATE
+                        -Wl,--no-as-needed
+                        -Wl,--whole-archive
+                        $<BUILD_INTERFACE:intf_pub_utest>
+                        gtest
+                        $<BUILD_INTERFACE:_OpsTestUt_GTest_Wno>
+                        $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:alog_headers>>
+                        $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:dlog_headers>>
+                        ${_OpsTestUt_UTestAclnnCaseLibrary}
+                        ${UTest_NamePrefix}_Stubs
+                        ${UTest_NamePrefix}_Utils
+                        ${_UTest_OpApiLibrary}
+                        -Wl,--as-needed
+                        -Wl,--no-whole-archive
+                        c_sec
+            )
+            add_dependencies(${_UTest_Main_Aclnn} ${_UTest_OpProtoLibrary} ${_UTest_OpTilingLibrary})
+            add_dependencies(ops_test_utest ${_UTest_Main_Aclnn})
+            if (TESTS_UT_OPS_TEST_CI_PR)
+                OpsTest_RunLaunch(TARGET ${_UTest_Main_Aclnn} EXECUTABLE ${_UTest_Main_Aclnn})
+            else ()
+                list(APPEND _Utest_ExecutableList ${_UTest_Main_Aclnn})
+            endif ()
+        endforeach ()
     endif ()
 
     # 为提高PR场景执行效率, PR场景各可执行文件并行执行, 否则串行执行
     if (NOT TESTS_UT_OPS_TEST_CI_PR)
-        foreach (_Exe ${_Utest_Executable})
+        foreach (_Exe ${_Utest_ExecutableList})
             OpsTest_RunLaunch(TARGET ops_test_utest EXECUTABLE ${_Exe})
         endforeach ()
     endif ()

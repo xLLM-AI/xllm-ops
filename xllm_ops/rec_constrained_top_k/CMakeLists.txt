@@ -1,28 +1,11 @@
-add_ops_compile_options(
-    OP_NAME RecConstrainedTopK
-    OPTIONS --cce-auto-sync=on
-            -Wno-deprecated-declarations
-            -Wno-error
-)
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-target_sources(op_host_aclnn PRIVATE
-    rec_constrained_top_k_cpu.cpp
-)
-
-target_sources(optiling PRIVATE
-    rec_constrained_top_k_cpu.cpp
-)
-
-target_include_directories(optiling PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_sources(opsproto PRIVATE
-    rec_constrained_top_k_cpu.cpp
-)
-
-install(FILES rec_constrained_top_k.cpp
-    DESTINATION ${ASCEND_IMPL_OUT_DIR}/dynamic)
-
-install(FILES rec_constrained_top_k.h
-    DESTINATION ${ASCEND_IMPL_OUT_DIR}/dynamic)
+file(GLOB CURRENT_DIRS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/*)
+if(NOT ENABLE_TEST AND NOT BENCHMARK)
+    list(REMOVE_ITEM CURRENT_DIRS tests)
+endif()
+foreach(SUB_DIR ${CURRENT_DIRS})
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${SUB_DIR}/CMakeLists.txt")
+        add_subdirectory(${SUB_DIR})
+    endif()
+endforeach()

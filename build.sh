@@ -1,453 +1,185 @@
 #!/bin/bash
-# Copyright (c) 2024 Huawei Technologies Co., Ltd.
-# This file is a part of the CANN Open Software.
-# Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
-# Please refer to the License for details. You may not use this file except in compliance with the License.
-# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-# See LICENSE in the root of the software repository for the full text of the License.
-# ======================================================================================================================
+# Copyright (c) Huawei Technologies Co., Ltd. 2024. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -e
-########################################################################################################################
-# 预定义变量
-########################################################################################################################
 
-CURRENT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
-BUILD_DIR=${XLLM_OPS_BUILD_DIR:-${CURRENT_DIR}/build}
-OUTPUT_DIR=${CURRENT_DIR}/output
-USER_ID=$(id -u)
-PARENT_JOB="false"
-CHECK_COMPATIBLE="false"
-ASAN="false"
-UBSAN="false"
-COV="false"
-CLANG="false"
-VERBOSE="false"
+BASE_DIR=$(realpath "$(dirname "$0")")
 
-PR_CHANGED_FILES=""  # PR场景, 修改文件清单, 可用于标识是否PR场景
-
-if [ "${USER_ID}" != "0" ]; then
-    DEFAULT_TOOLKIT_INSTALL_DIR="${HOME}/Ascend/ascend-toolkit/latest"
-    DEFAULT_INSTALL_DIR="${HOME}/Ascend/latest"
-else
-    DEFAULT_TOOLKIT_INSTALL_DIR="/usr/local/Ascend/ascend-toolkit/latest"
-    DEFAULT_INSTALL_DIR="/usr/local/Ascend/latest"
-fi
-
-CUSTOM_OPTION="-DBUILD_OPEN_PROJECT=ON"
-
-########################################################################################################################
-# 查找算子目录设备配置
-########################################################################################################################
-dev_atlas=$(grep -rn AddConfig\(\"ascend910\"\)|wc -l)
-dev_atlasp=$(grep -rn AddConfig\(\"ascend310p\"\)|wc -l)
-dev_atlas_200_500_a2=$(grep -rn AddConfig\(\"ascend310b\"\)|wc -l)
-dev_atlas_a2=$(grep -rn AddConfig\(\"ascend910b\"\)|wc -l)
-dev_conf=""
-if (( dev_atlas > 0 )); then
-    dev_conf="ascend910;"$dev_conf
-fi
-
-if (( dev_atlasp > 0 )); then
-    dev_conf="ascend310p;"$dev_conf
-fi
-
-if (( dev_atlas_200_500_a2 > 0 )); then
-    dev_conf="ascend310b;"$dev_conf
-fi
-
-if (( dev_atlas_a2 > 0 )); then
-    dev_conf="ascend910b;"$dev_conf
-fi
-
-dev_atlas_a3=$(grep -rn AddConfig\(\"ascend910_93\"\)|wc -l)
-if (( dev_atlas_a3 > 0 )); then
-    dev_conf="ascend910_93;"$dev_conf
-fi
-
-export CPLUS_INCLUDE_PATH=/usr/include/c++/12/x86_64-openEuler-linux:/usr/include/c++/12:/usr/include/c++/12/aarch64-openEuler-linux
-unset ASCEND_CUSTOM_OPP_PATH
-# 替换工程配置文件内设备支持配置
-sed -i "/\"ASCEND_COMPUTE_UNIT\": {/,/}/ { /\"value\":/ s/\"value\": \".*\"/\"value\": \"$dev_conf\"/ }" CMakePresets.json
-
-########################################################################################################################
-# 预定义函数
-########################################################################################################################
-
-function help_info() {
-    echo "Usage: $0 [options]"
+# 显示帮助信息
+show_help() {
+    echo "Usage: bash build.sh [OPTIONS]"
+    echo ""
     echo "Options:"
-    echo
-    echo "-h|--help            Displays help message."
-    echo
-    echo "-n|--op-name         Specifies the compiled operator. If there are multiple values, separate them with semicolons and use quotation marks. The default is all."
-    echo "                     For example: -n \"flash_attention_score\" or -n \"flash_attention_score;flash_attention_score_grad\""
-    echo
-    echo "-c|--compute-unit    Specifies the chip type. If there are multiple values, separate them with semicolons and use quotation marks. The default is ascend910b."
-    echo "                     For example: -c \"ascend910b\" or -c \"ascend910b;ascend310p\""
-    echo
-    echo "-t|--test            Executes a unit test (UT). If there are multiple values, separate them with semicolons and use quotation marks."
-    echo "                     For example: -t \"flash_attention_score\" or -t \"flash_attention_score;flash_attention_score_grad\" or -t \"all\""
-    echo
-    echo "-e|--example         Executes example."
-    echo
-    echo "--tiling_key         Sets the tiling key list for operators. If there are multiple values, separate them with semicolons and use quotation marks. The default is all."
-    echo "                     For example: --tiling_key \"1\" or --tiling_key \"1;2;3;4\""
-    echo
-    echo "--asan               Compiles with AddressSanitizer, only supported in UTest."
-    echo
-    echo "--ubsan              Compiles with UndefinedBehaviorSanitizer, only supported in UTest."
-    echo
-    echo "--cov                Compiles with cov."
-    echo
-    echo "--verbose            Displays more compilation information."
-    echo
+    echo "  --build-dir=DIR     Specify build directory (default: build)"
+    echo '  -n|--op-name NAME   Only build the specified operator(s), semicolon-separated'
+    echo '  -c|--compute-unit   Specifies the chip type. If there are multiple values, separate'
+    echo '                       them with semicolons and use quotation marks. Default: ascend910b'
+    echo '                       e.g. -c "ascend910b" or -c "ascend910b;ascend310p"'
+    echo "  -h, --help          Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  bash build.sh                                        # Build all operators"
+    echo "  bash build.sh -n flash_attention_score_grad          # Build only flash_attention_score_grad"
+    echo "  bash build.sh --op-name moe_grouped_matmul           # Build only moe_grouped_matmul"
+    echo '  bash build.sh --op-name "op1;op2"                    # Build op1 and op2'
+    echo '  bash build.sh -c "ascend910b;ascend310p"             # Build for multiple chip types'
 }
 
-function log() {
-    local current_time=`date +"%Y-%m-%d %H:%M:%S"`
-    echo "[$current_time] "$1
-}
-
-function set_env()
-{
-    source $ASCEND_CANN_PACKAGE_PATH/bin/setenv.bash || echo "0"
-
-    export BISHENG_REAL_PATH=$(which bisheng || true)
-
-    if [ -z "${BISHENG_REAL_PATH}" ];then
-        log "Error: bisheng compilation tool not found, Please check whether the cann package or environment variables are set."
-        exit 1
-    fi
-}
-
-function clean()
-{
-    mkdir -p ${BUILD_DIR} ${OUTPUT_DIR}
-}
-
-function cmake_config()
-{
-    local extra_option="$1"
-    log "Info: cmake config ${CUSTOM_OPTION} ${extra_option} ."
-    opts=$(python3 $CURRENT_DIR/cmake/util/preset_parse.py $CURRENT_DIR/CMakePresets.json)
-    echo $opts
-    cmake ${CURRENT_DIR} $opts ${CUSTOM_OPTION} ${extra_option}
-}
-
-function build()
-{
-    local target="$1"
-    if [ "${VERBOSE}" == "true" ];then
-        local option="--verbose"
-    fi
-    cmake --build . --target ${target} ${JOB_NUM} ${option}
-}
-
-function gen_bisheng(){
-    local ccache_program=$1
-    local gen_bisheng_dir=${BUILD_DIR}/gen_bisheng_dir
-
-    if [ ! -d "${gen_bisheng_dir}" ];then
-        mkdir -p ${gen_bisheng_dir}
-    fi
-
-    pushd ${gen_bisheng_dir}
-    $(> bisheng)
-    echo "#!/bin/bash" >> bisheng
-    echo "ccache_args=""\"""${ccache_program} ${BISHENG_REAL_PATH}""\"" >> bisheng
-    echo "args=""$""@" >> bisheng
-
-    if [ "${VERBOSE}" == "true" ];then
-        echo "echo ""\"""$""{ccache_args} ""$""args""\"" >> bisheng
-    fi
-
-    echo "eval ""\"""$""{ccache_args} ""$""args""\"" >> bisheng
-    chmod +x bisheng
-
-    export PATH=${gen_bisheng_dir}:$PATH
-    popd
-}
-
-function build_package(){
-    build package
-}
-
-function build_host(){
-    build_package
-}
-
-function build_kernel(){
-    build ops_kernel
-}
-
-########################################################################################################################
-# 参数解析处理
-########################################################################################################################
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-    -h|--help)
-        help_info
-        exit
-        ;;
-    -n|--op-name)
-        ascend_op_name="$2"
-        shift 2
-        ;;
-    -c|--compute-unit)
-        ascend_compute_unit="$2"
-        shift 2
-        ;;
-    --ccache)
-        CCACHE_PROGRAM="$2"
-        shift 2
-        ;;
-    -p|--package-path)
-        ascend_package_path="$2"
-        shift 2
-        ;;
-    -b|--build)
-        BUILD="$2"
-        shift 2
-        ;;
-    -t|--test)
-        shift
-        if [ -n "$1" ];then
-            _parameter=$1
-            first_char=${_parameter:0:1}
-            if [ "${first_char}" == "-" ];then
-                TEST="all"
-            else
-                TEST="${_parameter}"
-                shift
-            fi
-        else
-            TEST="all"
-        fi
-        ;;
-    -e|--example)
-        shift
-        if [ -n "$1" ];then
-            _parameter=$1
-            first_char=${_parameter:0:1}
-            if [ "${first_char}" == "-" ];then
-                EXAMPLE="all"
-            else
-                EXAMPLE="${_parameter}"
-                shift
-            fi
-        else
-            EXAMPLE="all"
-        fi
-        ;;
-    -f|--changed_list)
-        PR_CHANGED_FILES="$2"
-        shift 2
-        ;;
-    --parent_job)
-        PARENT_JOB="true"
-        shift
-        ;;
-    --disable-check-compatible|--disable-check-compatiable)
-        CHECK_COMPATIBLE="false"
-        shift
-        ;;
-    --op_build_tool)
-        op_build_tool="$2"
-        shift 2
-        ;;
-    --ascend_cmake_dir)
-        ascend_cmake_dir="$2"
-        shift 2
-        ;;
-    --verbose)
-        VERBOSE="true"
-        shift
-        ;;
-    --asan)
-        ASAN="true"
-        shift
-        ;;
-    --ubsan)
-        UBSAN="true"
-        shift
-        ;;
-    --cov)
-        COV="true"
-        shift
-        ;;
-    --clang)
-        CLANG="true"
-        shift
-        ;;
-    --tiling-key|--tiling_key)
-        TILING_KEY="$2"
-        shift 2
-        ;;
-    --op_debug_config)
-        OP_DEBUG_CONFIG="$2"
-        shift 2
-        ;;
-    --ops-compile-options)
-        OPS_COMPILE_OPTIONS="$2"
-        shift 2
-        ;;
-    *)
-        help_info
-        exit 1
-        ;;
+# 解析参数
+BUILD_DIR=""
+OP_NAME=""
+COMPUTE_UNIT=""
+for arg in "$@"; do
+    case "$arg" in
+        --build-dir=*)
+            BUILD_DIR="${arg#*=}"
+            ;;
+        --compute-unit=*)
+            COMPUTE_UNIT="${arg#*=}"
+            ;;
+        -n|--op-name)
+            # -n 和 --op-name 需要取下一个参数作为算子名，在下面的循环中处理
+            ;;
+        -c|--compute-unit)
+            # -c 需要取下一个参数作为芯片类型，在下面的循环中处理
+            ;;
     esac
 done
 
-if [ -n "${ascend_compute_unit}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DASCEND_COMPUTE_UNIT=${ascend_compute_unit}"
-fi
-
-if [ -n "${ascend_op_name}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DASCEND_OP_NAME=${ascend_op_name}"
-fi
-
-if [ -n "${op_build_tool}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DOP_BUILD_TOOL=${op_build_tool}"
-fi
-
-if [ -n "${ascend_cmake_dir}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DASCEND_CMAKE_DIR=${ascend_cmake_dir}"
-fi
-
-if [ -n "${TEST}" ];then
-    if [ -n "${PR_CHANGED_FILES}" ];then
-        TEST=$(python3 "$CURRENT_DIR"/cmake/scripts/parse_changed_files.py -c "$CURRENT_DIR"/classify_rule.yaml -f "$PR_CHANGED_FILES" get_related_ut)
-        if [ -z "${TEST}" ]; then
-            log "Info: This PR didn't trigger any UTest."
-            exit 200
+# 使用位置索引处理 -n/--op-name 和 -c/--compute-unit 参数（需要取下一个参数）
+idx=1
+while [[ $idx -le $# ]]; do
+    arg="${!idx}"
+    if [[ "$arg" == "-n" || "$arg" == "--op-name" ]]; then
+        next_idx=$((idx + 1))
+        if [[ $next_idx -le $# ]]; then
+            OP_NAME="${!next_idx}"
         fi
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DTESTS_UT_OPS_TEST_CI_PR=ON"
-    fi
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DTESTS_UT_OPS_TEST=${TEST}"
-
-    if [ "${CLANG}" == "true" ];then
-        CLANG_C_COMPILER="$(which clang)"
-        if [ ! -f "${CLANG_C_COMPILER}" ];then
-            log "Error: Can't find clang path ${CLANG_C_COMPILER}"
-            exit 1
+    elif [[ "$arg" == "-c" || "$arg" == "--compute-unit" ]]; then
+        next_idx=$((idx + 1))
+        if [[ $next_idx -le $# ]]; then
+            COMPUTE_UNIT="${!next_idx}"
         fi
-
-        CLANG_PATH=$(dirname "${CLANG_C_COMPILER}")
-        CLANG_CXX_COMPILER="${CLANG_PATH}/clang++"
-        CLANG_LINKER="${CLANG_PATH}/lld"
-        CLANG_AR="${CLANG_PATH}/llvm-ar"
-        CLANG_STRIP="${CLANG_PATH}/llvm-strip"
-        CLANG_OBJCOPY="${CLANG_PATH}/llvm-objcopy"
-
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DCMAKE_C_COMPILER=${CLANG_C_COMPILER} -DCMAKE_CXX_COMPILER=${CLANG_CXX_COMPILER}"
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DCMAKE_LINKER=${CLANG_LINKER} -DCMAKE_AR=${CLANG_AR} -DCMAKE_STRIP=${CLANG_STRIP}"
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DCMAKE_OBJCOPY=${CLANG_OBJCOPY}"
     fi
+    idx=$((idx + 1))
+done
 
-    if [ "${ASAN}" == "true" ];then
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_ASAN=true"
+# 解析 -h/--help 参数
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+    esac
+done
+
+# 默认值
+if [ -z "$BUILD_DIR" ]; then
+    BUILD_DIR="${BASE_DIR}/build"
+fi
+BUILD_DIR=$(realpath -m "$BUILD_DIR")  # 规范化路径（不要求目录存在）
+OUTPUT_DIR="${BASE_DIR}/output"
+
+export CC=$(which gcc)
+export CXX=$(which g++)
+
+$CC --version
+$CXX --version
+# 移除历史编译结果
+rm -rf "$BUILD_DIR"
+rm -rf dist
+
+cd $BASE_DIR/xllm_ops
+if [ -n "${OP_NAME}" ]; then
+    echo ">>> Building specified operator(s): ${OP_NAME}"
+fi
+
+# 确定 SOC_VERSION 列表
+if [ -n "${COMPUTE_UNIT}" ]; then
+    # 用户通过 -c|--compute-unit 指定芯片类型
+    echo ">>> Using specified compute unit(s): ${COMPUTE_UNIT}"
+    IFS=';' read -ra SOC_VERSION_LIST <<< "${COMPUTE_UNIT}"
+else
+    # 自动检测芯片类型
+    if [ -z "${SOC_VERSION}" ]; then
+        ops=$(python3 -c "import torch; import torch_npu; soc = torch_npu._C._npu_get_soc_version(); ops = 'ascend910b' if soc <= 250 else 'ascend910_93'; print(ops)")
+        echo "ascendc build ops: $ops"
+        export SOC_VERSION=$ops
+    else
+        echo "ascendc build ops: $SOC_VERSION"
     fi
+    SOC_VERSION_LIST=("${SOC_VERSION}")
+fi
 
-    if [ "${UBSAN}" == "true" ];then
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_UBSAN=true"
-    fi
+# 对每个芯片类型分别调用 build_aclnn.sh
+for soc_ver in "${SOC_VERSION_LIST[@]}"; do
+    echo ">>> Building for SOC_VERSION=${soc_ver}"
+    bash $BASE_DIR/xllm_ops/build_aclnn.sh $BASE_DIR/xllm_ops "$soc_ver" "$BUILD_DIR" "$OP_NAME"
+done
 
-    if [ "${COV}" == "true" ];then
-        if [ "${CLANG}" == "true" ];then
-            log "Warning: GCOV only supported in gnu compiler."
+if [ ! -d "$OUTPUT_DIR" ]; then
+    mkdir -p "$OUTPUT_DIR"
+fi
+
+cp "$BUILD_DIR"/cann-ops-xllm-custom*.run "$OUTPUT_DIR"/
+
+cd  "$OUTPUT_DIR"
+OPP_INSTALL_PATH="${ASCEND_HOME_PATH}/opp"
+./cann-ops-xllm-custom*.run --install-path="$OPP_INSTALL_PATH"
+
+# -----------------------------------------------------------------------------
+# Post-install: 补写 ${OPP_INSTALL_PATH}/vendors/config.ini
+#
+# 背景：.run 包内置的 install.sh 在使用 --install-path 时，仅生成 bin/set_env.bash，
+#       不会创建/更新 vendors/config.ini，导致默认 OPP 加载链找不到该自定义 vendor。
+#       此处在外层手动补写 config.ini，使其包含本次安装的 vendor。
+# -----------------------------------------------------------------------------
+VENDOR_DIR_ROOT="${OPP_INSTALL_PATH}/vendors"
+CONFIG_FILE="${VENDOR_DIR_ROOT}/config.ini"
+
+# 自动探测刚刚安装的 vendor 名字（取 vendors/ 下最新修改的子目录名）
+if [ -d "${VENDOR_DIR_ROOT}" ]; then
+    VENDOR_NAME=$(ls -1t "${VENDOR_DIR_ROOT}" 2>/dev/null \
+                  | while read d; do
+                        [ -d "${VENDOR_DIR_ROOT}/$d" ] && echo "$d" && break
+                    done)
+fi
+
+if [ -z "${VENDOR_NAME}" ]; then
+    echo "[WARN] cannot detect installed vendor name under ${VENDOR_DIR_ROOT}, skip writing config.ini"
+else
+    echo "[INFO] post-install: write config.ini for vendor '${VENDOR_NAME}'"
+    if [ ! -f "${CONFIG_FILE}" ]; then
+        echo "load_priority=${VENDOR_NAME}" > "${CONFIG_FILE}"
+        chmod 640 "${CONFIG_FILE}" 2>/dev/null || true
+        echo "[INFO] created ${CONFIG_FILE}"
+    else
+        # 已存在：把当前 vendor 合并进 load_priority（若不存在则前置加入）
+        found_vendors="$(grep -w 'load_priority' "${CONFIG_FILE}" | cut --only-delimited -d'=' -f2-)"
+        if echo ",${found_vendors}," | grep -q ",${VENDOR_NAME},"; then
+            echo "[INFO] ${VENDOR_NAME} already in load_priority, skip"
         else
-            CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_GCOV=true"
+            if [ -z "${found_vendors}" ]; then
+                echo "load_priority=${VENDOR_NAME}" > "${CONFIG_FILE}"
+            else
+                sed -i "s@load_priority=${found_vendors}@load_priority=${VENDOR_NAME},${found_vendors}@g" "${CONFIG_FILE}"
+            fi
+            echo "[INFO] updated ${CONFIG_FILE}"
         fi
     fi
-
-    BUILD=ops_test_utest
 fi
+# -----------------------------------------------------------------------------
 
-if [ -n "${EXAMPLE}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DTESTS_EXAMPLE_OPS_TEST=${EXAMPLE}"
-
-    BUILD=ops_test_example
-fi
-
-if [ -n "${TILING_KEY}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DTILING_KEY=${TILING_KEY}"
-fi
-
-if [ -n "${OP_DEBUG_CONFIG}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DOP_DEBUG_CONFIG=${OP_DEBUG_CONFIG}"
-fi
-
-if [ -n "${OPS_COMPILE_OPTIONS}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DOPS_COMPILE_OPTIONS=${OPS_COMPILE_OPTIONS}"
-fi
-
-if [ -n "${ascend_package_path}" ];then
-    ASCEND_CANN_PACKAGE_PATH=${ascend_package_path}
-elif [ -n "${ASCEND_HOME_PATH}" ];then
-    ASCEND_CANN_PACKAGE_PATH=${ASCEND_HOME_PATH}
-elif [ -n "${ASCEND_OPP_PATH}" ];then
-    ASCEND_CANN_PACKAGE_PATH=$(dirname ${ASCEND_OPP_PATH})
-elif [ -d "${DEFAULT_TOOLKIT_INSTALL_DIR}" ];then
-    ASCEND_CANN_PACKAGE_PATH=${DEFAULT_TOOLKIT_INSTALL_DIR}
-elif [ -d "${DEFAULT_INSTALL_DIR}" ];then
-    ASCEND_CANN_PACKAGE_PATH=${DEFAULT_INSTALL_DIR}
-else
-    log "Error: Please set the toolkit package installation directory through parameter -p|--package-path."
-    exit 1
-fi
-
-if [ "${PARENT_JOB}" == "false" ];then
-    CPU_NUM=$(($(cat /proc/cpuinfo | grep "^processor" | wc -l)*2))
-    JOB_NUM="-j${CPU_NUM}"
-fi
-
-CUSTOM_OPTION="${CUSTOM_OPTION} -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH} -DCHECK_COMPATIBLE=${CHECK_COMPATIBLE}"
-
-########################################################################################################################
-# 处理流程
-########################################################################################################################
-
-set_env
-
-clean
-
-if [ -n "${CCACHE_PROGRAM}" ]; then
-    if [ "${CCACHE_PROGRAM}" == "false" ] || [ "${CCACHE_PROGRAM}" == "off" ]; then
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_CCACHE=OFF"
-    elif [ -f "${CCACHE_PROGRAM}" ];then
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_CCACHE=ON -DCUSTOM_CCACHE=${CCACHE_PROGRAM}"
-        gen_bisheng ${CCACHE_PROGRAM}
-    fi
-else
-    # 判断有无默认的ccache 如果有则使用
-    ccache_system=$(which ccache || true)
-    if [ -n "${ccache_system}" ];then
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_CCACHE=ON -DCUSTOM_CCACHE=${ccache_system}"
-        gen_bisheng ${ccache_system}
-    fi
-fi
-
-cd ${BUILD_DIR}
-
-if [ "${BUILD}" == "host" ];then
-    cmake_config -DENABLE_OPS_KERNEL=OFF
-    build_host
-    # TO DO
-    rm -rf ${CURRENT_DIR}/output
-    mkdir -p ${CURRENT_DIR}/output
-    cp ${BUILD_DIR}/*.run ${CURRENT_DIR}/output
-elif [ "${BUILD}" == "kernel" ];then
-    cmake_config -DENABLE_OPS_HOST=OFF
-    build_kernel
-elif [ -n "${BUILD}" ];then
-    cmake_config
-    build ${BUILD}
-else
-    cmake_config
-    build_package
-fi
-unset ASCEND_CUSTOM_OPP_PATH
-./xllm_ops.run

@@ -1,0 +1,33 @@
+/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://gitcode.com/xLLM-AI/xllm_ops/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+#include "multi_latent_attention_tiling_impl.h"
+#include "multi_latent_attention_tiling.h"
+#include "register/op_def_registry.h"
+#include "tiling/platform/platform_ascendc.h"
+
+namespace optiling {
+    #ifdef OP_TILING_LIB
+    static ge::graphStatus TilingFunc(gert::TilingContext *context) {
+        return AtbOps::MLATiling(context);
+        // return ge::GRAPH_SUCCESS;
+    }
+    #else
+    static ge::graphStatus TilingFunc(gert::TilingContext *context) {
+        return ge::GRAPH_SUCCESS;
+    }
+    #endif
+    IMPL_OP_OPTILING(MultiLatentAttention)
+    .Tiling(TilingFunc);
+}

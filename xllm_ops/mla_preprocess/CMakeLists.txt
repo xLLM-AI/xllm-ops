@@ -1,39 +1,24 @@
-add_ops_compile_options(
-        OP_NAME MlaPreprocess
-        OPTIONS --cce-auto-sync=off
-                -Wno-deprecated-declarations
-                -Wno-error
-)
+# Copyright 2025 The xLLM Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://gitcode.com/xLLM-AI/xllm_ops/blob/main/LICENSE
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-target_sources(op_host_aclnn PRIVATE
-        mla_preprocess_def.cpp
-)
-
-# optiling
-target_sources(optiling PRIVATE
-        mla_preprocess_tiling.cpp
-)
-
-target_include_directories(optiling PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-# opproto
-target_sources(opsproto PRIVATE
-        mla_preprocess_infershape.cpp
-)
-
-target_include_directories(opsproto PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
-install(FILES mla_preprocess.cpp
-        DESTINATION ${ASCEND_IMPL_OUT_DIR}/dynamic)
-
-install(FILES mla_preprocess_bf16.h
-        DESTINATION ${ASCEND_IMPL_OUT_DIR}/dynamic)
-
-install(FILES mla_preprocess_fp16.h
-        DESTINATION ${ASCEND_IMPL_OUT_DIR}/dynamic)
-
-install(FILES mla_preprocess_no_quant.h
-        DESTINATION ${ASCEND_IMPL_OUT_DIR}/dynamic)
+file(GLOB CURRENT_DIRS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/*)
+if(NOT ENABLE_TEST AND NOT BENCHMARK)
+    list(REMOVE_ITEM CURRENT_DIRS tests)
+endif()
+foreach(SUB_DIR ${CURRENT_DIRS})
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${SUB_DIR}/CMakeLists.txt")
+        add_subdirectory(${SUB_DIR})
+    endif()
+endforeach()

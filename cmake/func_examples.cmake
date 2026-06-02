@@ -1,11 +1,12 @@
-# Copyright (c) 2024 Huawei Technologies Co., Ltd.
-# This file is a part of the CANN Open Software.
-# Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
+# -----------------------------------------------------------------------------------------------------------
+# Copyright (c) 2025 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-# ======================================================================================================================
+# -----------------------------------------------------------------------------------------------------------
 
 function(add_execute_example)
     cmake_parse_arguments(EXAMPLE "" "TARGET_NAME;SCRIPT;TEST_CASE;ACLNN_FUNC" "" ${ARGN})
@@ -14,7 +15,7 @@ function(add_execute_example)
     if (NOT EXAMPLE_ACLNN_FUNC)
         message(FATAL_ERROR "Example(${EXAMPLE_TEST_CASE}) not give aclnn func name")
     endif ()
-    set(_get_py ${OPS_ADV_DIR}/cmake/scripts/examples/get_opapi_abs_path.py)
+    set(_get_py ${OPS_ADV_DIR}/../cmake/scripts/examples/get_opapi_abs_path.py)
     execute_process(
             COMMAND ${HI_PYTHON} ${_get_py} "-f=${EXAMPLE_ACLNN_FUNC}"
             OUTPUT_VARIABLE OPAPI_SHARED_REL_PATH

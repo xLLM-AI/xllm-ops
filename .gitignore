@@ -1,8 +1,6 @@
 # Samples
-build
 build_out
 output
-log
 src/math/*/tests/st/[0-9]*/
 src/math/*/examples/CppExtensions/*/test/*.json
 src/math/*/examples/PytorchInvocation/pytorch
