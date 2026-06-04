@@ -232,6 +232,79 @@ std::tuple<at::Tensor, at::Tensor> rec_constrained_topk_impl_npu(
   return std::make_tuple(out_tokens, out_logprobs);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+           at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+mega_chunk_gdn(
+    const at::Tensor &q,
+    const at::Tensor &k,
+    const at::Tensor &v,
+    const at::Tensor &g,
+    const at::Tensor &beta,
+    const at::Tensor &mask_lower,
+    const at::Tensor &mask_full,
+    const at::Tensor &minus_identity,
+    const at::Tensor &cu_seqlens,
+    const at::Tensor &initial_state,
+    int64_t num_matrices,
+    bool has_initial_state)
+{
+    constexpr int64_t kChunkSize = 128;
+
+    TORCH_CHECK(q.dim() == 4, "q must have shape [1, total_tokens, num_key_heads, head_dim]");
+    TORCH_CHECK(k.dim() == 4, "k must have shape [1, total_tokens, num_key_heads, head_dim]");
+    TORCH_CHECK(v.dim() == 4, "v must have shape [1, total_tokens, num_value_heads, head_dim]");
+    TORCH_CHECK(g.dim() == 3, "g must have shape [1, total_tokens, num_value_heads]");
+    TORCH_CHECK(beta.dim() == 3, "beta must have shape [1, total_tokens, num_value_heads]");
+    TORCH_CHECK(cu_seqlens.dim() == 1 && cu_seqlens.numel() >= 2, "cu_seqlens must be a 1-D tensor");
+    TORCH_CHECK(num_matrices > 0, "num_matrices must be positive");
+
+    const int64_t total_tokens = q.size(1);
+    const int64_t num_heads = v.size(2);
+    const int64_t head_dim = q.size(3);
+    const int64_t num_sequences = cu_seqlens.numel() - 1;
+
+    at::Tensor out = at::empty_like(v);
+    at::Tensor g_sum = at::empty(g.sizes(), g.options().dtype(at::kFloat));
+    at::Tensor g_t = at::empty({num_heads, total_tokens}, g.options().dtype(at::kFloat));
+    at::Tensor beta_t = at::empty({num_heads, total_tokens}, beta.options());
+    at::Tensor a = at::zeros({1, total_tokens, num_heads, kChunkSize}, beta.options());
+    at::Tensor a_inv_f32 = at::zeros({1, total_tokens, num_heads, kChunkSize}, g.options().dtype(at::kFloat));
+    at::Tensor a_inv = at::zeros({1, total_tokens, num_heads, kChunkSize}, beta.options());
+    at::Tensor w = at::empty_like(v);
+    at::Tensor u = at::empty_like(v);
+    at::Tensor h = at::zeros({num_matrices, head_dim, head_dim}, v.options());
+    at::Tensor v_new = at::empty_like(v);
+    at::Tensor final_state = at::zeros({num_sequences * num_heads, head_dim, head_dim}, v.options());
+
+    EXEC_NPU_CMD(aclnnMegaChunkGdn,
+                 q,
+                 k,
+                 v,
+                 g,
+                 beta,
+                 mask_lower,
+                 mask_full,
+                 minus_identity,
+                 cu_seqlens,
+                 initial_state,
+                 num_matrices,
+                 has_initial_state,
+                 out,
+                 g_sum,
+                 g_t,
+                 beta_t,
+                 a,
+                 a_inv_f32,
+                 a_inv,
+                 w,
+                 u,
+                 h,
+                 v_new,
+                 final_state);
+
+    return std::make_tuple(out, g_sum, g_t, beta_t, a, a_inv_f32, a_inv, w, u, h, v_new, final_state);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("select_unshared_kv", &select_unshared_kv_impl_npu, "select_unshared_kv");
   m.def("cache_unshared_kv", &cache_unshared_kv_impl_npu, "cache_unshared_kv");
@@ -243,4 +316,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("causal_conv1d", &causal_conv1d, "causal_conv1d");
   m.def("recurrent_gated_delta_rule", &recurrent_gated_delta_rule, "recurrent_gated_delta_rule");
   m.def("rec_constrained_topk", &rec_constrained_topk_impl_npu, "rec_constrained_topk");
+  m.def("mega_chunk_gdn", &mega_chunk_gdn, "mega_chunk_gdn");
 }

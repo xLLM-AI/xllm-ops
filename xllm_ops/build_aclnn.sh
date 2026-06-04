@@ -134,6 +134,7 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
         "x_flash_attention_infer"
         "onerec_final_beam_select"
         "rec_constrained_top_k"
+        "mega_chunk_gdn"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -246,6 +247,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "x_flash_attention_infer"
         "onerec_final_beam_select"
         "rec_constrained_top_k"
+        "mega_chunk_gdn"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
