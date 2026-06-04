@@ -108,6 +108,7 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
         "dispatch_ffn_combine"
         "dequant_swiglu_quant"
         "scatter_nd_update_v2"
+        "grouped_matmul_swiglu_quant_v2"
 
         ### JD's in-house operators ####
         "beam_search_group"
@@ -219,6 +220,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "dispatch_ffn_combine"
         "dequant_swiglu_quant"
         "scatter_nd_update_v2"
+        "grouped_matmul_swiglu_quant_v2"
 
          ### JD's in-house operators ####
         "beam_search_group"
