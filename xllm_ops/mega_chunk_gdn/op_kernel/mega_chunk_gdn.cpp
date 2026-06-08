@@ -31,9 +31,9 @@
 #endif
 // clang-format off
 
-#include <pto/pto-inst.hpp>
 #include "acl/acl.h"
 #include "kernel_operator.h"
+#include <pto/pto-inst.hpp>
 #include <type_traits>
 using namespace pto;
 
