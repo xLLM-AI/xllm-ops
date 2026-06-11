@@ -17,7 +17,7 @@ UT_TARGETS=()
 ########################################################################################################################
 
 CURRENT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
-BUILD_DIR=${CURRENT_DIR}/build  # 可通过 --build-dir 参数覆盖
+BUILD_DIR=${XLLM_OPS_BUILD_DIR:-${CURRENT_DIR}/build}  # 可通过 --build-dir 参数覆盖；默认复用 XLLM_OPS_BUILD_DIR 持久化目录
 OUTPUT_DIR=${CURRENT_DIR}/output
 BUILD_OUT_DIR=${CURRENT_DIR}/build_out
 USER_ID=$(id -u)
@@ -348,14 +348,8 @@ function set_env()
 
 function clean()
 {
-    # 安全校验：当 BUILD_DIR 被自定义时避免误删重要目录
-    if [ -n "${BUILD_DIR}" ];then
-        if [[ "${BUILD_DIR}" == *"build"* || "${BUILD_DIR}" == *"xllm"* || "${BUILD_DIR}" == "/tmp/"* ]];then
-            rm -rf ${BUILD_DIR}
-        else
-            log "Warning: BUILD_DIR=${BUILD_DIR} seems unusual, skipping rm -rf for safety"
-        fi
-    fi
+    # 保留 BUILD_DIR 以支持增量编译，不再删除整个 build 目录；
+    # 仅在非测试/示例构建时清理打包输出目录。
 
     if [ -z "${TEST}" ] && [ -z "${EXAMPLE}" ];then
         if [ -n "${OUTPUT_DIR}" ];then

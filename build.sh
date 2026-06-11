@@ -86,9 +86,10 @@ for arg in "$@"; do
     esac
 done
 
-# 默认值
+# 默认值：未通过 --build-dir 指定时，优先复用 XLLM_OPS_BUILD_DIR 持久化缓存目录
+# （CI / 本地增量编译跨多次构建复用同一 build 目录），否则回落到源码树内的 build。
 if [ -z "$BUILD_DIR" ]; then
-    BUILD_DIR="${BASE_DIR}/build"
+    BUILD_DIR="${XLLM_OPS_BUILD_DIR:-${BASE_DIR}/build}"
 fi
 BUILD_DIR=$(realpath -m "$BUILD_DIR")  # 规范化路径（不要求目录存在）
 OUTPUT_DIR="${BASE_DIR}/output"
@@ -98,8 +99,7 @@ export CXX=$(which g++)
 
 $CC --version
 $CXX --version
-# 移除历史编译结果
-rm -rf "$BUILD_DIR"
+# 保留 BUILD_DIR 以支持增量编译，仅清理打包产物
 rm -rf dist
 
 cd $BASE_DIR/xllm_ops

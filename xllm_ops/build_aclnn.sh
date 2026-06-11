@@ -284,12 +284,7 @@ dump_selected_ops
   log "subshell cwd before cd=$(pwd)"
   #cd csrc
   log "subshell cwd after cd=$(pwd)"
-  log "cleaning  xllm_ops build dirs"
-  if [ -n "$BUILD_DIR_ARG" ]; then
-    rm -rf -- "$BUILD_DIR_ARG"
-  else
-    rm -rf -- build
-  fi
+  log "cleaning xllm_ops output dirs (keep build dir for incremental compilation)"
   rm -rf -- output build_out
 
   : "${ROOT_DIR:?ROOT_DIR is not set}"
