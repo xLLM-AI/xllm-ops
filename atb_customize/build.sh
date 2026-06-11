@@ -30,10 +30,7 @@ function fn_build()
         echo "error: build failed because ATB_HOME_PATH is null, please source nnal set_env.sh first."
         exit 1
     fi
-    if ! grep -q "8.5.0" "${ATB_HOME_PATH}/../../version.info"; then
-        echo "error: build failed because this function only support Ascend-cann-atb : 8.5.0."
-        exit 1
-    fi
+
     fn_load_3rdparty_for_compile
     [[ ! -d "$CACHE_DIR" ]] && mkdir $CACHE_DIR
     cd $CACHE_DIR
@@ -84,7 +81,7 @@ function fn_load_mki()
         return 0
     fi
     cd $THIRD_PARTY_DIR
-    git clone -b br_release_cann_8.5.0_20260527 --depth 1 https://gitcode.com/cann/ascend-boost-comm.git Mind-KernelInfra
+    git clone -b br_release_cann_9.0.0_20260928 --depth 1 https://gitcode.com/cann/ascend-boost-comm.git Mind-KernelInfra
 }
 
 function fn_load_atb()
@@ -95,7 +92,7 @@ function fn_load_atb()
     cd $THIRD_PARTY_DIR
     # Fork from https://gitcode.com/cann/ascend-transformer-boost.git,
     # Add customized ops release solution for XLLM.
-    git clone -b br_release_cann_8.5.0_20260527  --depth 1 https://gitcode.com/xLLM-AI/ascend-transformer-boost.git
+    git clone -b br_release_cann_9.0.0_20260928  --depth 1 https://gitcode.com/xLLM-AI/ascend-transformer-boost.git
 }
 
 function fn_load_compiler()
