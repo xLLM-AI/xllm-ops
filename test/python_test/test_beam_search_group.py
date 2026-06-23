@@ -18,6 +18,8 @@ import os
 import pytest
 import torch
 import pdb
+import ctypes
+import sys
 torch_npu = pytest.importorskip("torch_npu")
 custom_ops = pytest.importorskip("custom_ops")
 
@@ -116,42 +118,54 @@ def beam_search_torch(request_num, beam_width, log_probs, top_tokens, top_probs,
 @pytest.mark.parametrize(
     "request_num, beam_width, top_k, current_step",
     [
-        # (1, 8, 8, 0),
+        # beam_width == top_k && top_k % 8 == 0
         # (1, 8, 8, 1),
         # (1, 8, 8, 2),
-        # (1, 8, 16, 0),
         # (1, 8, 16, 1),
         # (1, 8, 16, 2),
-        # (1, 16, 16, 0),
         # (1, 16, 16, 1),
         # (1, 16, 16, 2),
-        # (2, 16, 32, 0),
-        # (2, 16, 32, 1),
-        # (2, 16, 32, 2),
-        # (2, 32, 32, 0),
         # (2, 32, 32, 1),
         # (2, 32, 32, 2),
-        # (2, 32, 64, 0),
-        # (2, 32, 64, 1),
-        # (2, 32, 64, 2),
-        # (2, 512, 512, 0),
         # (2, 512, 512, 1),
         # (2, 512, 512, 2),
-        # (2, 512, 1024, 0),
         # (2, 512, 1024, 1),
         # (2, 512, 1024, 2),
-        # (1, 1024, 1024, 0),
         # (1, 1024, 1024, 1),
         # (1, 1024, 1024, 2),
-        # (4, 32, 32, 0),
         # (4, 32, 32, 1),
         # (4, 32, 32, 2),
-        # (4, 512, 512, 0),
         # (4, 512, 512, 1),
         # (4, 512, 512, 2),
-        # (4, 1024, 1024, 0),
         # (4, 1024, 1024, 1),
         # (4, 1024, 1024, 2),
+
+        # beam_width != top_k && top_k % 8 == 0 && beam_width % 8 == 0 && top_k < step_size * beam_width
+        # 默认step_size为8
+        # (1, 8, 16, 1),
+        # (2, 16, 8, 1),
+        # (2, 16, 32, 1),
+        # (2, 16, 32, 1),
+        # (2, 32, 64, 1),
+        # (2, 64, 32, 1),
+        # (2, 64, 128, 1),
+        # (2, 128, 256, 2),
+        # (2, 256, 512, 2),
+        # (2, 512, 1024, 2),
+
+        # beam_width != top_k && top_k % 8 != 0 && beam_width % 8 == 0 && top_k <= step_size * beam_width
+        # 默认step_size为8
+        # (1, 8, 15, 2),
+        # (2, 8, 15, 2),
+        # (2, 8, 17, 1),
+
+        # beam_width != top_k && top_k % 8 != 0 && beam_width % 8 != 0 && top_k <= step_size * beam_width
+        # 默认step_size为8
+        # (1, 9, 7, 1),
+        # (1, 9, 15, 1),
+        # (1, 15, 7, 2),
+        # (1, 15, 31, 1),
+        # (1, 17, 31, 1),
     ],
 )
 def test_beam_search_group_npu(request_num, beam_width, top_k, current_step):
@@ -160,6 +174,21 @@ def test_beam_search_group_npu(request_num, beam_width, top_k, current_step):
         torch_npu.npu.set_device(device_id)
     except Exception as e:
         pytest.skip(f"NPU device not available: {e}")
+
+    # 配合pytest -s输出ascend c代码中的标准输出
+    libc = ctypes.CDLL(None)
+
+    # 设置 stdout 无缓冲
+    libc.setvbuf(
+        ctypes.c_void_p.in_dll(libc, "stdout"),
+        None,
+        2,
+        0
+    )
+
+
+    if top_k > beam_width * beam_width:
+        top_k = beam_width * beam_width
 
     atol_div = 1e-4
     eff_top_k = 1 if current_step == 0 else top_k
@@ -178,6 +207,7 @@ def test_beam_search_group_npu(request_num, beam_width, top_k, current_step):
         log_probs.npu(), top_tokens.npu(), top_probs.npu(), origin_seq.npu(), current_step, top_k
     )
 
+    # 可能存在token_id不同，但是out_log_probs一样的情况，应属正常情况，此时可以只比较out_token_index， out_log_probs和out_beam_count_prefix_sums
     if current_step != 0:
         assert torch.allclose(out_token_ids.flatten(), out_token_ids_npu.cpu().flatten(), atol=atol_div, rtol=0)
         assert torch.allclose(out_token_index.flatten(), out_token_index_npu.cpu().flatten(), atol=atol_div, rtol=0)
@@ -185,5 +215,5 @@ def test_beam_search_group_npu(request_num, beam_width, top_k, current_step):
         assert torch.allclose(out_beam_count_prefix_sums.flatten(), out_beam_count_prefix_sums_npu.cpu().flatten(), atol=atol_div, rtol=0)
     if current_step == 0:
         assert torch.allclose(out_token_ids.flatten(), sequence_npu.cpu()[:, :, 0].flatten(), atol=atol_div, rtol=0)
-    else:  
+    else:
         assert torch.allclose(sequence_cpu[:, :, : current_step + 1].flatten(), sequence_npu.cpu()[:, :, : current_step + 1].flatten(), atol=atol_div, rtol=0)

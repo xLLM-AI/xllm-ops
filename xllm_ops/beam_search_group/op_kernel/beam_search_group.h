@@ -28,8 +28,8 @@ public:
        GM_ADDR out_log_probs, GM_ADDR out_beam_count_prefix_sums,
        int32_t num_sequences, int32_t sequence_length,
        int32_t beam_width, int32_t top_k, int32_t request_num, int32_t core_num,
-       int32_t min_size, int32_t step_size, TopkTiling &topkTilingData,
-       TopkTiling &topKTilingData1);
+       int32_t min_size, int32_t step_size, TopkTiling &topKTilingData,
+       TopkTiling &topKTilingData1, TopkTiling &topKTilingDataTail);
   __aicore__ inline void Process();
 
   __aicore__ inline int32_t AlignUp(int32_t value, int32_t alignment);
@@ -95,9 +95,10 @@ private:
   int32_t align_top_k;
   int32_t min_size;
   int32_t step_size;
-  TopkTiling topkTilingData;
+  TopkTiling topKTilingData;
   TopkTiling topKTilingData1;
-  
+  TopkTiling topKTilingDataTail;
+
   AscendC::TQue<AscendC::QuePosition::VECIN, 1> log_probs_in_que;
   AscendC::TQue<AscendC::QuePosition::VECIN, 1> top_tokens_in_que;
   AscendC::TQue<AscendC::QuePosition::VECOUT, 1> out_token_ids_out_que;
@@ -137,6 +138,7 @@ class ProcessSequence{
   int32_t align_current_step;
   int32_t sequence_buf_alignsize;
   int32_t top_k;
+  int32_t align_top_k;
   AscendC::GlobalTensor<int32_t> sequence_gm;
   AscendC::GlobalTensor<int32_t> out_sequence_gm;
   AscendC::GlobalTensor<int32_t> token_index_gm;

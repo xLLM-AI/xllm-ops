@@ -31,8 +31,9 @@ TILING_DATA_FIELD_DEF(int32_t, min_size);
 TILING_DATA_FIELD_DEF(int32_t, step_size);
 TILING_DATA_FIELD_DEF(int32_t, current_step);
 TILING_DATA_FIELD_DEF(int32_t, max_decode_step);
-TILING_DATA_FIELD_DEF_STRUCT(TopkTiling, topkTilingData);
+TILING_DATA_FIELD_DEF_STRUCT(TopkTiling, topKTilingData);
 TILING_DATA_FIELD_DEF_STRUCT(TopkTiling, topKTilingData1);
+TILING_DATA_FIELD_DEF_STRUCT(TopkTiling, topKTilingDataTail);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(BeamSearchGroup, BeamSearchGroupTilingData);

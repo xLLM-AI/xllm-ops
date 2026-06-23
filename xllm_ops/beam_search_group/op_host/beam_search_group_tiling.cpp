@@ -31,22 +31,26 @@ ge::graphStatus TilingBeamSearchGroupFunc::Init() {
   // uint32_t aiv_num = 1;
 
   // check input shape
-  auto token_ids_shape = tiling_context_->GetInputShape(0)->GetOriginShape();
-  auto top_tokens_shape = tiling_context_->GetInputShape(2)->GetOriginShape();
-  auto sequence_shape = tiling_context_->GetInputShape(3)->GetOriginShape();
+  auto log_probs_shape = tiling_context_->GetInputShape(0)->GetOriginShape(); // [request_num * beam_width, 1]
+  auto top_probs_shape = tiling_context_->GetInputShape(2)->GetOriginShape(); // [request_num * beam_width, beam_width]
+  auto sequence_shape = tiling_context_->GetInputShape(3)->GetOriginShape();  // [request_num, beam_width, current_step + 1]
   current_step_ = static_cast<uint32_t>(*(tiling_context_->GetAttrs()->GetAttrPointer<int>(0)));
   int top_k_attr = *(tiling_context_->GetAttrs()->GetAttrPointer<int>(1));
   // shape_num = sequence_shape.GetDim(sequence_shape.GetDimNum() - 2);
   max_decode_step_ = sequence_shape.GetDim(sequence_shape.GetDimNum() - 1);
-  num_sequences_ = token_ids_shape.GetDim(token_ids_shape.GetDimNum() - 2);
-  sequence_length_ = token_ids_shape.GetDim(token_ids_shape.GetDimNum() - 1);
+  num_sequences_ = log_probs_shape.GetDim(log_probs_shape.GetDimNum() - 2);
+  sequence_length_ = log_probs_shape.GetDim(log_probs_shape.GetDimNum() - 1);
   top_k_ = (top_k_attr > 0) ? static_cast<uint32_t>(top_k_attr)
-                             : top_tokens_shape.GetDim(top_tokens_shape.GetDimNum() - 1);
+                             : top_probs_shape.GetDim(top_probs_shape.GetDimNum() - 1);
   if (current_step_ == 0) {
       top_k_ = 1;
   }
   beam_width_ = sequence_shape.GetDim(sequence_shape.GetDimNum() - 2);
   request_num_ = num_sequences_ / beam_width_;
+  if (top_k_ > beam_width_ * beam_width_) {
+    top_k_ = beam_width_ * beam_width_;
+  }
+
   if(request_num_ > MAX_SUPPORT_REQUEST_NUM) {
     OP_LOGE(context->GetNodeName(), "request_num must be less than %u", MAX_SUPPORT_REQUEST_NUM);
     return ge::GRAPH_FAILED;
@@ -55,10 +59,15 @@ ge::graphStatus TilingBeamSearchGroupFunc::Init() {
   int32_t block_size1 = 32/sizeof(float);
   int32_t align_top_k = (top_k_+block_size1-1)/block_size1*block_size1;
   // int32_t step_size = beam_width_ /48 == 0 ? beam_width_%48 : 48;
-  int32_t align_beam_width = (beam_width_+31)/32*32;
+  int32_t align_beam_width1 = (beam_width_+31)/32*32;
+  int32_t align_beam_width2 = (beam_width_+7)/8*8;
   // step_size_ =1024/align_beam_width;
+  constexpr int MAX_INNER_SIZE = 4096;
   step_size_ = 8;
-  int32_t block_size = (step_size_ * align_top_k + 31)/32*32;
+  if (step_size_ * align_beam_width2 > MAX_INNER_SIZE) {
+    step_size_ = MAX_INNER_SIZE / align_beam_width2;
+  }
+  int32_t block_size = (step_size_ * align_beam_width2 + 31)/32*32; // device侧在[beam_width, beam_width]的probs空间中，分块计算[step_size_, beam_width] padding to [step_size_, align_beam_width2]
   uint32_t max_size = 0;
   uint32_t min_size0 = 0;
   uint32_t min_size1 = 0;
@@ -71,7 +80,7 @@ ge::graphStatus TilingBeamSearchGroupFunc::Init() {
                           false,
                           AscendC::TopKMode::TOPK_NORMAL,
                           true,
-                          tiling_data_.topkTilingData);
+                          tiling_data_.topKTilingData);
   AscendC::GetTopKMaxMinTmpSize(platform_info,
                                 block_size,
                                 1,
@@ -82,6 +91,26 @@ ge::graphStatus TilingBeamSearchGroupFunc::Init() {
                                 dtype_size,
                                 max_size,
                                 min_size0);
+  int32_t block_tail = ((beam_width_ % step_size_) * align_beam_width2 + 31)/32*32;
+  AscendC::TopKTilingFunc(platform_info,
+                        block_tail,
+                        1,
+                        align_top_k,
+                        dtype_size,
+                        false,
+                        AscendC::TopKMode::TOPK_NORMAL,
+                        true,
+                        tiling_data_.topKTilingDataTail);
+  AscendC::GetTopKMaxMinTmpSize(platform_info,
+                              block_tail,
+                              1,
+                              false,
+                              false,
+                              AscendC::TopKMode::TOPK_NORMAL,
+                              true,
+                              dtype_size,
+                              max_size,
+                              min_size0);
 //   tiling.set_tmpsize(minsize);
 int32_t block_size2 = (2 * align_top_k + 31)/32*32;
   AscendC::TopKTilingFunc(platform_info,
@@ -104,7 +133,6 @@ int32_t block_size2 = (2 * align_top_k + 31)/32*32;
                                 max_size,
                                 min_size1);
   min_size_ = static_cast<int32_t>(std::max(min_size0, min_size1));
-
   sync_workspace_size_ =
       static_cast<size_t>(platform_info.GetLibApiWorkSpaceSize());
   return ge::GRAPH_SUCCESS;

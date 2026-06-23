@@ -15,9 +15,10 @@ limitations under the License.
 
 #include "./beam_search_group.h"
 
-#include "kernel_operator.h"
-#include "common/common.h"
+#include <cstdint>
 
+#include "common/common.h"
+#include "kernel_operator.h"
 
 template <typename TokenIdType, typename LogProbType>
 __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::Init(
@@ -26,7 +27,7 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::Init(
     GM_ADDR out_beam_count_prefix_sums,
      int32_t num_sequences, int32_t sequence_length,
     int32_t beam_width, int32_t top_k, int32_t request_num, int32_t core_num,
-    int32_t min_size, int32_t step_size, TopkTiling &topkTilingData, TopkTiling &topKTilingData1) {
+    int32_t min_size, int32_t step_size, TopkTiling &topKTilingData, TopkTiling &topKTilingData1, TopkTiling &topKTilingDataTail) {
   log_probs_gm.SetGlobalBuffer((__gm__ LogProbType *)log_probs);
   top_tokens_gm.SetGlobalBuffer((__gm__ TokenIdType *)top_tokens);
   top_probs_gm.SetGlobalBuffer((__gm__ LogProbType *)top_probs);
@@ -41,8 +42,9 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::Init(
   this->top_k = top_k;
   this->request_num = request_num;
   this->core_num = core_num;
-  this->topkTilingData = topkTilingData;
+  this->topKTilingData = topKTilingData;
   this->topKTilingData1 = topKTilingData1;
+  this->topKTilingDataTail = topKTilingDataTail;
   this->align_beam_width1 = AlignUp(this->beam_width, 32);
   this->align_beam_width2 = AlignUp(this->beam_width, 32 / sizeof(LogProbType));
   this->align_top_k = AlignUp(this->top_k, 32 / sizeof(LogProbType));
@@ -61,8 +63,8 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::Init(
   pipe.InitBuffer(prefix_probs_buf, align_buf * sizeof(LogProbType));
   pipe.InitBuffer(prefix_index_buf, align_buf * sizeof(int32_t));
   pipe.InitBuffer(top_k_second_res_buf, align_buf * sizeof(LogProbType));
-  pipe.InitBuffer(merge_probs_buf, align_buf * sizeof(LogProbType) * 2);
-  pipe.InitBuffer(merge_index_buf, align_buf * sizeof(int32_t) * 2);
+  pipe.InitBuffer(merge_probs_buf, AlignUp(2 * this->align_top_k, 32) * sizeof(LogProbType));
+  pipe.InitBuffer(merge_index_buf, AlignUp(2 * this->align_top_k, 32) * sizeof(int32_t));
   pipe.InitBuffer(top_k_second_res_index_buf, align_buf * sizeof(int32_t));
   pipe.InitBuffer(top_k_tmp_buf, this->min_size);
   pipe.InitBuffer(beam_counts_buf, align_buf * sizeof(int32_t));
@@ -172,7 +174,7 @@ BeamSearchGroup<TokenIdType, LogProbType>::AlignUpDataCopyProbSlice(
     AscendC::LocalTensor<LogProbType> dst,
     AscendC::GlobalTensor<LogProbType> src, int32_t length,
     int32_t slice_length) {
-  int32_t block_size = AlignUp(length, 32 / sizeof(LogProbType));
+  int32_t block_size = AlignUp(length, 32 / sizeof(LogProbType)); // actully equals this->align_beam_width2
   AscendC::DataCopyPadExtParams<LogProbType> params;
   params.isPad = true;
   params.paddingValue = -1.0f / 0.0f;
@@ -229,15 +231,15 @@ BeamSearchGroup<TokenIdType, LogProbType>::Psum(int32_t request_idx,AscendC::Loc
     // TopK block_size is aligned to 32
     bool is_last_round_with_tail = (i == beam_width_round - 1 && tail_number != 0);
     int32_t round_size = is_last_round_with_tail ? tail_number : this->step_size;
-    int32_t full_round_block_size = AlignUp(this->step_size * this->align_beam_width2, 32);
+    int32_t each_round_aligned_probs_cnt = AlignUp(this->step_size * this->align_beam_width2, 32);
     if (is_last_round_with_tail) {
       // Note: This is an issue of AscendC:
-      // The TopK op uses both topKInfo and topkTilingData as the input config
-      // TopK will use the block_size from topkTilingData, which leads to data reuse from previous round
+      // The TopK op uses both topKInfo and topKTilingData as the input config
+      // TopK will use the block_size from topKTilingData, which leads to data reuse from previous round
       // Here we simply reinit [top_probs_local, end)
-      AscendC::Duplicate<LogProbType>(top_probs_local, static_cast<LogProbType>(-1.0f / 0.0f), full_round_block_size);
+      AscendC::Duplicate<LogProbType>(top_probs_local, static_cast<LogProbType>(-1.0f / 0.0f), each_round_aligned_probs_cnt);
     } else {
-      LocalTensor top_probs_local_last_block = top_probs_local[full_round_block_size - 32];
+      LocalTensor top_probs_local_last_block = top_probs_local[each_round_aligned_probs_cnt - 32];
       AscendC::Duplicate<LogProbType>(top_probs_local_last_block, static_cast<LogProbType>(-1.0f / 0.0f), 32);
     }
     int32_t eventIDVToMTE2 = static_cast<int32_t>(pipe.FetchEventID(AscendC::HardEvent::V_MTE2));	
@@ -276,7 +278,7 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::TopKWithSorted
   int32_t offset = 0;
   LocalTensor<LogProbType> dst_local_value =
       top_k_result_prob_buf.Get<LogProbType>();
-  LocalTensor<int32_t> dst_local_index = top_k_result_index_buf.Get<int32_t>();
+  LocalTensor<int32_t> dst_local_index = top_k_result_index_buf.Get<int32_t>(); // [this->align_top_k]
   LocalTensor<int32_t> src_local_index;
   LocalTensor<bool> src_local_finish;
   int32_t block_size = AlignUp(round_length * this->align_beam_width2, 32);
@@ -289,19 +291,19 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::TopKWithSorted
 
   AscendC::TopK<LogProbType, false, false, false,AscendC::TopKMode::TOPK_NORMAL>(
       dst_local_value, dst_local_index, top_probs_local, src_local_index,
-      src_local_finish, tmp_local, this->align_top_k, this->topkTilingData, topKInfo,
+      src_local_finish, tmp_local, this->align_top_k, round_length < this->step_size ? this->topKTilingDataTail : this->topKTilingData, topKInfo,
       isLargest);
   AscendC::Adds<int32_t>(dst_local_index, dst_local_index,
                          static_cast<int32_t>((round_idx * this->step_size) * this->align_beam_width2),
-                         this->align_beam_width2);
+                         this->align_top_k);
   /*
   // old version
   AscendC::Adds<int32_t>(dst_local_index, dst_local_index,
   static_cast<int32_t>((request_idx * this->beam_width+round_idx * this->step_size)*this->align_top_k),
   this->beam_width);
-  */ 
+  */
   LocalTensor<LogProbType> merge_top_probs = merge_probs_buf.Get<LogProbType>();
-  AscendC::Duplicate<LogProbType>(merge_top_probs, static_cast<LogProbType>(-1.0f / 0.0f), 2 * this->align_top_k);
+  AscendC::Duplicate<LogProbType>(merge_top_probs, static_cast<LogProbType>(-1.0f / 0.0f), AlignUp(2 * this->align_top_k, 32));
   AscendC::DataCopy(merge_top_probs, dst_local_value, this->align_top_k);
   AscendC::DataCopy(merge_top_probs[this->align_top_k], prefix_top_probs, this->align_top_k);
   LocalTensor<int32_t> merge_index = merge_index_buf.Get<int32_t>();
@@ -326,7 +328,7 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::TopKWithSorted
           merge_index,
           src_local_finish,
           tmp_local,
-          this->align_beam_width2,
+          this->align_top_k,
           this->topKTilingData1,
           topKInfo2,
           isLargest);
@@ -347,11 +349,11 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::StackWithOutpu
      AscendC::LocalTensor<int32_t> &prefix_top_index) {
   // reuse some buffers from TopK
   LocalTensor<LogProbType> align_top_k_vector_float = merge_probs_buf.GetWithOffset<LogProbType>(this->align_top_k, 0);
-  AscendC::Duplicate<float>(align_top_k_vector_float, static_cast<float>(this->beam_width), this->align_top_k);
+  AscendC::Duplicate<float>(align_top_k_vector_float, static_cast<float>(this->align_beam_width2), this->align_top_k);
   LocalTensor<float> align_top_k_vector_cp = merge_probs_buf.GetWithOffset<float>(this->align_top_k, this->align_top_k * sizeof(LogProbType));
   LocalTensor<int32_t> beam_ids = top_k_second_res_index_buf.GetWithOffset<int32_t>(this->align_top_k, 0);
   LocalTensor<int32_t> remainders = top_k_result_index_buf.GetWithOffset<int32_t>(this->align_top_k, 0);
-  AscendC::Duplicate<int32_t>(remainders, static_cast<int32_t>(this->beam_width), this->align_top_k);
+  AscendC::Duplicate<int32_t>(remainders, static_cast<int32_t>(this->align_beam_width2), this->align_top_k);
   LocalTensor<int32_t> beam_counts = beam_counts_buf.Get<int32_t>();
   AscendC::Duplicate<int32_t>(beam_counts, 0, this->align_top_k);
   LocalTensor<int32_t> beam_write_pos = beam_write_pos_buf.Get<int32_t>();
@@ -361,13 +363,13 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::StackWithOutpu
   AscendC::Cast(beam_ids, align_top_k_vector_float, AscendC::RoundMode::CAST_FLOOR, this->top_k);
   AscendC::Mul(remainders, beam_ids, remainders, this->top_k);
   AscendC::Sub(remainders, prefix_top_index, remainders, this->top_k);
-  
+
+  AscendC::Duplicate<int32_t>(beam_counts, 0, this->beam_width); // Prevent uninitialized values when this->beam_width > this->top_k
   for (int32_t i = 0; i < this->top_k; ++i) {
     int32_t beam_id = beam_ids.GetValue(i);
     int32_t count = beam_counts.GetValue(beam_id);
     beam_counts.SetValue(beam_id, count + 1);
   }
-
   LocalTensor<int32_t> beam_prefix = out_beam_count_prefix_sums_out_que.AllocTensor<int32_t>();
   int32_t running = 0;
   for (int32_t beam = 0; beam < this->beam_width; ++beam) {
@@ -375,6 +377,7 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::StackWithOutpu
     running += beam_counts.GetValue(beam);
     beam_prefix.SetValue(beam, running);
   }
+
   AscendC::Adds<int32_t>(beam_prefix, beam_prefix, static_cast<int32_t>(request_idx * this->beam_width), this->beam_width);
   out_beam_count_prefix_sums_out_que.EnQue(beam_prefix);
   LocalTensor<int32_t> prefix_tmp = out_beam_count_prefix_sums_out_que.DeQue<int32_t>();
@@ -400,7 +403,6 @@ __aicore__ inline void BeamSearchGroup<TokenIdType, LogProbType>::StackWithOutpu
     // out_log_probs_local.SetValue(write_pos, top_probs_gm.GetValue(top_token_index));
     out_token_ids_local.SetValue(write_pos, top_tokens_gm.GetValue(top_token_index));
   }
-
   AscendC::Adds(out_token_index_local,
                 out_token_index_local,
                 static_cast<TokenIdType>(request_idx * this->beam_width),
@@ -483,7 +485,8 @@ __aicore__ inline void ProcessSequence::Init(GM_ADDR sequence,
   this->align_current_step = (current_step / 8 + 1) * 8;
   this->request_num = request_num;
   this->sequence_buf_alignsize = this->align_current_step * this->top_k;
-  pipe.InitBuffer(sequence_in_que, 1, this->align_current_step * this->top_k * sizeof(int32_t));
+  this->align_top_k = AlignUp(this->top_k, 8);
+  pipe.InitBuffer(sequence_in_que, 1, this->align_current_step * this->beam_width * sizeof(int32_t));
   pipe.InitBuffer(sequence_out_que, 1, this->align_current_step * this->top_k * sizeof(int32_t));
   pipe.InitBuffer(sequence_buf, this->sequence_buf_alignsize * sizeof(int32_t) * 2); // store sequence update and token_index_offset
   pipe.InitBuffer(token_index_buf, this->top_k * sizeof(int32_t));
@@ -522,7 +525,7 @@ __aicore__ inline void ProcessSequence::Process() {
       }
       LocalTensor<int32_t> in_token_ids_local = in_token_ids_que.AllocTensor<int32_t>();
       AscendC::DataCopy(in_token_ids_local, out_token_ids_gm[request_idx * this->top_k], 
-        this->top_k);
+        this->align_top_k);
       in_token_ids_que.EnQue(in_token_ids_local);
       LocalTensor<int32_t> in_token_ids_tmp = in_token_ids_que.DeQue<int32_t>();
       LocalTensor<int32_t> token_index_local = token_index_buf.Get<int32_t>();
@@ -530,7 +533,7 @@ __aicore__ inline void ProcessSequence::Process() {
                                 (token_index_local, token_index_gm[request_idx * this->top_k],this->top_k,
                                   this->top_k,this->top_k,1
                                 );
-            
+
       in_sequence_local_origin = sequence_in_que.AllocTensor<int32_t>();
       int32_t sequence_offset = request_idx * this->beam_width * this->max_decode_step;
 
@@ -546,9 +549,13 @@ __aicore__ inline void ProcessSequence::Process() {
       in_sequence_local_origin = sequence_in_que.DeQue<int32_t>();
       LocalTensor<int32_t> sequence_local_update = sequence_buf.Get<int32_t>();
       gatherb_offset_local = sequence_buf.Get<int32_t>()[this->sequence_buf_alignsize];
+
+      uint32_t repeat_times = (this->top_k + FLOAT_BLOCK_SIZE - 1) / FLOAT_BLOCK_SIZE;
+      if (this->top_k % FLOAT_BLOCK_SIZE != 0) {
+        AscendC::Duplicate<int32_t>(gatherb_offset_local[(repeat_times - 1) * FLOAT_BLOCK_SIZE], 0, FLOAT_BLOCK_SIZE);
+      }
       // call origin offset for gatherb
 
-      
       // get relative index offset in per request
       int32_t token_sub_value = 0 - request_idx * this->beam_width;
       AscendC::Adds(token_index_local, token_index_local, 
@@ -557,14 +564,13 @@ __aicore__ inline void ProcessSequence::Process() {
 
       AscendC::Muls(gatherb_offset_local, token_index_local, 
       static_cast<int32_t>(sizeof(float) * FLOAT_BLOCK_SIZE), this->top_k);
+
       AscendC::PipeBarrier<PIPE_V>();
       // update sequence
       tl::ascend::copy_ub_to_ub_beam<int32_t, int32_t>
                 (sequence_local_update, in_sequence_local_origin, this->sequence_buf_alignsize);
       AscendC::PipeBarrier<PIPE_V>();
-
       // TODO Need to consider beam_width not aligned to 8
-      uint32_t repeat_times = (this->top_k + FLOAT_BLOCK_SIZE - 1) / FLOAT_BLOCK_SIZE;
       for (uint32_t i = 0; i < repeat_times; ++i) {
           // per loop update 8 datablock
         AscendC::Gatherb(sequence_local_update.template ReinterpretCast<uint32_t>()[i * FLOAT_BLOCK_SIZE * FLOAT_BLOCK_SIZE], 
@@ -622,7 +628,7 @@ beam_search_group(GM_ADDR log_probs, GM_ADDR top_tokens, GM_ADDR top_probs, GM_A
               tiling_data.num_sequences, tiling_data.sequence_length,
               tiling_data.beam_width, tiling_data.top_k, tiling_data.request_num,
               tiling_data.core_num, tiling_data.min_size, tiling_data.step_size,
-              tiling_data.topkTilingData, tiling_data.topKTilingData1);
+              tiling_data.topKTilingData, tiling_data.topKTilingData1, tiling_data.topKTilingDataTail);
       op.Process();
       AscendC::SyncAll();
       op.pipe.Destroy();
