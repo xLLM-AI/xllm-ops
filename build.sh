@@ -178,7 +178,14 @@ install_artifacts() {
     cp "$BUILD_DIR"/cann-ops-xllm-custom*.run "$OUTPUT_DIR"/
 
     cd "$OUTPUT_DIR"
-    OPP_INSTALL_PATH="${ASCEND_HOME_PATH}/opp"
+    local OPP_INSTALL_PATH="${ASCEND_HOME_PATH}/opp"
+    local VENDOR_PATH="${OPP_INSTALL_PATH}/vendors/custom_xllm_math"
+    if [ -d "${VENDOR_PATH}" ]; then
+        # The generated installer exits under set -e if a new package adds a
+        # top-level op_impl child that the old install tree did not have.
+        echo "[INFO] remove stale custom_xllm_math vendor before reinstall"
+        rm -rf "${VENDOR_PATH}"
+    fi
     ./cann-ops-xllm-custom*.run --install-path="$OPP_INSTALL_PATH"
 }
 

@@ -69,7 +69,8 @@ at::Tensor x_attention_impl_npu(const at::Tensor& query,
                                 const c10::optional<at::Tensor>& shared_block_tables,
                                 const c10::optional<at::Tensor>& unshared_block_tables,
                                 const at::Tensor& actual_shared_kvlen,
-                                const at::Tensor& decode_step) {
+                                const at::Tensor& decode_step,
+                                double scale_value = 0.0) {
   at::Tensor attnOut = at::empty_like(query);
   
   EXEC_NPU_CMD(aclnnXAttention,
@@ -82,6 +83,7 @@ at::Tensor x_attention_impl_npu(const at::Tensor& query,
                actual_shared_kvlen,
                decode_step,
                shared_block_tables,
+               scale_value,
                attnOut);
 
   return attnOut;

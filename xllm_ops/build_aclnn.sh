@@ -28,6 +28,25 @@ find_op_dir() {
     find "${ROOT_DIR}/" -maxdepth 3 -type d -name "${op_name}" -print -quit 2>/dev/null
 }
 
+get_cann_toolkit_version() {
+    local version_file
+    local version_line
+    for version_file in \
+        "${ASCEND_TOOLKIT_HOME}/toolkit/version.info" \
+        "${ASCEND_TOOLKIT_HOME}/version.info" \
+        "${ASCEND_HOME_PATH}/toolkit/version.info" \
+        "${ASCEND_HOME_PATH}/version.info"; do
+        if [[ -f "${version_file}" ]]; then
+            version_line=$(grep -m1 '^Version=' "${version_file}" 2>/dev/null || true)
+            if [[ -n "${version_line}" ]]; then
+                echo "${version_line#Version=}" | tr -d '\r\n'
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
 # 如果指定了 OP_NAME_ARG，覆盖 CUSTOM_OPS_ARRAY 和 CUSTOM_OPS
 if [[ -n "${OP_NAME_ARG}" ]]; then
     log "OP_NAME_ARG=${OP_NAME_ARG} specified, overriding default CUSTOM_OPS"
@@ -247,8 +266,17 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "x_flash_attention_infer"
         "onerec_final_beam_select"
         "rec_constrained_top_k"
-        "mega_chunk_gdn"
     )
+    CANN_TOOLKIT_VERSION="$(get_cann_toolkit_version || true)"
+    if [[ "${CANN_TOOLKIT_VERSION}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        if [[ "${BASH_REMATCH[1]}" -ge 9 ]]; then
+            CUSTOM_OPS_ARRAY+=("mega_chunk_gdn")
+        else
+            log "skip mega_chunk_gdn for CANN version ${CANN_TOOLKIT_VERSION}"
+        fi
+    else
+        log "skip mega_chunk_gdn because CANN version is unavailable"
+    fi
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
 else

@@ -70,6 +70,7 @@ public:
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
+        this->Attr("scale_value").AttrType(OPTIONAL).Float(0.0);
        
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");

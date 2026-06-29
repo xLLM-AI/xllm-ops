@@ -47,6 +47,7 @@ constexpr uint32_t BLOCK_SIZE = 128;
 constexpr int32_t WORKSPACE_BLOCK_SIZE_DB = 128 * 128 * 4; // row * col * blockStackNum
 constexpr int32_t UNSHARED_WORKSPACE_BLOCK_SIZE_DB = 128 * 256;   // unshared no pinpong
 constexpr int32_t FLOAT_BLOCK_SIZE = 8;
+constexpr int32_t SCALE_VALUE_ATTR_INDEX = 0;
 
 class TilingXAttentionFunc {
   public:
@@ -97,6 +98,13 @@ ge::graphStatus TilingXAttentionFunc::FillBasicTilingData4NewKind()
   int32_t beamSize = numTokens / batch;
 
   float scaleValue = static_cast<float>(1.0 / std::sqrt(1.0 * embeddingSize));
+  auto attrs = tiling_context_->GetAttrs();
+  if (attrs != nullptr) {
+    const auto* attr_scale_value = attrs->GetAttrPointer<float>(SCALE_VALUE_ATTR_INDEX);
+    if (attr_scale_value != nullptr && *attr_scale_value > 0.0f) {
+      scaleValue = *attr_scale_value;
+    }
+  }
 
   // set tiling data
   tiling_data_.set_batch(batch);
@@ -285,6 +293,13 @@ ge::graphStatus TilingXAttentionFunc::FillBasicTilingData()
   int32_t beamSize = numTokens / batch;
 
   float scaleValue = static_cast<float>(1.0 / std::sqrt(1.0 * embeddingSize));
+  auto attrs = tiling_context_->GetAttrs();
+  if (attrs != nullptr) {
+    const auto* attr_scale_value = attrs->GetAttrPointer<float>(SCALE_VALUE_ATTR_INDEX);
+    if (attr_scale_value != nullptr && *attr_scale_value > 0.0f) {
+      scaleValue = *attr_scale_value;
+    }
+  }
 
   // 设置tiling信息
   tiling_data_.set_batch(batch);
