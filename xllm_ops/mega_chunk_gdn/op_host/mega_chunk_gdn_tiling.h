@@ -27,6 +27,7 @@ TILING_DATA_FIELD_DEF(int64_t, has_initial_state);
 TILING_DATA_FIELD_DEF(int64_t, batch_size);
 TILING_DATA_FIELD_DEF(int64_t, seq_len);
 TILING_DATA_FIELD_DEF(int64_t, total_tokens);
+TILING_DATA_FIELD_DEF(uint64_t, ffts_addr);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(MegaChunkGdn, MegaChunkGdnTilingData)

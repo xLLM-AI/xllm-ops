@@ -46,6 +46,7 @@ public:
 
         this->Attr("num_matrices").AttrType(OPTIONAL).Int(0);
         this->Attr("has_initial_state").AttrType(OPTIONAL).Bool(false);
+        this->Attr("ffts_addr").AttrType(OPTIONAL).Int(0);
 
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");

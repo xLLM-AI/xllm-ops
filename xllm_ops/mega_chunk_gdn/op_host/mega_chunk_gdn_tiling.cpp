@@ -45,13 +45,13 @@ enum InputIndex {
 enum AttrIndex {
     NUM_MATRICES_ATTR = 0,
     HAS_INITIAL_STATE_ATTR,
+    FFTS_ADDR_ATTR,
 };
 
 bool IsSupportedHeadPair(int64_t valueHeads, int64_t keyHeads)
 {
-    return keyHeads > 0 && valueHeads % keyHeads == 0 &&
-           (valueHeads == 6 || valueHeads == 8 || valueHeads == 12 || valueHeads == 16 || valueHeads == 24 ||
-            valueHeads == 32 || valueHeads == 48 || valueHeads == 64);
+    constexpr int64_t kMaxHeads = 64;
+    return keyHeads > 0 && valueHeads >= 1 && valueHeads <= kMaxHeads && valueHeads % keyHeads == 0;
 }
 
 uint32_t CeilDiv(uint32_t value, uint32_t divisor)
@@ -131,6 +131,10 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context)
     if (attrs != nullptr && attrs->GetAttrPointer<bool>(HAS_INITIAL_STATE_ATTR) != nullptr) {
         hasInitialState = *attrs->GetAttrPointer<bool>(HAS_INITIAL_STATE_ATTR) ? 1 : 0;
     }
+    uint64_t fftsAddr = 0;
+    if (attrs != nullptr && attrs->GetAttrPointer<int64_t>(FFTS_ADDR_ATTR) != nullptr) {
+        fftsAddr = static_cast<uint64_t>(*attrs->GetAttrPointer<int64_t>(FFTS_ADDR_ATTR));
+    }
 
     uint32_t numMatrices = 0;
     if (numMatricesAttr > 0 && numMatricesAttr <= std::numeric_limits<uint32_t>::max()) {
@@ -149,6 +153,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context)
     tiling.set_batch_size(batchSize);
     tiling.set_seq_len(totalTokens);
     tiling.set_total_tokens(totalTokens);
+    tiling.set_ffts_addr(fftsAddr);
 
     context->SetBlockDim(blockDim);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
