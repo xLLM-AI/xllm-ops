@@ -292,7 +292,8 @@ AICORE void cumsum_kernel(
         // after this per-row write to acc_ub, ordering it before the scalar issuer
         // launches the next row. Every other barrier in this chain is plain PIPE_V.
         TADD(acc_ub, acc_ub, g_row_i);
-        PtoSetWaitFlag<PIPE_V, PIPE_S>(EVENT_ID2, EVENT_ID2);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
 
         UbND<float, 1, HTC> s_row_i;
         TASSIGN(s_row_i, SUbAddr + i * RowBytes);
@@ -395,7 +396,8 @@ AICORE void cumsum_kernel(
             // The one load-bearing sync (see chain-sync note above): Vec→Scalar
             // after this per-row write to acc_ub. All other barriers here are PIPE_V.
             TADD(acc_ub, acc_ub, g_row_i);
-            PtoSetWaitFlag<PIPE_V, PIPE_S>(EVENT_ID2, EVENT_ID2);
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
 
             UbND<float, 1, HTC> s_row_i;
             TASSIGN(s_row_i, SUbAddr + i * RowBytes);
