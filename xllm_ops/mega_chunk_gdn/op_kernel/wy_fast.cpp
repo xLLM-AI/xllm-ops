@@ -255,8 +255,16 @@ gemm_v0(std::conditional_t<transpose_A, TileMatL1<T1, K, M, validK, validM>,
 
 #endif
 
+#if defined(__DAV_C220_CUBE__)
+#define GDN_WY_FAST_KERNEL wy_fast_kernel_aic
+#elif defined(__DAV_C220_VEC__)
+#define GDN_WY_FAST_KERNEL wy_fast_kernel_aiv
+#else
+#define GDN_WY_FAST_KERNEL wy_fast_kernel
+#endif
+
 template <int32_t HiddenSize, int32_t ChunkSize>
-AICORE void wy_fast_kernel(
+AICORE void GDN_WY_FAST_KERNEL(
     __gm__ half *K_handle, __gm__ half *V_handle,
     __gm__ half *Beta_handle, __gm__ float *G_handle,
     __gm__ half *A_handle,
@@ -416,6 +424,16 @@ AICORE void wy_fast_kernel(
                 static_cast<int32_t>(vid) * HalfChunk;
             if (local_rows < 0) local_rows = 0;
             if (local_rows > HalfChunk) local_rows = HalfChunk;
+            if (local_rows == 0) {
+              if (!first_iter) wait_flag_dev(3);
+              ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (2 << 8));
+
+              if (!first_iter) wait_flag_dev(4);
+              ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (1 << 8));
+              first_iter = false;
+              gi++;
+              continue;
+            }
 
             // Beta is pre-transposed to [H, total_tokens] for contiguous loads.
             {
@@ -580,6 +598,16 @@ AICORE void wy_fast_kernel(
             if (local_rows < 0) local_rows = 0;
             if (local_rows > HalfChunk) local_rows = HalfChunk;
             int32_t head_idx = h;
+            if (local_rows == 0) {
+              if (!first_iter_v) wait_flag_dev(3);
+              ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (2 << 8));
+
+              if (!first_iter_v) wait_flag_dev(4);
+              ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (1 << 8));
+              first_iter_v = false;
+              gi++;
+              continue;
+            }
 
             // Beta is pre-transposed to [H, total_tokens] for contiguous loads.
             {
@@ -957,3 +985,5 @@ AICORE void wy_fast_kernel(
   }
 #endif
 }
+
+#undef GDN_WY_FAST_KERNEL

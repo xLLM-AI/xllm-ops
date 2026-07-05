@@ -137,8 +137,16 @@ using GmTensor2D = pto::GlobalTensor<T, GmShape2D, GmStride2D>;
 
 #endif  // __CCE_AICORE__
 
+#if defined(__DAV_C220_CUBE__)
+#define GDN_CHUNK_O_KERNEL chunk_o_kernel_aic
+#elif defined(__DAV_C220_VEC__)
+#define GDN_CHUNK_O_KERNEL chunk_o_kernel_aiv
+#else
+#define GDN_CHUNK_O_KERNEL chunk_o_kernel
+#endif
+
 template <int32_t HiddenSize, int32_t ChunkSize>
-AICORE void chunk_o_kernel(
+AICORE void GDN_CHUNK_O_KERNEL(
     __gm__ half *Q_handle, __gm__ half *K_handle, __gm__ half *V_handle,
     __gm__ half *S_handle, __gm__ float *G_handle,
     __gm__ float *Msk_handle,
@@ -1187,6 +1195,8 @@ AICORE void chunk_o_kernel(
   }
 #endif
 }
+
+#undef GDN_CHUNK_O_KERNEL
 
 // ── Device kernel entry point ─────────────────────────────────────────
 // extern "C" __global__ AICORE: NPU kernel function.
