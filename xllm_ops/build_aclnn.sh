@@ -155,6 +155,7 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
         "rec_constrained_top_k"
         "mega_chunk_gdn"
         "laser_attention"
+        "layer_norm_fwd"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -268,6 +269,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "onerec_final_beam_select"
         "rec_constrained_top_k"
         "laser_attention"
+        "layer_norm_fwd"
     )
     CANN_TOOLKIT_VERSION="$(get_cann_toolkit_version || true)"
     if [[ "${CANN_TOOLKIT_VERSION}" =~ ^([0-9]+)\.([0-9]+) ]]; then
