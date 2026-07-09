@@ -34,8 +34,10 @@ get_cann_toolkit_version() {
     for version_file in \
         "${ASCEND_TOOLKIT_HOME}/toolkit/version.info" \
         "${ASCEND_TOOLKIT_HOME}/version.info" \
+        "${ASCEND_TOOLKIT_HOME}/compiler/version.info" \
         "${ASCEND_HOME_PATH}/toolkit/version.info" \
-        "${ASCEND_HOME_PATH}/version.info"; do
+        "${ASCEND_HOME_PATH}/version.info" \
+        "${ASCEND_HOME_PATH}/compiler/version.info"; do
         if [[ -f "${version_file}" ]]; then
             version_line=$(grep -m1 '^Version=' "${version_file}" 2>/dev/null || true)
             if [[ -n "${version_line}" ]]; then
