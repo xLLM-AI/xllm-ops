@@ -17,6 +17,8 @@ pytestmark = pytest.mark.skipif(not _has_npu(), reason="NPU is required")
 
 
 SUPPORTED_HEAD_CONFIGS = [
+    pytest.param(2, 1, id="H2-Hg1"),
+    pytest.param(4, 2, id="H4-Hg2"),
     pytest.param(6, 2, id="H6-Hg2"),
     pytest.param(16, 4, id="H16-Hg4"),
     pytest.param(16, 8, id="H16-Hg8"),
@@ -174,6 +176,8 @@ def _run_mega(q_cpu, k_cpu, v_cpu, g_cpu, beta_cpu, cu_list=None, initial_state_
 @pytest.mark.parametrize(
     ("total_tokens", "cu_list", "num_value_heads", "num_key_heads"),
     [
+        pytest.param(129, None, 2, 1, id="single-H2-Hg1"),
+        pytest.param(129, None, 4, 2, id="single-H4-Hg2"),
         pytest.param(129, None, 6, 2, id="single-H6-Hg2"),
         pytest.param(129, None, 16, 4, id="single-H16-Hg4"),
         pytest.param(256, [0, 96, 128, 256], 32, 8, id="varlen-H32-Hg8"),
@@ -224,3 +228,15 @@ def test_mega_chunk_gdn_supported_head_configs(num_value_heads, num_key_heads):
         actual_final_state,
         expected_final_state,
     )
+
+
+def test_mega_chunk_gdn_prefill_warmup_h4_hg2_smoke():
+    total_tokens = 8192
+    q, k, v, g, beta = _make_inputs(total_tokens, 4, 2, seed=3)
+
+    out, final_state = _run_mega(q, k, v, g, beta, output_final_state=True)
+
+    assert out.shape == (1, total_tokens, 4, 128)
+    assert final_state.shape == (1, 4, 128, 128)
+    assert torch.isfinite(out.float()).all()
+    assert torch.isfinite(final_state.float()).all()

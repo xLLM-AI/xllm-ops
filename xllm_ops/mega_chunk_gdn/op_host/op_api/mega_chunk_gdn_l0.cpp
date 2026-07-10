@@ -19,6 +19,7 @@ limitations under the License.
 #include "opdev/op_def.h"
 #include "opdev/op_dfx.h"
 #include "opdev/op_log.h"
+#include "runtime/rt_ffts.h"
 
 using namespace op;
 
@@ -67,11 +68,15 @@ MegaChunkGdn(const aclTensor *q, const aclTensor *k, const aclTensor *v, const a
              OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "MegaChunkGdn AllocTensor failed."),
              return MakeNullOutputs());
 
+    uint32_t fftsLen = 0;
+    uint64_t fftsAddr = 0;
+    (void)rtGetC2cCtrlAddr(&fftsAddr, &fftsLen);
+
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(
         MegaChunkGdn, OP_INPUT(q, k, v, g, beta, maskLower, maskFull, minusIdentity, cuSeqlens, initialState),
         OP_OUTPUT(outRet, gSumRet, gTRet, betaTRet, aRet, aInvF32Ret, aInvRet, wRet, uRet, hRet, vNewRet,
                   finalStateRet),
-        OP_ATTR(numMatrices, hasInitialState));
+        OP_ATTR(numMatrices, hasInitialState, static_cast<int64_t>(fftsAddr)));
     OP_CHECK_ADD_TO_LAUNCHER_LIST_AICORE(ret != ACLNN_SUCCESS,
                                          return MakeNullOutputs(),
                                          "MegaChunkGdn ADD_TO_LAUNCHER_LIST_AICORE failed.");

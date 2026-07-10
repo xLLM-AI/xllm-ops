@@ -1,7 +1,6 @@
 // mega_kernel.cpp — GDN Mega-Kernel (group-value / GQA): all PTO stages in one launch
 //
-// Same pipeline as pto_mega_kernel, with value heads (H) and key heads (Hg)
-// passed at runtime. H dispatches to finite compile-time specializations.
+// Same pipeline as pto_mega_kernel, but H/Hg are runtime values.
 //
 // Stages:
 //   1. cumsum      (Vec)
@@ -17,6 +16,9 @@
 #endif
 #ifndef GDN_C
 #define GDN_C 128
+#endif
+#ifndef GDN_MAX_HEADS
+#define GDN_MAX_HEADS 64
 #endif
 #ifndef MEMORY_BASE
 #define MEMORY_BASE
@@ -46,6 +48,7 @@ struct MegaChunkGdnKernelTilingData {
     int64_t batch_size;
     int64_t seq_len;
     int64_t total_tokens;
+    uint64_t ffts_addr;
 };
 
 // ===================================================================
@@ -85,8 +88,8 @@ AICORE inline void SyncAllImpl()
 #endif
 }
 
-template <typename T, int32_t H_val>
-AICORE inline void mega_transpose_TH_to_HT(__gm__ T *src, __gm__ T *dst, int64_t T_len)
+template <typename T>
+AICORE inline void mega_transpose_TH_to_HT(__gm__ T *src, __gm__ T *dst, int64_t T_len, int32_t H)
 {
 #if defined(__DAV_C220_VEC__)
     if (get_subblockid() != 0) return;
@@ -97,13 +100,10 @@ AICORE inline void mega_transpose_TH_to_HT(__gm__ T *src, __gm__ T *dst, int64_t
     auto block_num = get_block_num();
 
     constexpr int32_t BLOCK = 128;
-    constexpr int32_t H = static_cast<int32_t>(H_val);
     constexpr int32_t ES = static_cast<int32_t>(sizeof(T));
-    constexpr int32_t AlignBytes = 32;
-    constexpr int32_t AlignRows = AlignBytes / ES;
     constexpr int32_t MinTransposeCols = 16;
-    constexpr int32_t AlignElems = (AlignRows > MinTransposeCols) ? AlignRows : MinTransposeCols;
-    constexpr int32_t HP = ((H + AlignElems - 1) / AlignElems) * AlignElems;
+    constexpr int32_t AlignElems = ((32 / ES) > MinTransposeCols) ? (32 / ES) : MinTransposeCols;
+    constexpr int32_t HP = ((GDN_MAX_HEADS + AlignElems - 1) / AlignElems) * AlignElems;
     constexpr int32_t SRC_UB = 0;
     constexpr int32_t DST_UB = SRC_UB + BLOCK * HP * ES;
     constexpr int32_t TMP_UB = DST_UB + HP * BLOCK * ES;
@@ -118,41 +118,12 @@ AICORE inline void mega_transpose_TH_to_HT(__gm__ T *src, __gm__ T *dst, int64_t
 
     using UBRow = Tile<TileType::Vec, T, 1, BLOCK, BLayout::RowMajor, 1, BLOCK, SLayout::NoneBox, 512>;
     using UBRowDyn = Tile<TileType::Vec, T, 1, BLOCK, BLayout::RowMajor, DYNAMIC, DYNAMIC, SLayout::NoneBox, 512>;
-    using UBHeadDyn = Tile<TileType::Vec, T, AlignRows, BLOCK, BLayout::ColMajor, 1, DYNAMIC, SLayout::NoneBox, 512>;
 
     using Gm2D = Shape<1, 1, 1, DYNAMIC, DYNAMIC>;
     using Gm1D = Shape<1, 1, 1, 1, DYNAMIC>;
-    using GmSrcS = Stride<1, 1, 1, H, 1>;
-    using GmHeadS = Stride<1, 1, 1, 1, H>;
+    using GmSrcS = Stride<1, 1, 1, DYNAMIC, 1>;
     using GmS1 = Stride<1, 1, 1, 1, 1>;
-
-    if constexpr (H < MinTransposeCols) {
-        int64_t num_tok_blocks = (T_len + BLOCK - 1) / BLOCK;
-        for (int64_t bi = static_cast<int64_t>(cid); bi < num_tok_blocks; bi += static_cast<int64_t>(block_num)) {
-            int64_t t0 = bi * BLOCK;
-            int32_t valid = (t0 + BLOCK <= T_len) ? BLOCK : static_cast<int32_t>(T_len - t0);
-
-            for (int32_t h = 0; h < H; ++h) {
-                Gm1D gs;
-                gs.shape[4] = valid;
-                UBHeadDyn row(valid);
-                TASSIGN(row, SRC_UB);
-                {
-                    GlobalTensor<T, Gm1D, GmHeadS, Layout::DN> gm(src + t0 * H + h, gs);
-                    TLOAD(row, gm);
-                }
-                set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-                wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-                {
-                    GlobalTensor<T, Gm1D, GmS1, Layout::DN> gm(dst + h * T_len + t0, gs);
-                    TSTORE(gm, row);
-                }
-                set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-                wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-            }
-        }
-        return;
-    }
+    GmSrcS src_stride(H);
 
     UBSrcFull ub_src;
     TASSIGN(ub_src, SRC_UB);
@@ -171,7 +142,7 @@ AICORE inline void mega_transpose_TH_to_HT(__gm__ T *src, __gm__ T *dst, int64_t
             Gm2D gs;
             gs.shape[3] = valid;
             gs.shape[4] = H;
-            GlobalTensor<T, Gm2D, GmSrcS> gm(src + t0 * H, gs);
+            GlobalTensor<T, Gm2D, GmSrcS> gm(src + t0 * H, gs, src_stride);
             UBSrcDyn ld(valid, H);
             TASSIGN(ld, SRC_UB);
             TLOAD(ld, gm);
@@ -294,6 +265,17 @@ namespace mk_o {
 #include "chunk_o.cpp"
 }
 
+#if defined(__DAV_C220_CUBE__)
+#define GDN_WY_FAST_CALL wy_fast_kernel_aic
+#define GDN_CHUNK_O_CALL chunk_o_kernel_aic
+#elif defined(__DAV_C220_VEC__)
+#define GDN_WY_FAST_CALL wy_fast_kernel_aiv
+#define GDN_CHUNK_O_CALL chunk_o_kernel_aiv
+#else
+#define GDN_WY_FAST_CALL wy_fast_kernel
+#define GDN_CHUNK_O_CALL chunk_o_kernel
+#endif
+
 AICORE inline void mega_solve_tril(__gm__ half *out, __gm__ half *in, __gm__ half *minus_id, uint32_t matrix_size,
                                    uint32_t num_matrices, uint32_t num_bsnd_heads, __gm__ int32_t *cu_seqlens,
                                    uint32_t is_lower)
@@ -309,7 +291,6 @@ AICORE inline void mega_solve_tril(__gm__ half *out, __gm__ half *in, __gm__ hal
                                                                               num_bsnd_heads, cu_seqlens, is_lower);
 }
 
-template <int32_t H>
 AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr, GM_ADDR g_in_ptr, GM_ADDR beta_ptr,
                                     GM_ADDR msk_lower_ptr, GM_ADDR msk_full_ptr, GM_ADDR minus_id_ptr,
                                     GM_ADDR cu_seqlens_ptr, GM_ADDR o_ptr, GM_ADDR g_sum_ptr, GM_ADDR g_t_ptr,
@@ -318,8 +299,8 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
                                     GM_ADDR h0_ptr, int64_t has_initial_state, GM_ADDR kkt_ws_ptr,
                                     GM_ADDR wy_ws_a1_ptr, GM_ADDR wy_ws_a2_ptr, GM_ADDR h_ws_ptr,
                                     GM_ADDR o_ws_qk_ptr, GM_ADDR o_ws_qs_ptr, GM_ADDR o_ws_gated_ptr,
-                                    uint32_t num_key_heads, int64_t batch_size, int64_t seq_len,
-                                    int64_t total_tokens, uint32_t num_matrices)
+                                    int32_t H, uint32_t num_key_heads, int64_t batch_size, int64_t seq_len,
+                                    int64_t total_tokens, uint32_t num_matrices, uint64_t ffts_addr)
 {
     constexpr int32_t D = GDN_D;
     constexpr int32_t C = GDN_C;
@@ -328,9 +309,10 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
         return;
     }
 
-    mk_cumsum::cumsum_kernel<H, C>(reinterpret_cast<__gm__ float *>(g_in_ptr),
-                                   reinterpret_cast<__gm__ float *>(g_sum_ptr),
-                                   reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len);
+    mk_cumsum::cumsum_kernel<C>(reinterpret_cast<__gm__ float *>(g_in_ptr),
+                                reinterpret_cast<__gm__ float *>(g_sum_ptr),
+                                reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len, H,
+                                ffts_addr);
 
 #ifdef MEGA_STOP_AFTER_CUMSUM
     pipe_barrier(PIPE_ALL);
@@ -343,10 +325,10 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
     return;
 #endif
 
-    mega_transpose_TH_to_HT<float, H>(reinterpret_cast<__gm__ float *>(g_sum_ptr),
-                                      reinterpret_cast<__gm__ float *>(g_t_ptr), total_tokens);
-    mega_transpose_TH_to_HT<half, H>(reinterpret_cast<__gm__ half *>(beta_ptr),
-                                     reinterpret_cast<__gm__ half *>(beta_t_ptr), total_tokens);
+    mega_transpose_TH_to_HT<float>(reinterpret_cast<__gm__ float *>(g_sum_ptr),
+                                   reinterpret_cast<__gm__ float *>(g_t_ptr), total_tokens, H);
+    mega_transpose_TH_to_HT<half>(reinterpret_cast<__gm__ half *>(beta_ptr),
+                                  reinterpret_cast<__gm__ half *>(beta_t_ptr), total_tokens, H);
 
 #ifdef MEGA_STOP_AFTER_TRANSPOSE
     pipe_barrier(PIPE_ALL);
@@ -355,11 +337,12 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
 
     SyncAllImpl<false>();
 
-    mk_kkt::kkt_kernel<H, D, C>(
+    mk_kkt::kkt_kernel<D, C>(
         reinterpret_cast<__gm__ half *>(k_ptr), reinterpret_cast<__gm__ half *>(beta_t_ptr),
         reinterpret_cast<__gm__ float *>(g_t_ptr), reinterpret_cast<__gm__ float *>(msk_lower_ptr),
         reinterpret_cast<__gm__ half *>(kkt_ws_ptr), reinterpret_cast<__gm__ half *>(A_ptr),
-        reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len, total_tokens, num_key_heads);
+        reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len, total_tokens,
+        static_cast<uint32_t>(H), num_key_heads, ffts_addr);
 
 #if defined(__DAV_C220_CUBE__)
     pipe_barrier(PIPE_ALL);
@@ -396,13 +379,13 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
     return;
 #endif
 
-    mk_wy::wy_fast_kernel<H, D, C>(
+    mk_wy::GDN_WY_FAST_CALL<D, C>(
         reinterpret_cast<__gm__ half *>(k_ptr), reinterpret_cast<__gm__ half *>(v_ptr),
         reinterpret_cast<__gm__ half *>(beta_t_ptr), reinterpret_cast<__gm__ float *>(g_t_ptr),
         reinterpret_cast<__gm__ half *>(A_inv_ptr), reinterpret_cast<__gm__ half *>(wy_ws_a1_ptr),
         reinterpret_cast<__gm__ half *>(wy_ws_a2_ptr), reinterpret_cast<__gm__ half *>(w_ptr),
         reinterpret_cast<__gm__ half *>(u_ptr), reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len,
-        total_tokens, num_key_heads);
+        total_tokens, static_cast<uint32_t>(H), num_key_heads, ffts_addr);
 
 #if defined(__DAV_C220_VEC__)
     if (get_block_idx() < num_matrices) {
@@ -419,13 +402,14 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
 
     SyncAllImpl<false>();
 
-    mk_h::chunk_h_kernel<H, D, C>(
+    mk_h::chunk_h_kernel<D, C>(
         reinterpret_cast<__gm__ half *>(k_ptr), reinterpret_cast<__gm__ half *>(w_ptr),
         reinterpret_cast<__gm__ half *>(u_ptr), reinterpret_cast<__gm__ float *>(g_t_ptr),
         reinterpret_cast<__gm__ half *>(s_ptr), reinterpret_cast<__gm__ half *>(v_new_ptr),
         reinterpret_cast<__gm__ half *>(fs_ptr), reinterpret_cast<__gm__ half *>(h0_ptr), has_initial_state,
+        1,
         reinterpret_cast<__gm__ half *>(h_ws_ptr), reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size,
-        seq_len, total_tokens, num_key_heads);
+        seq_len, total_tokens, static_cast<uint32_t>(H), num_key_heads, ffts_addr);
 
 #ifdef MEGA_STOP_AFTER_H
     pipe_barrier(PIPE_ALL);
@@ -434,13 +418,14 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
 
     SyncAllImpl<false>();
 
-    mk_o::chunk_o_kernel<H, D, C>(
+    mk_o::GDN_CHUNK_O_CALL<D, C>(
         reinterpret_cast<__gm__ half *>(q_ptr), reinterpret_cast<__gm__ half *>(k_ptr),
         reinterpret_cast<__gm__ half *>(v_new_ptr), reinterpret_cast<__gm__ half *>(s_ptr),
         reinterpret_cast<__gm__ float *>(g_t_ptr), reinterpret_cast<__gm__ float *>(msk_full_ptr),
         reinterpret_cast<__gm__ half *>(o_ws_qk_ptr), reinterpret_cast<__gm__ half *>(o_ws_qs_ptr),
         reinterpret_cast<__gm__ half *>(o_ws_gated_ptr), reinterpret_cast<__gm__ half *>(o_ptr),
-        reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len, total_tokens, num_key_heads);
+        reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len, total_tokens,
+        static_cast<uint32_t>(H), num_key_heads, ffts_addr);
 
 #if defined(__DAV_C220_CUBE__)
     if (get_block_idx() < num_matrices) {
@@ -449,6 +434,9 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
     }
 #endif
 }
+
+#undef GDN_WY_FAST_CALL
+#undef GDN_CHUNK_O_CALL
 
 extern "C" __global__ __aicore__ void
 GDN_KERNEL_NAME(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr, GM_ADDR g_in_ptr, GM_ADDR beta_ptr, GM_ADDR msk_lower_ptr,
@@ -470,32 +458,16 @@ GDN_KERNEL_NAME(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr, GM_ADDR g_in_ptr, G
     GM_ADDR o_ws_qs_ptr = o_ws_qk_ptr + static_cast<uint64_t>(tiling_data.block_dim) * tile_bytes;
     GM_ADDR o_ws_gated_ptr = o_ws_qs_ptr + static_cast<uint64_t>(tiling_data.block_dim) * tile_bytes;
 
-#define DISPATCH_MEGA_H(H)                                                                                         \
-    case H:                                                                                                        \
-        mega_kernel_impl<H>(q_ptr, k_ptr, v_ptr, g_in_ptr, beta_ptr, msk_lower_ptr, msk_full_ptr, minus_id_ptr,    \
-                            cu_seqlens_ptr, o_ptr, g_sum_ptr, g_t_ptr, beta_t_ptr, A_ptr, A_inv_f32_ptr, A_inv_ptr, \
-                            w_ptr, u_ptr, s_ptr, v_new_ptr, fs_ptr, initial_state_ptr, tiling_data.has_initial_state, kkt_ws_ptr, \
-                            wy_ws_a1_ptr, wy_ws_a2_ptr, h_ws_ptr, o_ws_qk_ptr, o_ws_qs_ptr, o_ws_gated_ptr,         \
-                            tiling_data.num_key_heads, tiling_data.batch_size, tiling_data.seq_len,                 \
-                            tiling_data.total_tokens, tiling_data.num_matrices);                                    \
-        return
-
-    switch (tiling_data.num_heads) {
-        // DISPATCH_MEGA_H(2);
-        // DISPATCH_MEGA_H(4);
-        DISPATCH_MEGA_H(6);
-        DISPATCH_MEGA_H(8);
-        DISPATCH_MEGA_H(12);
-        DISPATCH_MEGA_H(16);
-        DISPATCH_MEGA_H(24);
-        DISPATCH_MEGA_H(32);
-        DISPATCH_MEGA_H(48);
-        DISPATCH_MEGA_H(64);
-        default:
-            return;
+    if (tiling_data.num_heads == 0 || tiling_data.num_heads > GDN_MAX_HEADS) {
+        return;
     }
 
-#undef DISPATCH_MEGA_H
+    mega_kernel_impl(q_ptr, k_ptr, v_ptr, g_in_ptr, beta_ptr, msk_lower_ptr, msk_full_ptr, minus_id_ptr,
+                     cu_seqlens_ptr, o_ptr, g_sum_ptr, g_t_ptr, beta_t_ptr, A_ptr, A_inv_f32_ptr, A_inv_ptr, w_ptr,
+                     u_ptr, s_ptr, v_new_ptr, fs_ptr, initial_state_ptr, tiling_data.has_initial_state, kkt_ws_ptr,
+                     wy_ws_a1_ptr, wy_ws_a2_ptr, h_ws_ptr, o_ws_qk_ptr, o_ws_qs_ptr, o_ws_gated_ptr,
+                     static_cast<int32_t>(tiling_data.num_heads), tiling_data.num_key_heads, tiling_data.batch_size,
+                     tiling_data.seq_len, tiling_data.total_tokens, tiling_data.num_matrices, tiling_data.ffts_addr);
 }
 
 // The CANN wrapper generated for mixed AIC/AIV kernels calls matmul::clearWorkspace
