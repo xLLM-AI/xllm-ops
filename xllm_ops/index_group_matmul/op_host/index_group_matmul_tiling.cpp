@@ -150,5 +150,13 @@ static ge::graphStatus TilingForGroupMatmulFunc(gert::TilingContext *context){
   return ret;
 }
 
-IMPL_OP_OPTILING(IndexGroupMatmul).Tiling(TilingForGroupMatmulFunc);
+struct IndexGroupMatmulCompileInfo {};
+static ge::graphStatus TilingPrepareForIndexGroupMatmul(gert::TilingParseContext *context) {
+  (void)context;
+  return ge::GRAPH_SUCCESS;
+}
+
+IMPL_OP_OPTILING(IndexGroupMatmul)
+    .Tiling(TilingForGroupMatmulFunc)
+    .TilingParse<IndexGroupMatmulCompileInfo>(TilingPrepareForIndexGroupMatmul);
 } // namespace optiling

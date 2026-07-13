@@ -25,5 +25,5 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context) {
     return GRAPH_SUCCESS;
 }
 
-IMPL_OP(ReplcaeToken).InferShape(InferShape);
+IMPL_OP(ReplaceToken).InferShape(InferShape);
 } // namespace ge

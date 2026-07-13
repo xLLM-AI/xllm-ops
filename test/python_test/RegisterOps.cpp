@@ -307,6 +307,439 @@ mega_chunk_gdn(
     return std::make_tuple(out, g_sum, g_t, beta_t, a, a_inv_f32, a_inv, w, u, h, v_new, final_state);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> layer_norm_fwd_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const c10::optional<at::Tensor>& bias,
+    const c10::optional<at::Tensor>& z,
+    double eps,
+    int64_t group_size,
+    bool norm_before_gate,
+    bool is_rms_norm) {
+  auto sizes = x.sizes().vec();
+  const int64_t dim_num = sizes.size();
+  int64_t full_n = sizes[dim_num - 1];
+  int64_t m = 1;
+  for (int64_t i = 0; i < dim_num - 1; ++i) {
+    m *= sizes[i];
+  }
+  int64_t gs = group_size <= 0 ? full_n : group_size;
+  int64_t ngroups = gs > 0 ? full_n / gs : 1;
+
+  at::Tensor y = at::empty(sizes, x.options());
+  at::Tensor mean = at::zeros({is_rms_norm ? 0 : ngroups * m},
+                              x.options().dtype(at::ScalarType::Float));
+  at::Tensor rstd = at::zeros({ngroups * m},
+                              x.options().dtype(at::ScalarType::Float));
+
+  EXEC_NPU_CMD(aclnnLayerNormFwd,
+               x,
+               weight,
+               bias,
+               z,
+               eps,
+               group_size,
+               norm_before_gate,
+               is_rms_norm,
+               y,
+               mean,
+               rstd);
+  return std::make_tuple(y, mean, rstd);
+}
+
+std::tuple<at::Tensor, at::Tensor> moe_fused_add_topk_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& add_num,
+    const c10::optional<at::Tensor>& mapping_num,
+    const c10::optional<at::Tensor>& mapping_table,
+    int64_t group_num,
+    int64_t group_topk,
+    int64_t top_n,
+    int64_t top_k,
+    int64_t activate_type,
+    bool is_norm,
+    double scale,
+    bool enable_expert_mapping) {
+  const int64_t batch = x.size(0);
+
+  at::Tensor y = at::empty({batch, top_k},
+                           x.options().dtype(at::ScalarType::Float));
+  at::Tensor indices = at::empty({batch, top_k},
+                                 x.options().dtype(at::ScalarType::Int));
+
+  EXEC_NPU_CMD(aclnnMoeFusedAddTopk,
+               x,
+               add_num,
+               mapping_num,
+               mapping_table,
+               group_num,
+               group_topk,
+               top_n,
+               top_k,
+               activate_type,
+               is_norm,
+               scale,
+               enable_expert_mapping,
+               y,
+               indices);
+  return std::make_tuple(y, indices);
+}
+
+at::Tensor moe_fused_reducesum_div_impl_npu(const at::Tensor& input) {
+  at::Tensor output = at::empty(input.sizes(), input.options());
+  EXEC_NPU_CMD(aclnnMoeFusedReducesumDiv, input, output);
+  return output;
+}
+
+at::Tensor replace_token_impl_npu(const at::Tensor& forked_token_ids,
+                                  const at::Tensor& last_step_output_token_ids) {
+  at::Tensor output = at::empty(forked_token_ids.sizes(), forked_token_ids.options());
+  EXEC_NPU_CMD(aclnnReplaceToken, forked_token_ids, last_step_output_token_ids, output);
+  return output;
+}
+
+std::tuple<at::Tensor&, at::Tensor&> convert_kv_cache_format_impl_npu(
+    at::Tensor& k_cache_ptr,
+    at::Tensor& v_cache_ptr,
+    const at::Tensor& kv_cache_offset,
+    const at::Tensor& kv_seq_len,
+    bool is_prefill,
+    int64_t num_kv_heads,
+    int64_t head_size_k,
+    int64_t head_size_v) {
+  // In-place ND2NZ rewrite: k_cache_ptr / v_cache_ptr are modified in place;
+  // the aclnn interface takes only the 4 inputs + 4 attrs (no extra outputs).
+  EXEC_NPU_CMD(aclnnConvertKvCacheFormat,
+               k_cache_ptr,
+               v_cache_ptr,
+               kv_cache_offset,
+               kv_seq_len,
+               is_prefill,
+               num_kv_heads,
+               head_size_k,
+               head_size_v);
+  return std::tuple<at::Tensor&, at::Tensor&>(k_cache_ptr, v_cache_ptr);
+}
+
+at::Tensor& scatter_nd_update_v2_impl_npu(
+    at::Tensor& var,
+    const at::Tensor& indices,
+    const at::Tensor& updates,
+    at::IntArrayRef strides) {
+  // In-place scatter: var is modified in place; the aclnn interface takes
+  // (varRef, indices, updates, strides) with no extra output tensor.
+  EXEC_NPU_CMD(aclnnScatterNdUpdateV2, var, indices, updates, strides);
+  return var;
+}
+
+at::Tensor hc_post_impl_npu(const at::Tensor& x,
+                            const at::Tensor& residual,
+                            const at::Tensor& post,
+                            const at::Tensor& comb) {
+  // y has the same shape / dtype as residual ([bs, hc, d]).
+  at::Tensor y = at::empty(residual.sizes(), residual.options());
+  EXEC_NPU_CMD(aclnnHcPost, x, residual, post, comb, y);
+  return y;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> add_rms_norm_bias_impl_npu(
+    const at::Tensor& x1,
+    const at::Tensor& x2,
+    const at::Tensor& gamma,
+    const c10::optional<at::Tensor>& beta,
+    double epsilon) {
+  // x = x1 + x2; rstd = 1/sqrt(mean(x^2, last dim) + eps); y = x*rstd*gamma+beta.
+  // rstd keeps the leading dims of x1 with the last (gamma) dims collapsed to 1.
+  auto sizes = x1.sizes().vec();
+  const int64_t dim_x = static_cast<int64_t>(sizes.size());
+  const int64_t dim_gamma = gamma.dim();
+  std::vector<int64_t> rstd_shape(sizes.begin(), sizes.end());
+  for (int64_t i = dim_x - dim_gamma; i < dim_x && i >= 0; ++i) {
+    rstd_shape[i] = 1;
+  }
+
+  at::Tensor y = at::empty(sizes, x1.options());
+  at::Tensor x = at::empty(sizes, x1.options());
+  at::Tensor rstd = at::empty(rstd_shape,
+                              x1.options().dtype(at::ScalarType::Float));
+
+  EXEC_NPU_CMD(aclnnAddRmsNormBias, x1, x2, gamma, beta, epsilon, y, rstd, x);
+  return std::make_tuple(y, rstd, x);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+moe_init_routing_custom_impl_npu(const at::Tensor& x,
+                                 const at::Tensor& expert_idx,
+                                 int64_t active_num,
+                                 int64_t expert_num,
+                                 int64_t drop_pad_mode,
+                                 int64_t expert_tokens_num_type,
+                                 bool expert_tokens_num_flag,
+                                 int64_t quant_mode,
+                                 int64_t row_idx_type) {
+  // Minimal-config wrapper: unquant + dropless + GATHER + COUNT is the target.
+  // active_expert_range defaults to [0, expert_num]; scale/offset are unused.
+  constexpr int64_t QUANT_MODE_UNQUANT = -1;
+  constexpr int64_t CUMSUM = 0;
+  constexpr int64_t COUNT = 1;
+  constexpr int64_t KEY_VALUE = 2;
+  constexpr int64_t expert_capacity = -1;
+
+  c10::optional<at::Tensor> scale = c10::nullopt;
+  c10::optional<at::Tensor> offset = c10::nullopt;
+
+  auto x_size = x.sizes();
+  auto expert_idx_size = expert_idx.sizes();
+  const int64_t bs = x_size[0];
+  const int64_t h = x_size[1];
+  const int64_t k = expert_idx_size[1];
+
+  std::vector<int64_t> active_expert_range_vec = {0, expert_num};
+  at::IntArrayRef active_expert_range(active_expert_range_vec);
+  const int64_t expert_length = active_expert_range_vec[1] - active_expert_range_vec[0];
+
+  int64_t expanded_scale_len = 0;
+  at::Tensor expanded_x;
+  if (drop_pad_mode == 1) {
+    if (quant_mode == QUANT_MODE_UNQUANT) {
+      expanded_x = at::empty({expert_num, expert_capacity, h}, x.options());
+    } else {
+      expanded_x =
+          at::empty({expert_num, expert_capacity, h}, x.options().dtype(at::kChar));
+    }
+    expanded_scale_len = expert_num * expert_capacity;
+  } else {
+    if (active_num > 0) {
+      int64_t num_out_tokens = std::min(bs * k, active_num);
+      if (quant_mode == QUANT_MODE_UNQUANT) {
+        expanded_x = at::empty({num_out_tokens, h}, x.options());
+      } else {
+        expanded_x = at::empty({num_out_tokens, h}, x.options().dtype(at::kChar));
+      }
+      expanded_scale_len = num_out_tokens;
+    } else {
+      if (quant_mode == QUANT_MODE_UNQUANT) {
+        expanded_x = at::empty({bs * k, h}, x.options());
+      } else {
+        expanded_x = at::empty({bs * k, h}, x.options().dtype(at::kChar));
+      }
+      expanded_scale_len = bs * k;
+    }
+  }
+
+  at::Tensor expanded_row_idx = at::empty({bs * k}, expert_idx.options());
+  at::Tensor expert_tokens_count_or_cumsum;
+  if (expert_tokens_num_type >= CUMSUM && expert_tokens_num_type <= COUNT) {
+    expert_tokens_count_or_cumsum =
+        at::empty({expert_length}, x.options().dtype(at::kLong));
+  } else if (expert_tokens_num_type == KEY_VALUE) {
+    expert_tokens_count_or_cumsum =
+        at::empty({expert_num, 2}, x.options().dtype(at::kLong));
+  }
+  at::Tensor expanded_scale =
+      at::empty({expanded_scale_len}, x.options().dtype(at::kFloat));
+
+  EXEC_NPU_CMD(aclnnMoeInitRoutingCustom,
+               x,
+               expert_idx,
+               scale,
+               offset,
+               active_num,
+               expert_capacity,
+               expert_num,
+               drop_pad_mode,
+               expert_tokens_num_type,
+               expert_tokens_num_flag,
+               quant_mode,
+               active_expert_range,
+               row_idx_type,
+               expanded_x,
+               expanded_row_idx,
+               expert_tokens_count_or_cumsum,
+               expanded_scale);
+  return std::make_tuple(expanded_x,
+                         expanded_row_idx,
+                         expert_tokens_count_or_cumsum,
+                         expanded_scale);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> hc_pre_sinkhorn_impl_npu(
+    const at::Tensor& mixes,
+    const at::Tensor& rsqrt,
+    const at::Tensor& hc_scale,
+    const at::Tensor& hc_base,
+    const at::Tensor& x,
+    int64_t hc_mult,
+    int64_t hc_sinkhorn_iters,
+    double hc_eps) {
+  // y = sum_m(pre[b,m] * x[b,:]) -> (bs, d), same dtype as x (bf16).
+  // post -> (bs, hc_mult) fp32; comb_frag -> (bs, hc_mult, hc_mult) fp32.
+  auto x_sizes = x.sizes();
+  const int64_t bs = x_sizes[0];
+  const int64_t d = x_sizes[x_sizes.size() - 1];
+
+  at::Tensor y = at::empty({bs, d}, x.options());
+  at::Tensor post =
+      at::empty({bs, hc_mult}, x.options().dtype(at::ScalarType::Float));
+  at::Tensor comb_frag =
+      at::empty({bs, hc_mult, hc_mult}, x.options().dtype(at::ScalarType::Float));
+
+  EXEC_NPU_CMD(aclnnHcPreSinkhorn,
+               mixes,
+               rsqrt,
+               hc_scale,
+               hc_base,
+               x,
+               hc_mult,
+               hc_sinkhorn_iters,
+               hc_eps,
+               y,
+               post,
+               comb_frag);
+  return std::make_tuple(y, post, comb_frag);
+}
+
+at::Tensor pp_matmul_opt_impl_npu(const at::Tensor& a, const at::Tensor& b) {
+  // c = a @ b^T, a:(M,K), b:(N,K) -> c:(M,N), same dtype as a (bf16/fp16).
+  auto a_sizes = a.sizes();
+  auto b_sizes = b.sizes();
+  const int64_t M = a_sizes[a_sizes.size() - 2];
+  const int64_t N = b_sizes[b_sizes.size() - 2];
+  at::Tensor c = at::empty({M, N}, a.options());
+  EXEC_NPU_CMD(aclnnPpMatmulOpt, a, b, c);
+  return c;
+}
+
+at::Tensor moe_grouped_matmul_impl_npu(const at::Tensor& x,
+                                       const at::Tensor& weight,
+                                       const at::Tensor& group_list,
+                                       bool transpose_weight = false) {
+  // x:(M,K) ND, weight:(G,K,N) ND (or (G,N,K) when transpose_weight),
+  // group_list:(G,2) int32/int64 key-value [group_idx, count], y:(M,N).
+  const int64_t M = x.sizes()[x.dim() - 2];
+  const int64_t N = transpose_weight ? weight.sizes()[weight.dim() - 2]
+                                     : weight.sizes()[weight.dim() - 1];
+  at::Tensor y = at::empty({M, N}, x.options());
+  std::vector<at::Tensor> x_vec{x};
+  std::vector<at::Tensor> w_vec{weight};
+  std::vector<at::Tensor> y_vec{y};
+  at::TensorList x_list = at::TensorList(x_vec);
+  at::TensorList w_list = at::TensorList(w_vec);
+  at::TensorList y_list = at::TensorList(y_vec);
+  EXEC_NPU_CMD(aclnnMoeGroupedMatmul,
+               x_list,
+               w_list,
+               group_list,
+               transpose_weight,
+               y_list);
+  return y;
+}
+
+at::Tensor index_group_matmul_impl_npu(const at::Tensor& a,
+                                       const at::Tensor& b,
+                                       const at::Tensor& scale,
+                                       const at::Tensor& per_token_scale,
+                                       const at::Tensor& group_list) {
+  // int8 grouped matmul + dequant.
+  // a:(M,K) int8 ND, b:(G,K,N) int8 (ND passed, framework -> NZ),
+  // scale:(G,N) bf16, per_token_scale:(M,) float, group_list:(G,) int64
+  // cumulative offset. c:(M,N) bf16 = dequant(a_g@b_g) * scale_g * pts[i].
+  const int64_t M = a.sizes()[a.dim() - 2];
+  const int64_t N = b.sizes()[b.dim() - 1];
+  at::Tensor c = at::empty({M, N}, a.options().dtype(at::kBFloat16));
+  std::vector<at::Tensor> a_vec{a};
+  std::vector<at::Tensor> b_vec{b};
+  std::vector<at::Tensor> scale_vec{scale};
+  std::vector<at::Tensor> pts_vec{per_token_scale};
+  std::vector<at::Tensor> c_vec{c};
+  at::TensorList a_list = at::TensorList(a_vec);
+  at::TensorList b_list = at::TensorList(b_vec);
+  at::TensorList scale_list = at::TensorList(scale_vec);
+  at::TensorList pts_list = at::TensorList(pts_vec);
+  at::TensorList c_list = at::TensorList(c_vec);
+  EXEC_NPU_CMD(aclnnIndexGroupMatmul,
+               a_list,
+               b_list,
+               scale_list,
+               pts_list,
+               group_list,
+               c_list);
+  return c;
+}
+
+std::tuple<at::Tensor, at::Tensor> dequant_swiglu_quant_impl_npu(
+    const at::Tensor& x,
+    bool activate_left,
+    std::string quant_mode) {
+  // swiglu + dynamic per-token quant (minimal path: no bias/scale inputs).
+  // x:(rows,H) bf16/fp16. y:(rows,H/2) int8, scale:(rows,) fp32.
+  // aclnn signature: x, weightScale, activationScale, bias, quantScale,
+  //   quantOffset, groupIndex, activateLeft(bool), quantMode(char*),
+  //   yOut, scaleOut.
+  auto sizes = x.sizes().vec();
+  const int64_t dim_x = static_cast<int64_t>(sizes.size());
+  const int64_t H = sizes[dim_x - 1];
+
+  std::vector<int64_t> y_shape(sizes.begin(), sizes.end());
+  y_shape[dim_x - 1] = H / 2;
+  std::vector<int64_t> scale_shape(sizes.begin(), sizes.end() - 1);
+
+  at::Tensor y = at::empty(y_shape, x.options().dtype(at::ScalarType::Char));
+  at::Tensor scale = at::empty(scale_shape,
+                               x.options().dtype(at::ScalarType::Float));
+
+  c10::optional<at::Tensor> weight_scale = c10::nullopt;
+  c10::optional<at::Tensor> activation_scale = c10::nullopt;
+  c10::optional<at::Tensor> bias = c10::nullopt;
+  c10::optional<at::Tensor> quant_scale = c10::nullopt;
+  c10::optional<at::Tensor> quant_offset = c10::nullopt;
+  c10::optional<at::Tensor> group_index = c10::nullopt;
+
+  char* quant_mode_c = const_cast<char*>(quant_mode.c_str());
+
+  EXEC_NPU_CMD(aclnnDequantSwigluQuant,
+               x,
+               weight_scale,
+               activation_scale,
+               bias,
+               quant_scale,
+               quant_offset,
+               group_index,
+               activate_left,
+               quant_mode_c,
+               y,
+               scale);
+  return std::make_tuple(y, scale);
+}
+
+std::tuple<at::Tensor, at::Tensor> moe_grouped_matmul_swiglu_quant_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& weight_scale,
+    const at::Tensor& x_scale,
+    const at::Tensor& group_list) {
+  // int8 grouped matmul + dequant + swiglu + dynamic per-token int8 quant.
+  // x:(M,K) int8 ND, weight:(G,K,2N) int8 (ND passed, framework -> NZ),
+  // weight_scale:(G,2N) float, x_scale:(M,) float, group_list:(G,) int64
+  // cumulative offset. aclnn signature: x, weight, weightScale, xScale,
+  // groupList, output, outputScale. output:(M,N) int8, outputScale:(M,) fp32.
+  const int64_t M = x.sizes()[x.dim() - 2];
+  const int64_t W = weight.sizes()[weight.dim() - 1];  // 2N
+  const int64_t N = W / 2;
+  at::Tensor y = at::empty({M, N}, x.options().dtype(at::ScalarType::Char));
+  at::Tensor y_scale = at::empty({M},
+                                 x.options().dtype(at::ScalarType::Float));
+  EXEC_NPU_CMD(aclnnMoeGroupedMatmulSwigluQuant,
+               x,
+               weight,
+               weight_scale,
+               x_scale,
+               group_list,
+               y,
+               y_scale);
+  return std::make_tuple(y, y_scale);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("select_unshared_kv", &select_unshared_kv_impl_npu, "select_unshared_kv");
   m.def("cache_unshared_kv", &cache_unshared_kv_impl_npu, "cache_unshared_kv");
@@ -319,4 +752,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("recurrent_gated_delta_rule", &recurrent_gated_delta_rule, "recurrent_gated_delta_rule");
   m.def("rec_constrained_topk", &rec_constrained_topk_impl_npu, "rec_constrained_topk");
   m.def("mega_chunk_gdn", &mega_chunk_gdn, "mega_chunk_gdn");
+  m.def("layer_norm_fwd", &layer_norm_fwd_impl_npu, "layer_norm_fwd");
+  m.def("moe_fused_add_topk", &moe_fused_add_topk_impl_npu, "moe_fused_add_topk");
+  m.def("moe_fused_reducesum_div", &moe_fused_reducesum_div_impl_npu, "moe_fused_reducesum_div");
+  m.def("replace_token", &replace_token_impl_npu, "replace_token");
+  m.def("convert_kv_cache_format", &convert_kv_cache_format_impl_npu, "convert_kv_cache_format");
+  m.def("scatter_nd_update_v2", &scatter_nd_update_v2_impl_npu, "scatter_nd_update_v2");
+  m.def("hc_post", &hc_post_impl_npu, "hc_post");
+  m.def("add_rms_norm_bias", &add_rms_norm_bias_impl_npu, "add_rms_norm_bias");
+  m.def("moe_init_routing_custom", &moe_init_routing_custom_impl_npu, "moe_init_routing_custom");
+  m.def("hc_pre_sinkhorn", &hc_pre_sinkhorn_impl_npu, "hc_pre_sinkhorn");
+  m.def("pp_matmul_opt", &pp_matmul_opt_impl_npu, "pp_matmul_opt");
+  m.def("moe_grouped_matmul", &moe_grouped_matmul_impl_npu, "moe_grouped_matmul");
+  m.def("index_group_matmul", &index_group_matmul_impl_npu, "index_group_matmul");
+  m.def("dequant_swiglu_quant", &dequant_swiglu_quant_impl_npu, "dequant_swiglu_quant");
+  m.def("moe_grouped_matmul_swiglu_quant", &moe_grouped_matmul_swiglu_quant_impl_npu, "moe_grouped_matmul_swiglu_quant");
 }

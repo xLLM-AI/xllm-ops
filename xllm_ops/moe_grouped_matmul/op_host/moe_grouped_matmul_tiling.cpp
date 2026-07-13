@@ -321,7 +321,17 @@ static ge::graphStatus TilingForMoeGroupedMatmulFunc(gert::TilingContext *contex
 
 
 
+// 自定义 CompileInfo, 用于绕过 CANN 默认的 AutoTiling 解析路径。
+// 该算子无标准 tbe 模板生成的 compile_info(_pattern), 若不注册 TilingParse,
+// CANN 会走 ParseAutoTilingRun 读取 _pattern 导致 InitTilingParseCtx failed(EZ9903)。
+struct MoeGroupedMatmulCompileInfo {};
+
+static ge::graphStatus TilingPrepareForMoeGroupedMatmul(gert::TilingParseContext *context){
+    return ge::GRAPH_SUCCESS;
+}
+
 // --------------------------Tiling函数及TilingPrepare函数注册--------
 IMPL_OP_OPTILING(MoeGroupedMatmul)
-    .Tiling(TilingForMoeGroupedMatmulFunc);
+    .Tiling(TilingForMoeGroupedMatmulFunc)
+    .TilingParse<MoeGroupedMatmulCompileInfo>(TilingPrepareForMoeGroupedMatmul);
 } // namespace optiling
