@@ -86,7 +86,8 @@ if (BUILD_OPEN_PROJECT)
         -Wl,--whole-archive
         ops_aclnn
         -Wl,--no-whole-archive
-        -lopapi
+        # Avoid exporting CANN built-in ACLNN symbols through libcust_opapi.so.
+        $<$<BOOL:${BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG}>:$<BUILD_INTERFACE:opapi_math>>
         nnopbase
         profapi
         ge_common_base
@@ -584,6 +585,7 @@ target_link_libraries(
     PUBLIC $<$<TARGET_EXISTS:${OPHOST_NAME}_opmaster_ct_gentask_obj>:$<TARGET_OBJECTS:${OPHOST_NAME}_opmaster_ct_gentask_obj>>
     PUBLIC $<$<TARGET_EXISTS:${COMMON_NAME}_obj>:$<TARGET_OBJECTS:${COMMON_NAME}_obj>>
     PRIVATE $<$<BOOL:${BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG}>:$<BUILD_INTERFACE:optiling>>
+    PRIVATE -Wl,--no-as-needed $<$<TARGET_EXISTS:opsbase>:opsbase> -Wl,--as-needed
 )
 else ()
 target_link_libraries(
@@ -606,6 +608,7 @@ if(BUILD_WITH_3_8_PACKAGE)
 target_link_libraries(
     cust_proto
     PUBLIC ${OPHOST_NAME}_infer_obj
+    PRIVATE -Wl,--no-as-needed $<$<TARGET_EXISTS:opsbase>:opsbase> -Wl,--as-needed
 )
 else()
 target_link_libraries(
@@ -874,7 +877,7 @@ if (NOT ENABLE_BUILT_IN AND BUILD_OPEN_PROJECT)
     set(CPACK_PACKAGE_DIRECTORY ${CMAKE_BINARY_DIR})
     set(CPACK_PACKAGE_FILE_NAME "cann-ops-xllm-${VENDOR_NAME}_linux-${ARCH}.run")
     set(CPACK_GENERATOR External)
-    set(CPACK_CMAKE_GENERATOR "Unix Makefiles")
+    set(CPACK_CMAKE_GENERATOR "${CMAKE_GENERATOR}")
     set(CPACK_EXTERNAL_ENABLE_STAGING TRUE)
     if (ENABLE_BUILD_PKG)
       if (EXISTS ${ASCEND_CMAKE_DIR}/makeself.cmake)

@@ -202,7 +202,7 @@ class Parser:
                 if opt not in cls._UTExcludes:
                     ops_test_ut_str += f"{opt};"
         ops_test_ut_str = f"{ops_test_ut_str}"
-        logging.info(f"Trigger UT: {ops_test_ut_str}")
+        logging.info("Trigger UT: %s", ops_test_ut_str)
         return ops_test_ut_str
 
     @classmethod
@@ -230,7 +230,7 @@ class Parser:
                 if opt not in cls._ExamplesExcludes:
                     ops_test_examples_str += f"{opt};"
         ops_test_examples_str = f"{ops_test_examples_str}"
-        logging.info(f"Trigger examples: {ops_test_examples_str}")
+        logging.info("Trigger examples: %s", ops_test_examples_str)
         return ops_test_examples_str
 
     @classmethod

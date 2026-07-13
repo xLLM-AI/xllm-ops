@@ -110,6 +110,7 @@ class DequantSwigluQuant : public OpDef
             .ExtendCfgInfo("coreType.value", "AiCore");
         this->AICore().AddConfig("ascend910b", aicoreConfig);
         this->AICore().AddConfig("ascend910_93", aicoreConfig);
+        this->AICore().AddConfig("ascend950", aicoreConfig);
     // this->AICore().AddConfig("ascend910b",config_kirin);
     // this->AICore().AddConfig("ascend910_93",config_kirin);
 

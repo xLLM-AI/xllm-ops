@@ -34,10 +34,8 @@ get_cann_toolkit_version() {
     for version_file in \
         "${ASCEND_TOOLKIT_HOME}/toolkit/version.info" \
         "${ASCEND_TOOLKIT_HOME}/version.info" \
-        "${ASCEND_TOOLKIT_HOME}/compiler/version.info" \
         "${ASCEND_HOME_PATH}/toolkit/version.info" \
-        "${ASCEND_HOME_PATH}/version.info" \
-        "${ASCEND_HOME_PATH}/compiler/version.info"; do
+        "${ASCEND_HOME_PATH}/version.info"; do
         if [[ -f "${version_file}" ]]; then
             version_line=$(grep -m1 '^Version=' "${version_file}" 2>/dev/null || true)
             if [[ -n "${version_line}" ]]; then
@@ -285,6 +283,75 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     fi
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
+elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
+    log "matched SOC branch: ascend950"
+    # ASCEND950 (A5) series, real compile arch: ascend910_95
+    # dependency: catlass
+    git config --global --add safe.directory "$ROOT_DIR"
+    CATLASS_PATH=${ROOT_DIR}/../third_party/catlass/include
+    if [[ ! -d "${CATLASS_PATH}" ]]; then
+        echo "dependency catlass is missing, try to fetch it..."
+        if ! git submodule update --init --recursive; then
+            echo "fetch failed"
+            exit 1
+        fi
+    fi
+    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
+    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    log "catlass include=${ABSOLUTE_CATLASS_PATH}"
+
+    CUSTOM_OPS_ARRAY=(
+        "sparse_flash_attention"
+        "moe_init_routing_custom"
+        "moe_gating_top_k"
+        "moe_gating_top_k_hash"
+        "add_rms_norm_bias"
+        # "lightning_indexer_quant"
+        # "lightning_indexer_quant_metadata"
+        "compressor"
+        "quant_lightning_indexer"
+        "quant_lightning_indexer_metadata"
+        "sparse_attn_sharedkv"
+        "sparse_attn_sharedkv_metadata"
+        "hc_pre_sinkhorn"
+        "hc_pre_inv_rms"
+        "hc_post"
+        "rms_norm_dynamic_quant"
+        "inplace_partial_rotary_mul"
+        # "dispatch_ffn_combine"
+        "dequant_swiglu_quant"
+        "scatter_nd_update_v2"
+        "grouped_matmul_swiglu_quant_v2"
+
+        #  ### JD's in-house operators ####
+        "beam_search_group"
+        "x_attention"
+        "cache_unshared_kv"
+        "causal_conv1d"
+        "convert_kv_cache_format"
+        "beam_search"
+        "index_group_matmul"
+        # "mla_preprocess"  # A5 kernel not adapted: Fixpipe/l0c_to_gm_iterator errors
+        # "mla_preprocess_v2"  # A5 kernel not adapted
+        "moe_fused_add_topk"
+        "moe_fused_reducesum_div"
+        "moe_grouped_matmul"
+        "moe_grouped_matmul_swiglu_quant"
+        "moe_init_routing_v3"
+        # "multi_latent_attention"  # A5 kernel not adapted
+        "pp_matmul_opt"
+        "recurrent_gated_delta_rule"
+        "replace_token"
+        "select_unshared_kv"
+        # "x_attention_tl"  # A5 kernel not adapted
+        "x_flash_attention_infer"
+        "onerec_final_beam_select"
+        "rec_constrained_top_k"
+        "laser_attention"
+        # "mega_chunk_gdn"  # A5 kernel not adapted: pto-isa MrgSort/Stride errors
+    )
+    CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
+    SOC_ARG="ascend950"
 else
     # others
     # currently, no custom aclnn ops for other series

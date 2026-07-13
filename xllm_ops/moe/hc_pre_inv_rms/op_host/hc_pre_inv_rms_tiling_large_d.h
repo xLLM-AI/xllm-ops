@@ -74,7 +74,7 @@ private:
 
     const gert::Shape *xShape_ = nullptr;
     const gert::Shape *yShape_ = nullptr;
-    
+
     float eps_ = 1e-6f;
     int64_t A_ = 0;
     int64_t R_ = 0;
@@ -98,7 +98,7 @@ ge::graphStatus HcPreInvRmsTilingLargeD::CheckInputShape()
                 OPS_LOG_E(context_, "The dim number of x is: %zu, but it should be %zu or %zu(bs fused)."
                     , xDimNum, X_INPUT_DIMS, X_INPUT_BS_FUSED_DIMS),
                 return ge::GRAPH_FAILED);
-    
+
     if (xDimNum == X_INPUT_DIMS) {
         A_ = xShape_->GetDim(DIM_0) * xShape_->GetDim(DIM_1);
         R_ = xShape_->GetDim(DIM_2) * xShape_->GetDim(DIM_3);
@@ -106,11 +106,11 @@ ge::graphStatus HcPreInvRmsTilingLargeD::CheckInputShape()
         A_ = xShape_->GetDim(DIM_0);
         R_ = xShape_->GetDim(DIM_1) * xShape_->GetDim(DIM_2);
     }
-    
+
     OPS_ERR_IF(R_ != R_LARGE_D,
                 OPS_LOG_E(context_, "R is: %ld, but large_d tiling only supports R=%ld.", R_, R_LARGE_D),
                 return ge::GRAPH_FAILED);
-    
+
     invRmsTilingData_.set_A(A_);
     invRmsTilingData_.set_R(R_);
 
@@ -190,7 +190,7 @@ ge::graphStatus HcPreInvRmsTilingLargeD::GetPlatformInfo()
 ge::graphStatus HcPreInvRmsTilingLargeD::CheckOutShape()
 {
     OPS_ERR_IF((yShape_->GetDim(0) != xShape_->GetDim(0)),
-                OPS_LOG_E(context_, "y out dim[0] %ld not euqal x dim[0] %ld, please check.", yShape_->GetDim(0),
+                OPS_LOG_E(context_, "y out dim[0] %ld not equal x dim[0] %ld, please check.", yShape_->GetDim(0),
                      xShape_->GetDim(0)),
                 return ge::GRAPH_FAILED);
 

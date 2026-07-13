@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file rotary_position_embedding.cpp
+ * \file inplace_partial_rotary_mul_def.cpp
  * \brief
  */
 #include "register/op_def_registry.h"
@@ -49,12 +49,11 @@ public:
             .DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true)
             .ExtendCfgInfo("opFile.value", "inplace_partial_rotary_mul");
-        this->AICore().AddConfig("ascend910_95", regbaseCfg);
+        this->AICore().AddConfig("ascend950", regbaseCfg);
         this->AICore().AddConfig("ascend910b", regbaseCfg);
         this->AICore().AddConfig("ascend910_93", regbaseCfg);
-
     }
 };
 
 OP_ADD(InplacePartialRotaryMul);
-} // namespace ops
+}  // namespace ops

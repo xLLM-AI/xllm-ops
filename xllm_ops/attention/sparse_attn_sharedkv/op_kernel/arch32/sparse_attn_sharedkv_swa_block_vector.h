@@ -366,7 +366,7 @@ __aicore__ inline void SWAVectorBlock<SAST>::ProcessLse(const RunInfo &info, con
     if (mSplitInfo.vecDealM == 0) {
         return;
     }
-    uint64_t lseOffset;
+    uint64_t lseOffset = 0;
     if (constInfo.outputLayout == SAS_LAYOUT::TND) {
         uint32_t tBase = actualSeqLengthsQGm.GetValue(info.bIdx);
         lseOffset = (tBase + info.s1Idx) * constInfo.gSize  + // T轴、s1轴偏移

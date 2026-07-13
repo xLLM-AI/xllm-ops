@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 #ifndef RMS_NORM_H
 #define RMS_NORM_H
 
-#include "../compressor_comm.h"
+#include "compressor_comm.h"
 #include "compressor_vector_comm.h"
 
 namespace Compressor {
@@ -45,7 +45,7 @@ __aicore__ inline void RmsNorm(const LocalTensor<float> &dstLocal, const LocalTe
     // temp1Local = srcLocal ^ 2
     Mul(temp1Local, srcLocal, srcLocal, cnt);
     PipeBarrier<PIPE_V>();
-    
+
     MatRpeatParam repeatParams = {
         rmsNormParams.row,                                // row
         rmsNormParams.col,                                // col
@@ -73,7 +73,7 @@ __aicore__ inline void RmsNorm(const LocalTensor<float> &dstLocal, const LocalTe
     PipeBarrier<PIPE_V>();
 
     // temp1Local[row, 8] = brc(temp2Local[row, 1])
-    Brcb(temp1Local, temp2Local, CeilDivT(rmsNormParams.row, BRCB_NUM), {1, 8});   
+    Brcb(temp1Local, temp2Local, CeilDivT(rmsNormParams.row, BRCB_NUM), {1, 8});
     PipeBarrier<PIPE_V>();
 
     // dstLocal = srcLocal / temp1Local(sum)

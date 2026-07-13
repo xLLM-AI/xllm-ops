@@ -188,4 +188,3 @@ extern "C" __global__ __aicore__ void inplace_partial_rotary_mul(GM_ADDR x, GM_A
         }
     #endif
 }
-

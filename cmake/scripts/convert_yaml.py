@@ -28,7 +28,7 @@ def load_test_config(test_config_path: str):
             return yaml.safe_load(file)
 
     except Exception as e:
-        logging.error(f"Failed to read test_config.yaml file: {e}")
+        logging.error("Failed to read test_config.yaml file: %s", e)
         return None
 
 
@@ -79,7 +79,7 @@ def write_new_format(new_file_path: str, src_paths: list, exclude_paths: list):
         return True
 
     except Exception as e:
-        logging.error(f"Failed to write file: {e}")
+        logging.error("Failed to write file: %s", e)
         return False
 
 
@@ -87,7 +87,7 @@ def main(test_config_path: str, output_path: str):
     """主函数"""
     # 检查文件是否存在
     if not os.path.exists(test_config_path):
-        logging.error(f"File does not exist: {test_config_path}")
+        logging.error("File does not exist: %s", test_config_path)
         return
 
     # 读取test_config文件
@@ -98,8 +98,8 @@ def main(test_config_path: str, output_path: str):
     # 提取所有有options的算子的src和exclude路径
     src_paths, exclude_paths = extract_src_and_exclude(data)
 
-    logging.info(f"Found {len(src_paths)} src paths")
-    logging.info(f"Found {len(exclude_paths)} exclude paths")
+    logging.info("Found %s src paths", len(src_paths))
+    logging.info("Found %s exclude paths", len(exclude_paths))
 
     # 以新格式写回
     if write_new_format(output_path, src_paths, exclude_paths):
