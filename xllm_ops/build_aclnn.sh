@@ -107,14 +107,14 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
-        "sparse_flash_attention"
+        # "sparse_flash_attention"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_sparse_flash_attention.h
         "moe_init_routing_custom"
-        "moe_gating_top_k"
+        # "moe_gating_top_k"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_moe_gating_top_k.h
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
         "lightning_indexer_quant"
         "compressor"
-        "quant_lightning_indexer"
+        "quant_lightning_indexer"  ## 已在 CANN 中内置，见 opp/built-in/op_impl/ai_core/tbe/impl/ops_transformer/ascendc/quant_lightning_indexer
         "quant_lightning_indexer_metadata"
         "lightning_indexer_quant_metadata"
         "sparse_attn_sharedkv"
@@ -125,9 +125,9 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
         "rms_norm_dynamic_quant"
         "inplace_partial_rotary_mul"
         "dispatch_ffn_combine"
-        "dequant_swiglu_quant"
+        "dequant_swiglu_quant"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_dequant_swiglu_quant.h
         "scatter_nd_update_v2"
-        "grouped_matmul_swiglu_quant_v2"
+        #"grouped_matmul_swiglu_quant_v2"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_grouped_matmul_swiglu_quant_v2.h
 
         ### JD's in-house operators ####
         "beam_search_group"
@@ -137,16 +137,16 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
         "convert_kv_cache_format"
         "beam_search"
         "index_group_matmul"
-        "mla_preprocess"
-        "mla_preprocess_v2"
+        # "mla_preprocess"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_mla_preprocess.h
+        # "mla_preprocess_v2"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_mla_preprocess_v2.h
         "moe_fused_add_topk"
         "moe_fused_reducesum_div"
         "moe_grouped_matmul"
         "moe_grouped_matmul_swiglu_quant"
-        "moe_init_routing_v3"
+        # "moe_init_routing_v3"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_moe_init_routing_v3.h
         "multi_latent_attention"
         "pp_matmul_opt"
-        "recurrent_gated_delta_rule"
+        # "recurrent_gated_delta_rule"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_recurrent_gated_delta_rule.h
         "replace_token"
         "select_unshared_kv"
         "x_attention_tl"
@@ -222,15 +222,15 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
     
     CUSTOM_OPS_ARRAY=(
-        "sparse_flash_attention"
+        # "sparse_flash_attention"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_sparse_flash_attention.h
         "moe_init_routing_custom"
-        "moe_gating_top_k"
+        # "moe_gating_top_k"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_moe_gating_top_k.h
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
         "lightning_indexer_quant"
         "lightning_indexer_quant_metadata"
         "compressor"
-        "quant_lightning_indexer"
+        "quant_lightning_indexer"  ## 已在 CANN 中内置，见 opp/built-in/op_impl/ai_core/tbe/impl/ops_transformer/ascendc/quant_lightning_indexer
         "quant_lightning_indexer_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
@@ -240,9 +240,9 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "rms_norm_dynamic_quant"
         "inplace_partial_rotary_mul"
         "dispatch_ffn_combine"
-        "dequant_swiglu_quant"
+        "dequant_swiglu_quant"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_dequant_swiglu_quant.h
         "scatter_nd_update_v2"
-        "grouped_matmul_swiglu_quant_v2"
+        # "grouped_matmul_swiglu_quant_v2"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_grouped_matmul_swiglu_quant_v2.h
 
          ### JD's in-house operators ####
         "beam_search_group"
@@ -252,16 +252,16 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "convert_kv_cache_format"
         "beam_search"
         "index_group_matmul"
-        "mla_preprocess"
-        "mla_preprocess_v2"
+        # "mla_preprocess"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_mla_preprocess.h
+        # "mla_preprocess_v2"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_mla_preprocess_v2.h
         "moe_fused_add_topk"
         "moe_fused_reducesum_div"
         "moe_grouped_matmul"
         "moe_grouped_matmul_swiglu_quant"
-        "moe_init_routing_v3"
+        # "moe_init_routing_v3"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_moe_init_routing_v3.h
         "multi_latent_attention"
         "pp_matmul_opt"
-        "recurrent_gated_delta_rule"
+        # "recurrent_gated_delta_rule"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_recurrent_gated_delta_rule.h
         "replace_token"
         "select_unshared_kv"
         "x_attention_tl"
@@ -301,15 +301,15 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
-        "sparse_flash_attention"
+        # "sparse_flash_attention"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_sparse_flash_attention.h
         "moe_init_routing_custom"
-        "moe_gating_top_k"
+        # "moe_gating_top_k"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_moe_gating_top_k.h
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
-        # "lightning_indexer_quant"
+        # "lightning_indexer_quant"  ## CANN exist
         # "lightning_indexer_quant_metadata"
         "compressor"
-        "quant_lightning_indexer"
+        # "quant_lightning_indexer"  ## 已在 CANN 中内置，见 opp/built-in/op_impl/ai_core/tbe/impl/ops_transformer/ascendc/quant_lightning_indexer
         "quant_lightning_indexer_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
@@ -317,11 +317,11 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "hc_pre_inv_rms"
         "hc_post"
         "rms_norm_dynamic_quant"
-        "inplace_partial_rotary_mul"
+        "inplace_partial_rotary_mul" ## CANN exist
         # "dispatch_ffn_combine"
-        "dequant_swiglu_quant"
+        "dequant_swiglu_quant"  ## 已在 CANN 中内置，删除后会有精度问题，CANN内置见 aarch64-linux/include/aclnnop/aclnn_dequant_swiglu_quant.h
         "scatter_nd_update_v2"
-        "grouped_matmul_swiglu_quant_v2"
+        # "grouped_matmul_swiglu_quant_v2"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_grouped_matmul_swiglu_quant_v2.h
 
         #  ### JD's in-house operators ####
         "beam_search_group"
@@ -337,10 +337,10 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "moe_fused_reducesum_div"
         "moe_grouped_matmul"
         "moe_grouped_matmul_swiglu_quant"
-        "moe_init_routing_v3"
+        # "moe_init_routing_v3"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_moe_init_routing_v3.h
         # "multi_latent_attention"  # A5 kernel not adapted
         "pp_matmul_opt"
-        "recurrent_gated_delta_rule"
+        # "recurrent_gated_delta_rule"  ## 已在 CANN 中内置，见 aarch64-linux/include/aclnnop/aclnn_recurrent_gated_delta_rule.h
         "replace_token"
         "select_unshared_kv"
         # "x_attention_tl"  # A5 kernel not adapted
@@ -376,7 +376,7 @@ dump_selected_ops
 # bash build.sh --pkg --ops="$CUSTOM_OPS" --soc="$SOC_ARG"
 
 # # install custom ops to vllm_ascend/_cann_ops_custom
-# ./build/cann-ops-xllm*.run --install-path=$ROOT_DIR/vllm_ascend/_cann_ops_custom
+# ./build/cann-ops-xllm*.run --install-path=$ROOT_DIR/output/_cann_ops_custom
 
 
 (
@@ -403,7 +403,7 @@ dump_selected_ops
   fi
   log "build.sh finished"
 
-  install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
+  install_dir="${ROOT_DIR}/output/_cann_ops_custom"
   log "install_dir=${install_dir}"
 
   mkdir -p -- "$install_dir"
