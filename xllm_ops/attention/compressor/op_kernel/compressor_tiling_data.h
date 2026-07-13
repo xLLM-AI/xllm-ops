@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -18,22 +18,13 @@
 #include <cstdint>
 #include "kernel_tiling/kernel_tiling.h"
 
-const uint32_t CMP_MAX_AIC_CORE_NUM = 36;
+const uint32_t CMP_MAX_AIC_CORE_NUM = 26; // 25 + 1 保证数组8字节对齐
 
 namespace optiling {
-    struct CompressorSplitCoreParams {
-        uint32_t mStart;
-        uint32_t mEnd;
-        uint32_t nStart;
-        uint32_t nEnd;
-        uint32_t kStart;
-        uint32_t kEnd;
-    };
-
     // 1. 基础参数结构体
-    struct CompressorBaseParams {
+    struct CompressorBaseParams {   
         uint32_t batchSize = 0;             // bastch size（批大小）
-        uint32_t seqSize = 0;               // sequence size（kvs大小）
+        uint32_t seqSize = 0;               // sequence size（kvs大小）  
         uint32_t hiddenSize = 0;            // hidden size（隐藏层大小）
         uint32_t tokenSize = 0;             // token size = batchSize * seqSize(token总数：批大小x序列1长度)
         uint32_t headDim = 0;               // head size of kv
@@ -45,18 +36,12 @@ namespace optiling {
         float reciprocalD = 0;              // 1分之D
         uint32_t usedCoreNum = 0;           // 使用核数
         uint32_t nSize = 0;                 // 控制v2积攒的轮数
-        uint64_t stateCacheStrideDim0 = 0;  // stateCache第0维的stride
-        uint32_t kBaseNum = 0;
-        uint32_t kBaseSize = 0;
-        uint32_t coreGroupNum = 0;
-        uint32_t mLoopNum = 0;
-        CompressorSplitCoreParams splitCoreParam[CMP_MAX_AIC_CORE_NUM];
     };
 
     struct CompressorPageAttentionParams {
-        uint32_t blockNum = 0;
-        uint32_t blockSize = 1;
-        uint32_t maxBlockNumPerBatch = 1;
+        uint32_t blockNum;
+        uint32_t blockSize;
+        uint32_t maxBlockNumPerBatch;
     };
 
     struct CompressorInnerSplitParams {
@@ -65,11 +50,9 @@ namespace optiling {
     };
 
     struct CompressorWorkspaceParams {
-        uint32_t mm1KvResSize;
-        uint32_t mm1ScoreResSize;
+        uint32_t preMm1ResSize;
+        uint32_t curMm1ResSize;
         uint32_t vec1ResSize;
-        uint32_t vec1TailCacheSize;
-        uint32_t dbWorkspaceRatio = 1;
     };
 
     struct CompressorTilingData {

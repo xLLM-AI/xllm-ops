@@ -22,9 +22,8 @@ using namespace AscendC;
 
 namespace Compressor {
 
-constexpr FixpipeConfig CFG_ROW_MAJOR_UB = {CO2Layout::ROW_MAJOR, true}; // ROW_MAJOR: 使能NZ2ND，输出数据格式为ND格式; true: 用于用户指定目的地址的位置是否是UB
-
 template<typename COMP> class CompressorBlockCube {
+using MM1_OUT_T = float;
 public:
     __aicore__ inline CompressorBlockCube(){};
     __aicore__ inline void InitParams(const ConstInfo &constInfo);
@@ -45,6 +44,7 @@ public:
         __gm__ uint8_t *startPos,
         __gm__ uint8_t *cmpKvOut);
     __aicore__ inline void InitBuffers(TPipe *pipe);
+    __aicore__ inline void InitGlobalBuffers(const GlobalTensor<MM1_OUT_T>& preMm1ResGm, const GlobalTensor<MM1_OUT_T>& curMm1ResGm);
     __aicore__ inline void AllocEventID(TPipe *pipe);
     __aicore__ inline void FreeEventID(TPipe *pipe);
     __aicore__ inline void ComputeMm1(const RunInfo &info);
@@ -75,6 +75,8 @@ private:
     GlobalTensor<X_T> xGm_;
     GlobalTensor<X_T> wkvGm_;
     GlobalTensor<X_T> wgateGm_;
+    GlobalTensor<MM1_OUT_T>preMm1ResGm;
+    GlobalTensor<MM1_OUT_T>curMm1ResGm;
     GlobalTensor<int32_t> cuSeqlensGm_;
     GlobalTensor<int32_t> sequsedGm_;
     GlobalTensor<int32_t> startPosGm_;
@@ -119,13 +121,7 @@ private:
     // mmad <> fixpipe EventID
     static constexpr uint32_t L0C_EVENT0 = EVENT_ID0;
     static constexpr uint32_t L0C_EVENT1 = EVENT_ID1;
-    static constexpr uint32_t L0C_EVENT2 = EVENT_ID2;
-    static constexpr uint32_t L0C_EVENT3 = EVENT_ID3;
     uint32_t l0cBufId = 0;
-
-    // =================================UB Buffer===========================
-    TBuf<TPosition::VECIN> mm1ResUb;
-    LocalTensor<T> mm1ResTensor;
 
     // =================================Loop======================================
     uint32_t curBIdx_ = 0;
@@ -181,11 +177,14 @@ __aicore__ inline void CompressorBlockCube<COMP>::InitBuffers(TPipe *pipe)
     // L0
     pipe->InitBuffer(tmpBufL0A, L0A_PP_SIZE * 2);
     pipe->InitBuffer(tmpBufL0B, L0B_PP_SIZE * 2);
-    pipe->InitBuffer(tmpBufL0C, L0C_PP_SIZE * 4);
+    pipe->InitBuffer(tmpBufL0C, L0C_PP_SIZE * 2);
+}
 
-    // UB
-    pipe->InitBuffer(mm1ResUb, 128 * 1024);
-    mm1ResTensor = mm1ResUb.Get<T>();
+template <typename COMP>
+__aicore__ inline void CompressorBlockCube<COMP>::InitGlobalBuffers(const GlobalTensor<MM1_OUT_T>& preMm1ResGm, const GlobalTensor<MM1_OUT_T>& curMm1ResGm)
+{
+    this->preMm1ResGm = preMm1ResGm;
+    this->curMm1ResGm = curMm1ResGm;
 }
 
 template <typename COMP>
@@ -205,8 +204,6 @@ __aicore__ inline void CompressorBlockCube<COMP>::AllocEventID(TPipe *pipe)
 
     SetFlag<HardEvent::FIX_M>(L0C_EVENT0);
     SetFlag<HardEvent::FIX_M>(L0C_EVENT1);
-    SetFlag<HardEvent::FIX_M>(L0C_EVENT2);
-    SetFlag<HardEvent::FIX_M>(L0C_EVENT3);
 }
 
 template <typename COMP>
@@ -226,8 +223,6 @@ __aicore__ inline void CompressorBlockCube<COMP>::FreeEventID(TPipe *pipe)
 
     WaitFlag<HardEvent::FIX_M>(L0C_EVENT0);
     WaitFlag<HardEvent::FIX_M>(L0C_EVENT1);
-    WaitFlag<HardEvent::FIX_M>(L0C_EVENT2);
-    WaitFlag<HardEvent::FIX_M>(L0C_EVENT3);
 }
 
 template <typename COMP>
@@ -368,7 +363,7 @@ __aicore__ inline void CompressorBlockCube<COMP>::CopyXGmToL1(const RunInfo &inf
         ubOffset += constInfo_.cmpRatio * (32 / sizeof(X_T));
         mSizeFinish += constInfo_.cmpRatio;
     }
-    
+
     while (mSizeFinish < mDealSize) {
         if (curBIdx_ > info.bEnd) {
             break;
@@ -432,15 +427,16 @@ __aicore__ inline void CompressorBlockCube<COMP>::LoadAToL0(LocalTensor<X_T> aL0
         mSize += constInfo_.cmpRatio;
     }
     uint32_t xTensorOffset = mStart * (32 / sizeof(X_T));
-    LoadData2DParamsV2 loadData2DParamsV2;
-    loadData2DParamsV2.mStartPosition = 0;
-    loadData2DParamsV2.kStartPosition = 0;
-    loadData2DParamsV2.mStep = (mDealSize + 15) / 16;
-    loadData2DParamsV2.kStep = kBase / 16;
-    loadData2DParamsV2.srcStride = (mSize + 15) / 16;
-    loadData2DParamsV2.dstStride = loadData2DParamsV2.mStep;
-    loadData2DParamsV2.ifTranspose = false;
-    LoadData(aL0Tensor, xL1Tensor[xTensorOffset], loadData2DParamsV2);
+    uint32_t mLoop = (mDealSize + 15) / 16;
+    for (uint32_t i = 0; i < mLoop; i++) {
+        LoadData2DParams loadData2DParams;
+        loadData2DParams.startIndex = i;
+        loadData2DParams.repeatTimes = kBase / 16;
+        loadData2DParams.srcStride = (mSize + 15) / 16;
+        loadData2DParams.dstGap = 0;
+        loadData2DParams.ifTranspose = false;
+        LoadData(aL0Tensor[16 * i * kBase], xL1Tensor[xTensorOffset], loadData2DParams);
+    }
 }
 
 template <typename COMP>
@@ -468,40 +464,16 @@ __aicore__ inline void CompressorBlockCube<COMP>::MatrixMmad(LocalTensor<T> cL0T
     }
     mmadParams.n = nDealSize;
     mmadParams.k = kActSize;
-    mmadParams.cmatrixInitVal = isInitL0C;
+    mmadParams.cmatrixInitVal = true;
     mmadParams.cmatrixSource = false;
     Mmad(cL0Tensor, aL0Tensor, bL0Tensor, mmadParams);
+    AscendC::PipeBarrier<PIPE_M>();
 }
 
 template <typename COMP>
 __aicore__ inline void CompressorBlockCube<COMP>::CopyL0CDataToUb(LocalTensor<T> ubTensor, LocalTensor<T> cL0Tensor,
     uint32_t vecCoreIdx, uint32_t mSizeAlign, uint32_t nSizeAlign, uint32_t nIdx)
 {
-    if constexpr (COMP::coff == COFF::OVERLAP) {
-        FixpipeParamsC310<CO2Layout::ROW_MAJOR> fixpipeParams; // L0C->UB
-        fixpipeParams.nSize = nSizeAlign; // L0C上的结果矩阵N方向的size大小; 为什么要8个元素对齐(32B对齐) // 128
-        fixpipeParams.mSize = mSizeAlign; // when enable NZ2ND/NZ2DN, L0C->UB时mSize*sizeof(T)必须为32的倍数
-        fixpipeParams.srcStride = mSizeAlign;
-        fixpipeParams.dstStride = nSizeAlign; // UB的排布是kv|score, coff=2时, 各占64，正好128
-        fixpipeParams.dualDstCtl = 0;
-        fixpipeParams.subBlockId = vecCoreIdx;
-        fixpipeParams.params.ndNum = 1;
-        fixpipeParams.params.srcNdStride = 0;
-        fixpipeParams.params.dstNdStride = 0;
-        Fixpipe<T, T, CFG_ROW_MAJOR_UB>(ubTensor[nIdx * 128 * 128], cL0Tensor, fixpipeParams); // 将matmul结果从L0C搬运到UB
-    } else {
-        FixpipeParamsC310<CO2Layout::ROW_MAJOR> fixpipeParams; // L0C->UB
-        fixpipeParams.nSize = nSizeAlign; // L0C上的结果矩阵N方向的size大小; 为什么要8个元素对齐(32B对齐) // 128
-        fixpipeParams.mSize = mSizeAlign; // when enable NZ2ND/NZ2DN, L0C->UB时mSize*sizeof(T)必须为32的倍数
-        fixpipeParams.srcStride = mSizeAlign;
-        fixpipeParams.dstStride = 2 * nSizeAlign; // UB的排布是kv|score, 所以N轴需要乘2, 256
-        fixpipeParams.dualDstCtl = 0;
-        fixpipeParams.subBlockId = vecCoreIdx;
-        fixpipeParams.params.ndNum = 1;
-        fixpipeParams.params.srcNdStride = 0;
-        fixpipeParams.params.dstNdStride = 0;
-        Fixpipe<T, T, CFG_ROW_MAJOR_UB>(ubTensor[nIdx * nSizeAlign], cL0Tensor, fixpipeParams); // 将matmul结果从L0C搬运到UB
-    }
 }
 
 template <typename COMP>
@@ -523,8 +495,8 @@ __aicore__ inline void CompressorBlockCube<COMP>::ComputeMm1(const RunInfo &info
             WaitFlag<HardEvent::MTE1_MTE2>(X_EVENT0 + xBufId);
             WaitFlag<HardEvent::MTE1_MTE2>(W_EVENT0 + wBufId);
 
-            LocalTensor<X_T> xL1Tensor = xBufL1.GetWithOffset<X_T>((L1_X_SIZE / sizeof(X_T)), xBufId * L1_X_SIZE);
-            LocalTensor<X_T> wL1Tensor = wBufL1.GetWithOffset<X_T>((L1_W_SIZE / sizeof(X_T)), wBufId * L1_W_SIZE);
+            LocalTensor<X_T> xL1Tensor = xBufL1.GetWithOffset<X_T>(L1_X_SIZE / sizeof(X_T), xBufId * L1_X_SIZE);
+            LocalTensor<X_T> wL1Tensor = wBufL1.GetWithOffset<X_T>(L1_W_SIZE / sizeof(X_T), wBufId * L1_W_SIZE);
             for (uint32_t nL1 = 0; nL1 < nSize; nL1 += N_L1_BASE) {
                 // nLockId = nL1 / N_L1_BASE
                 WaitFlag<HardEvent::MTE1_MTE2>(N_LOCK_EVENT0 + nLockId);
@@ -558,33 +530,60 @@ __aicore__ inline void CompressorBlockCube<COMP>::ComputeMm1(const RunInfo &info
 
                     {
                         // 获取L0C
-                        l0cBufId = (nL1 / N_L1_BASE) * 2 + (mL1 / M_L1_BASE); // 2: m方向最多两块, 两块用不满时, 第二块L0C空着
                         WaitFlag<HardEvent::FIX_M>(L0C_EVENT0 + l0cBufId);
                         LocalTensor<T> cL0Tensor = tmpBufL0C.GetWithOffset<T>((L0C_PP_SIZE / sizeof(T)), l0cBufId * L0C_PP_SIZE);
                         {
                             WaitFlag<HardEvent::M_MTE1>(L0AB_EVENT0 + l0abBufId);
-                            LocalTensor<X_T> aL0Tensor = tmpBufL0A.GetWithOffset<X_T>((L0A_PP_SIZE / sizeof(X_T)), l0abBufId * L0A_PP_SIZE);
-                            LocalTensor<X_T> bL0Tensor = tmpBufL0B.GetWithOffset<X_T>((L0B_PP_SIZE / sizeof(X_T)), l0abBufId * L0B_PP_SIZE);
+                            LocalTensor<X_T> aL0Tensor = tmpBufL0A.GetWithOffset<X_T>(L0A_PP_SIZE / sizeof(X_T), l0abBufId * L0A_PP_SIZE);
+                            LocalTensor<X_T> bL0Tensor = tmpBufL0B.GetWithOffset<X_T>(L0B_PP_SIZE / sizeof(X_T), l0abBufId * L0B_PP_SIZE);
                             // 当Coff=2时，nL1=0时计算的是pre数据，nL1=N_L1_BASE时计算的是cur数据
                             uint32_t K_L0_BASE = K_L1_BASE;
                             LoadAToL0(aL0Tensor, xL1Tensor, mL1, mDealSize, K_L0_BASE, mSize, (nL1 > 0));
                             uint32_t N_L0_BASE = N_L1_BASE;
+
                             LoadBToL0(bL0Tensor, wL1Tensor, nL1, N_L0_BASE, N_L0_BASE, K_L0_BASE);
                             SetFlag<HardEvent::MTE1_M>(L0AB_EVENT0 + l0abBufId);
                             WaitFlag<HardEvent::MTE1_M>(L0AB_EVENT0 + l0abBufId);
                             MatrixMmad(cL0Tensor, aL0Tensor, bL0Tensor, mDealSize, N_L0_BASE, K_L0_BASE, (h == 0) && (kL1Idx == 0));
+
                             SetFlag<HardEvent::M_MTE1>(L0AB_EVENT0 + l0abBufId);
                             l0abBufId = (l0abBufId + 1) % 2;
                         }
-                        if ((h + K_SIZE >= hSize) && (kL1Idx + 1 == K_L1_LOOP)) {
+                        {
                             SetFlag<HardEvent::M_FIX>(L0C_EVENT0 + l0cBufId);
                             WaitFlag<HardEvent::M_FIX>(L0C_EVENT0 + l0cBufId);
-                            uint32_t mSizeAlign = (mDealSize + 15) / 16 * 16;
-                            uint32_t nSizeAlign = N_L1_BASE;
-                            uint32_t nIdx = nL1 / N_L1_BASE;
-                            CopyL0CDataToUb(mm1ResTensor, cL0Tensor, (mL1 == 0) ? 0 : 1, mSizeAlign, nSizeAlign, nIdx);
+
+                            if (kL1Idx != 0 || h != 0) {
+                                SetAtomicAdd<MM1_OUT_T>();
+                            }
+                            if constexpr (COMP::coff == COFF::OVERLAP) {
+                                FixpipeParamsV220 fixParams;
+                                fixParams.mSize = (mDealSize + 15) / 16 * 16;
+                                fixParams.nSize = N_L1_BASE;
+                                fixParams.srcStride = (mDealSize + 15) / 16 * 16;   // 需要16对齐
+                                fixParams.dstStride = constInfo_.dBaseSize * 2;
+                                fixParams.ndNum = 1;
+                                if (nL1 < nSize / 2) {
+                                    Fixpipe(preMm1ResGm[mL1 * constInfo_.dBaseSize * 2], cL0Tensor, fixParams);
+                                } else {
+                                    Fixpipe(curMm1ResGm[mL1 * constInfo_.dBaseSize * 2], cL0Tensor, fixParams);
+                                }
+                            } else {
+                                FixpipeParamsV220 fixParams;
+                                fixParams.mSize = (mDealSize + 15) / 16 * 16;
+                                fixParams.nSize = N_L1_BASE;
+                                fixParams.srcStride = (mDealSize + 15) / 16 * 16;   // 需要16对齐
+                                fixParams.dstStride = constInfo_.dBaseSize * 2;
+                                fixParams.ndNum = 1;
+                                Fixpipe(curMm1ResGm[mL1*nSize+nL1], cL0Tensor, fixParams);
+                            }
+                            
+                            if (kL1Idx != 0 || h != 0) {
+                                SetAtomicNone();
+                            }
                         }
                         SetFlag<HardEvent::FIX_M>(L0C_EVENT0 + l0cBufId);
+                        l0cBufId = (l0cBufId + 1) % 2;
                     }
 
                     if (nL1 + N_L1_BASE >= nSize) {

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 #ifndef ROPE_H
 #define ROPE_H
 
-#include "compressor_comm.h"
+#include "../compressor_comm.h"
 #include "compressor_vector_comm.h"
 
 namespace Compressor {
@@ -32,7 +32,7 @@ __aicore__ inline void SetGatherSrcOffset(const LocalTensor<int32_t> &gatherOffs
     for (uint32_t i = 0; i < 8; i++) {
         gatherOffsetLocal.SetValue(i, i ^ 1);
     }
-
+    
     event_t eventId_S_V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
     SetFlag<HardEvent::S_V>(eventId_S_V);
     WaitFlag<HardEvent::S_V>(eventId_S_V);
@@ -97,22 +97,22 @@ __aicore__ inline void RotaryPosEmb(const LocalTensor<float> &dstLocal, const Lo
         }
         PipeBarrier<PIPE_V>();
         uint32_t repeatTimes = cnt / FP32_REPEAT_ELEMENT_NUM;
-        uint32_t remainder = cnt % FP32_REPEAT_ELEMENT_NUM;
+        uint32_t remainer = cnt % FP32_REPEAT_ELEMENT_NUM;
         uint64_t fullMask = 0x5555555555555555;
         uint64_t partialMask = 0x55;
         SetVectorMask<float, MaskMode::NORMAL>(0, fullMask);
         Muls<float, false>(reArrLocal, reArrLocal, float(-1), MASK_PLACEHOLDER, repeatTimes,
                            {1, 1, FP32_BLOCK_ELEMENT_NUM, FP32_BLOCK_ELEMENT_NUM});
 
-        if (unlikely(remainder > 0)) {
+        if (unlikely(remainer > 0)) {
             SetVectorMask<float, MaskMode::NORMAL>(0, partialMask);
             Muls<float, false>(reArrLocal[repeatTimes * FP32_REPEAT_ELEMENT_NUM],
                                reArrLocal[repeatTimes * FP32_REPEAT_ELEMENT_NUM], float(-1), MASK_PLACEHOLDER,
-                               remainder / FP32_BLOCK_ELEMENT_NUM, {1, 1, 1, 1});
+                               remainer / FP32_BLOCK_ELEMENT_NUM, {1, 1, 1, 1});
         }
         ResetMask();
     }
-
+   
     PipeBarrier<PIPE_V>();
     BinaryRepeatParams computeParams{1,
                                      1,
