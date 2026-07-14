@@ -59,7 +59,9 @@ struct MegaChunkGdnKernelTilingData {
 constexpr uint16_t SYNC_AIV_FLAG = 12;
 constexpr uint16_t SYNC_AIC_FLAG = 11;
 constexpr uint16_t SYNC_AIC_AIV_FLAG = 13;
-constexpr uint16_t SYNC_AIV_ONLY_ALL = 14;
+// NOTE: SYNC_AIV_ONLY_ALL (==14) is provided by pto (pto::SYNC_AIV_ONLY_ALL) via
+// `using namespace pto;`. Defining it here again causes an ambiguous reference,
+// so rely on the pto-provided constant instead.
 constexpr uint16_t SYNC_MODE_SHIFT_VALUE = 4;
 constexpr uint16_t SYNC_FLAG_SHIFT_VALUE = 8;
 
