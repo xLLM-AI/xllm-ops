@@ -326,7 +326,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "onerec_final_beam_select"
         "rec_constrained_top_k"
         "laser_attention"
-        # "mega_chunk_gdn"  # A5 kernel not adapted: pto-isa MrgSort/Stride errors
+        "mega_chunk_gdn"  # A5 kernel not adapted: pto-isa MrgSort/Stride errors
         "layer_norm_fwd"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
