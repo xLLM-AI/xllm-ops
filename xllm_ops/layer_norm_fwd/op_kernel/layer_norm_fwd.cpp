@@ -179,13 +179,6 @@ __aicore__ inline float ReduceSumValueNoCopy(LocalTensor<float> scalar,
   return scalar.GetValue(0);
 }
 
-__aicore__ inline float RsqrtValue(LocalTensor<float> scalar, float value) {
-  scalar.SetValue(0, value);
-  Rsqrt(scalar, scalar, 1);
-  PipeBarrier<PIPE_V>();
-  return scalar.GetValue(0);
-}
-
 __aicore__ inline float SqrtValue(LocalTensor<float> scalar, float value) {
   scalar.SetValue(0, value);
   Sqrt(scalar, scalar, 1);
@@ -306,7 +299,62 @@ __aicore__ inline void RstdRowsN128(LocalTensor<float> rstd,
   PipeBarrier<PIPE_V>();
   Div(rstd, reduce_work, rstd, rows);
   PipeBarrier<PIPE_V>();
-  WaitVToS();
+}
+
+__aicore__ inline void MulRowsN128ByScalars(LocalTensor<float> dst,
+                                            LocalTensor<float> src,
+                                            LocalTensor<float> row_scalars,
+                                            LocalTensor<float> broadcast,
+                                            uint32_t rows) {
+  const uint32_t brcb_repeats = CeilDiv(rows, kFp32BlockElems);
+  Brcb(broadcast, row_scalars, static_cast<uint8_t>(brcb_repeats), {1, 8});
+  PipeBarrier<PIPE_V>();
+
+  BinaryRepeatParams repeat_params;
+  repeat_params.dstBlkStride = 1;
+  repeat_params.src0BlkStride = 1;
+  repeat_params.src1BlkStride = 0;
+  repeat_params.dstRepStride = kQwenGroupSize / kFp32BlockElems;
+  repeat_params.src0RepStride = kQwenGroupSize / kFp32BlockElems;
+  repeat_params.src1RepStride = 1;
+  Mul(dst, src, broadcast, kFp32RepeatElems, rows, repeat_params);
+  Mul(dst[kFp32RepeatElems], src[kFp32RepeatElems], broadcast,
+      kFp32RepeatElems, rows, repeat_params);
+  PipeBarrier<PIPE_V>();
+}
+
+__aicore__ inline void ApplySiluGate(LocalTensor<float> value,
+                                     LocalTensor<float> gate,
+                                     uint32_t count) {
+  // value * silu(gate) = (value * gate) / (1 + exp(-gate)).
+  // This form keeps the whole tile vectorized without another tile-sized UB.
+  Mul(value, value, gate, count);
+  PipeBarrier<PIPE_V>();
+  Muls(gate, gate, -1.0f, count);
+  PipeBarrier<PIPE_V>();
+  Exp(gate, gate, count);
+  PipeBarrier<PIPE_V>();
+  Adds(gate, gate, 1.0f, count);
+  PipeBarrier<PIPE_V>();
+  Div(value, value, gate, count);
+  PipeBarrier<PIPE_V>();
+}
+
+__aicore__ inline void MulRowsN128ByWeight(LocalTensor<float> dst,
+                                           LocalTensor<float> src,
+                                           LocalTensor<float> weight,
+                                           uint32_t rows) {
+  BinaryRepeatParams repeat_params;
+  repeat_params.dstBlkStride = 1;
+  repeat_params.src0BlkStride = 1;
+  repeat_params.src1BlkStride = 1;
+  repeat_params.dstRepStride = kQwenGroupSize / kFp32BlockElems;
+  repeat_params.src0RepStride = kQwenGroupSize / kFp32BlockElems;
+  repeat_params.src1RepStride = 0;
+  Mul(dst, src, weight, kFp32RepeatElems, rows, repeat_params);
+  Mul(dst[kFp32RepeatElems], src[kFp32RepeatElems],
+      weight[kFp32RepeatElems], kFp32RepeatElems, rows, repeat_params);
+  PipeBarrier<PIPE_V>();
 }
 
 template <typename T, typename TW>
@@ -482,7 +530,6 @@ class KernelFullRow {
     LocalTensor<T> y_local = yQueue_.AllocTensor<T>();
     LocalTensor<float> x_fp32 = xFp32Buf_.Get<float>();
     LocalTensor<float> tmp_fp32 = tmpFp32Buf_.Get<float>();
-    LocalTensor<float> reduce_tmp = reduceTmpBuf_.Get<float>();
     LocalTensor<float> row_reduce_tmp = rowReduceTmpBuf_.Get<float>();
     LocalTensor<float> rstd_stat = statBuf_.Get<float>();
 
@@ -492,24 +539,12 @@ class KernelFullRow {
     PipeBarrier<PIPE_V>();
     RstdRowsN128<T>(rstd_stat, tmp_fp32, row_reduce_tmp, rows, eps_);
 
-    for (uint32_t r = 0; r < rows; ++r) {
-      LocalTensor<float> row_x = x_fp32[r * kQwenGroupSize];
-      LocalTensor<float> row_tmp = tmp_fp32[r * kQwenGroupSize];
+    MulRowsN128ByScalars(x_fp32, x_fp32, rstd_stat, row_reduce_tmp, rows);
+    MulRowsN128ByWeight(x_fp32, x_fp32, weightFp32Buf_.Get<float>(), rows);
 
-      float rstd_val = rstd_stat.GetValue(r);
-      rstd_stat.SetValue(r, rstd_val);
-
-      Muls(row_x, row_x, rstd_val, kQwenGroupSize);
-      PipeBarrier<PIPE_V>();
-      Mul(row_x, row_x, weightFp32Buf_.Get<float>(), kQwenGroupSize);
-      PipeBarrier<PIPE_V>();
-
-      CastToFloat<T>(row_tmp, z_local[r * kQwenGroupSize], kQwenGroupSize);
-      PipeBarrier<PIPE_V>();
-      Silu(row_tmp, row_tmp, reduce_tmp, kQwenGroupSize);
-      Mul(row_x, row_x, row_tmp, kQwenGroupSize);
-      PipeBarrier<PIPE_V>();
-    }
+    CastToFloat<T>(tmp_fp32, z_local, elem_count);
+    PipeBarrier<PIPE_V>();
+    ApplySiluGate(x_fp32, tmp_fp32, elem_count);
 
     StoreFloatValues(rstdGm_[row_start], rstd_stat, rows);
 
@@ -595,18 +630,8 @@ class KernelFullRow {
     Mul(tmp_fp32, x_fp32, x_fp32, elem_count);
     PipeBarrier<PIPE_V>();
     RstdRowsN128<T>(rstd_stat, tmp_fp32, row_reduce_tmp, rows, eps_);
-
-    for (uint32_t r = 0; r < rows; ++r) {
-      LocalTensor<float> row_x = x_fp32[r * kQwenGroupSize];
-
-      float rstd_val = rstd_stat.GetValue(r);
-      rstd_stat.SetValue(r, rstd_val);
-
-      Muls(row_x, row_x, rstd_val, kQwenGroupSize);
-      PipeBarrier<PIPE_V>();
-      Mul(row_x, row_x, weightFp32Buf_.Get<float>(), kQwenGroupSize);
-      PipeBarrier<PIPE_V>();
-    }
+    MulRowsN128ByScalars(x_fp32, x_fp32, rstd_stat, row_reduce_tmp, rows);
+    MulRowsN128ByWeight(x_fp32, x_fp32, weightFp32Buf_.Get<float>(), rows);
 
     StoreFloatValues(rstdGm_[row_start], rstd_stat, rows);
 
