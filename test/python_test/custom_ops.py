@@ -128,6 +128,83 @@ def _mega_total_chunks(cu_seqlens):
     return sum((int(end) - int(start) + CHUNK_SIZE - 1) // CHUNK_SIZE for start, end in zip(cu, cu[1:]))
 
 
+# layer_norm_fwd (gated group (rms)norm, Mamba2-style)
+def layer_norm_fwd_npu(x, weight, bias=None, z=None, eps=1e-6, group_size=-1,
+                       norm_before_gate=True, is_rms_norm=False):
+    return custom_ops_lib.layer_norm_fwd(
+        x, weight, bias, z, eps, group_size, norm_before_gate, is_rms_norm)
+
+
+# moe_fused_add_topk (MoE fused sigmoid + group topk routing)
+def moe_fused_add_topk_npu(x, add_num, group_num, group_topk, top_n, top_k,
+                           mapping_num=None, mapping_table=None,
+                           activate_type=0, is_norm=True, scale=1.0,
+                           enable_expert_mapping=False):
+    return custom_ops_lib.moe_fused_add_topk(
+        x, add_num, mapping_num, mapping_table,
+        group_num, group_topk, top_n, top_k,
+        activate_type, is_norm, scale, enable_expert_mapping)
+
+
+# moe_fused_reducesum_div (row-wise normalization: x / sum(x, dim=-1))
+def moe_fused_reducesum_div_npu(input):
+    return custom_ops_lib.moe_fused_reducesum_div(input)
+
+
+# replace_token (replace negative token ids with last-step output tokens)
+def replace_token_npu(forked_token_ids, last_step_output_token_ids):
+    return custom_ops_lib.replace_token(forked_token_ids,
+                                        last_step_output_token_ids)
+
+
+# convert_kv_cache_format (in-place ND2NZ rewrite of k/v cache blocks)
+def convert_kv_cache_format_npu(k_cache_ptr, v_cache_ptr, kv_cache_offset,
+                                kv_seq_len, is_prefill, num_kv_heads,
+                                head_size_k, head_size_v):
+    return custom_ops_lib.convert_kv_cache_format(
+        k_cache_ptr, v_cache_ptr, kv_cache_offset, kv_seq_len,
+        is_prefill, num_kv_heads, head_size_k, head_size_v)
+
+
+# scatter_nd_update_v2 (in-place scatter: var.flat[gmIdx*L : ...] = updates[row])
+def scatter_nd_update_v2_npu(var, indices, updates, strides):
+    return custom_ops_lib.scatter_nd_update_v2(var, indices, updates, strides)
+
+
+# hc_post (per-token fused combine:
+#   y[b,hc,d] = sum_j residual[b,j,d]*comb[b,j,hc] + x[b,d]*post[b,hc])
+def hc_post_npu(x, residual, post, comb):
+    return custom_ops_lib.hc_post(x, residual, post, comb)
+
+
+def add_rms_norm_bias_npu(x1, x2, gamma, beta=None, eps=1e-6):
+    return custom_ops_lib.add_rms_norm_bias(x1, x2, gamma, beta, eps)
+
+
+# hc_pre_sinkhorn (per-token: pre/post gating + sinkhorn-normalized comb_frag)
+# mixes last dim = 2*hc_mult + hc_mult^2 ([pre | post | comb]).
+# returns (y[bs,d] bf16, post[bs,hc_mult] fp32, comb_frag[bs,hc_mult,hc_mult] fp32)
+def hc_pre_sinkhorn_npu(mixes, rsqrt, hc_scale, hc_base, x,
+                        hc_mult=4, hc_sinkhorn_iters=20, hc_eps=1e-6):
+    return custom_ops_lib.hc_pre_sinkhorn(
+        mixes, rsqrt, hc_scale, hc_base, x,
+        hc_mult, hc_sinkhorn_iters, hc_eps)
+
+
+# moe_init_routing_custom
+# row_idx_type: GATHER=0 / SCATTER=1
+# expert_tokens_num_type: CUMSUM=0 / COUNT=1 / KEY_VALUE=2
+# drop_pad_mode: DROPLESS=0 / DROP_PAD=1
+# quant_mode: UNQUANT=-1 / DYNAMIC_QUANT=1
+def moe_init_routing_custom_npu(x, expert_idx, active_num=-1, expert_num=8,
+                                drop_pad_mode=0, expert_tokens_num_type=1,
+                                expert_tokens_num_flag=True, quant_mode=-1,
+                                row_idx_type=0):
+    return custom_ops_lib.moe_init_routing_custom(
+        x, expert_idx, active_num, expert_num, drop_pad_mode,
+        expert_tokens_num_type, expert_tokens_num_flag, quant_mode, row_idx_type)
+
+
 # mega_chunk_gdn
 def mega_chunk_gdn_npu(q, k, v, g, beta, scale=None, initial_state=None,
                        output_final_state=False, cu_seqlens=None):
@@ -192,3 +269,40 @@ def mega_chunk_gdn_npu(q, k, v, g, beta, scale=None, initial_state=None,
         h.to(k_dtype),
         v_new.to(v_dtype),
     )
+
+
+# pp_matmul_opt: c = a @ b^T
+# a:(M,K), b:(N,K) -> c:(M,N), dtype bf16/fp16.
+# constraints: K % 256 == 0, N % 256 == 0, M <= 24.
+def pp_matmul_opt_npu(a, b):
+    return custom_ops_lib.pp_matmul_opt(a, b)
+
+
+# moe_grouped_matmul: grouped matmul, no quantization.
+# x:(M,K) ND, weight:(G,K,N) ND ((G,N,K) when transpose_weight),
+# group_list:(G,2) int32/int64 key-value [group_idx, count], y:(M,N).
+def moe_grouped_matmul_npu(x, weight, group_list, transpose_weight=False):
+    return custom_ops_lib.moe_grouped_matmul(x, weight, group_list, transpose_weight)
+
+
+# index_group_matmul: int8 grouped matmul + dequant.
+# a:(M,K) int8, b:(G,K,N) int8, scale:(G,N) bf16, per_token_scale:(M,) float,
+# group_list:(G,) int64 cumulative offset. Output c:(M,N) bf16.
+def index_group_matmul_npu(a, b, scale, per_token_scale, group_list):
+    return custom_ops_lib.index_group_matmul(a, b, scale, per_token_scale, group_list)
+
+
+# dequant_swiglu_quant: swiglu + dynamic per-token quant.
+# x:(rows,H) bf16/fp16 (simplest path, no bias/scale). Output y:(rows,H/2) int8, scale:(rows,) fp32.
+# when activate_left=False, gate=x[:,H/2:], up=x[:,:H/2].
+def dequant_swiglu_quant_npu(x, activate_left=False, quant_mode="dynamic"):
+    return custom_ops_lib.dequant_swiglu_quant(x, activate_left, quant_mode)
+
+
+# moe_grouped_matmul_swiglu_quant: int8 grouped matmul + dequant + swiglu + dynamic quant.
+# x:(M,K) int8, weight:(G,K,2N) int8 (passed as ND, framework converts to NZ), weight_scale:(G,2N) float,
+# x_scale:(M,) float, group_list:(G,) int64 cumulative offset.
+# Output y:(M,N) int8, y_scale:(M,) fp32. N=2N/2.
+def moe_grouped_matmul_swiglu_quant_npu(x, weight, weight_scale, x_scale, group_list):
+    return custom_ops_lib.moe_grouped_matmul_swiglu_quant(
+        x, weight, weight_scale, x_scale, group_list)
