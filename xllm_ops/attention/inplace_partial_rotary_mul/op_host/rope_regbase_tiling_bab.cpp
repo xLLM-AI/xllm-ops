@@ -173,4 +173,4 @@ uint64_t RopeRegBaseTilingClassBAB::GetTilingKey() const
 }
 
 // REGISTER_OPS_TILING_TEMPLATE(InplacePartialRotaryMul, RopeRegBaseTilingClassBAB, ROPE_BAB_TILING_PRIORITY);
-} // namespace optiling
+}  // namespace optiling

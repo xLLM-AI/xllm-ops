@@ -242,32 +242,32 @@ public:
     ge::graphStatus GetPlatformInfo();
     ge::graphStatus GetShapeAttrsInfo();
     ge::graphStatus JudgeSliceInfo();
-    virtual ge::graphStatus GetWorkspaceSize() 
+    virtual ge::graphStatus GetWorkspaceSize()
     {
         return ge::GRAPH_SUCCESS;
     }
 
-    virtual ge::graphStatus DoLibApiTiling() 
+    virtual ge::graphStatus DoLibApiTiling()
     {
         return ge::GRAPH_SUCCESS;
     }
 
-    virtual ge::graphStatus DoOpTiling() 
+    virtual ge::graphStatus DoOpTiling()
     {
         return ge::GRAPH_SUCCESS;
     }
 
-    virtual uint64_t GetTilingKey() const 
+    virtual uint64_t GetTilingKey() const
     {
         return 0;
     }
 
-    virtual ge::graphStatus PostTiling() 
+    virtual ge::graphStatus PostTiling()
     {
         return ge::GRAPH_SUCCESS;
     }
 
-    virtual bool IsCapable() 
+    virtual bool IsCapable()
     {
         return true;
     }
@@ -276,7 +276,7 @@ public:
     {
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(context_->GetPlatformInfo());
         auto socVersion = ascendcPlatform.GetSocVersion();
-        return socVersion == platform_ascendc::SocVersion::ASCEND910_95;
+        return socVersion == platform_ascendc::SocVersion::ASCEND950;
     }
 
     ge::graphStatus DoTiling()
@@ -320,7 +320,7 @@ public:
     }
 
 protected:
-    platform_ascendc::SocVersion socVersion_ = platform_ascendc::SocVersion::ASCEND910_95;
+    platform_ascendc::SocVersion socVersion_ = platform_ascendc::SocVersion::ASCEND950;
     int64_t b_{0};
     int64_t s_{0};
     int64_t n_{0};
@@ -489,4 +489,3 @@ private:
 
 } // namespace optiling
 #endif // OPS_BUILD_IN_OP_TILING_RUNTIME_ROTARY_POSITION_EMBEDDING_H
-

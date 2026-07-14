@@ -79,10 +79,8 @@ public:
 protected:
     bool IsCapable() override
     {
-        if (socVersion != platform_ascendc::SocVersion::ASCEND910_95) {
-            return false;
-        }
-        return true;
+        // arch35 regbase tiling disabled: fallback to base tiling (moe_gating_top_k.cpp) on all soc including ASCEND950
+        return false;
     }
 
     ge::graphStatus GetPlatformInfo() override;

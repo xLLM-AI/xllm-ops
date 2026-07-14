@@ -108,7 +108,11 @@ detect_soc_version() {
     fi
 
     local ops
-    ops=$(python3 -c "import torch; import torch_npu; soc = torch_npu._C._npu_get_soc_version(); ops = 'ascend910b' if soc <= 250 else 'ascend910_93'; print(ops)")
+    # SOC version mapping:
+    #   soc <= 250            -> ascend910b   (A2 series)
+    #   soc == 260            -> ascend950    (A5 series, e.g. Ascend910_95)
+    #   otherwise (> 250)     -> ascend910_93 (A3 series, Ascend910C)
+    ops=$(python3 -c "import torch; import torch_npu; soc = torch_npu._C._npu_get_soc_version(); ops = 'ascend910b' if soc <= 250 else ('ascend950' if soc == 260 else 'ascend910_93'); print(ops)")
     echo ">>> Auto-detected SOC version: ${ops}"
     export SOC_VERSION="${ops}"
     DETECTED_SOC_VERSION="${ops}"

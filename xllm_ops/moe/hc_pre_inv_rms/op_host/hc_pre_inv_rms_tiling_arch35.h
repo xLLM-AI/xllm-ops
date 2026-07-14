@@ -54,7 +54,7 @@ public:
 
     bool IsCapable()
     {
-        if (socVersion_ != platform_ascendc::SocVersion::ASCEND910_95) {
+        if (socVersion_ != platform_ascendc::SocVersion::ASCEND950) {
             return false;
         }
         return true;
@@ -84,7 +84,7 @@ private:
 
     const gert::Shape *xShape_ = nullptr;
     const gert::Shape *yShape_ = nullptr;
-    
+
     float eps_ = 1e-6f;
     int64_t A_ = 0;
     int64_t R_ = 0;
@@ -117,7 +117,7 @@ ge::graphStatus HcPreInvRmsTilingRegbase::CheckInputShape()
         A_ = xShape_->GetDim(DIM_0);
         R_ = xShape_->GetDim(DIM_1) * xShape_->GetDim(DIM_2);
     }
-    
+
     invRmsTilingData_.set_A(A_);
     invRmsTilingData_.set_R(R_);
 
@@ -204,7 +204,7 @@ ge::graphStatus HcPreInvRmsTilingRegbase::GetPlatformInfo()
 ge::graphStatus HcPreInvRmsTilingRegbase::CheckOutShape()
 {
     OPS_ERR_IF((yShape_->GetDim(0) != xShape_->GetDim(0)),
-                OPS_LOG_E(context_, "y out dim[0] %ld not euqal x dim[0] %ld, please check.", yShape_->GetDim(0),
+                OPS_LOG_E(context_, "y out dim[0] %ld not equal x dim[0] %ld, please check.", yShape_->GetDim(0),
                      xShape_->GetDim(0)),
                 return ge::GRAPH_FAILED);
 

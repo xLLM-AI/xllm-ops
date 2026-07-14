@@ -48,7 +48,7 @@ static ge::graphStatus InferShape4HcPreInvRms(gert::InferShapeContext* context)
         yShape->SetDim(DIM_0, xShape->GetDim(DIM_0));
         yShape->SetDim(DIM_1, 1);
     }
-    
+
     OPS_LOG_I(context->GetNodeName(), "End to do InferShape4HcPreInvRms");
     return ge::GRAPH_SUCCESS;
 }

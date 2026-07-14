@@ -57,13 +57,7 @@ public:
         this->Attr("eps").AttrType(OPTIONAL).Float(1e-20f);
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");
-
-        OpAICoreConfig regbaseCfg;
-        regbaseCfg.DynamicCompileStaticFlag(true)
-            .DynamicRankSupportFlag(true)
-            .DynamicShapeSupportFlag(true)
-            .ExtendCfgInfo("opFile.value", "moe_gating_top_k_apt");
-        this->AICore().AddConfig("ascend910_95", regbaseCfg);
+        this->AICore().AddConfig("ascend950");
     }
 };
 

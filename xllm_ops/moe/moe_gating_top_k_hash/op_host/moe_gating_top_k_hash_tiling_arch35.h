@@ -81,7 +81,7 @@ public:
 
     bool IsCapable()
     {
-        if (socVersion_ != platform_ascendc::SocVersion::ASCEND910_95) {
+        if (socVersion_ != platform_ascendc::SocVersion::ASCEND950) {
             return false;
         }
         return true;
@@ -446,11 +446,11 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::CheckOutShape()
     }
 
     OPS_ERR_IF((yShape_->GetDim(0) != xShape_->GetDim(0)),
-                OPS_LOG_E(context_, "y out dim[0] %ld not euqal x dim[0] %ld, please check.", yShape_->GetDim(0),
+                OPS_LOG_E(context_, "y out dim[0] %ld not equal x dim[0] %ld, please check.", yShape_->GetDim(0),
                      xShape_->GetDim(0)),
                 return ge::GRAPH_FAILED);
     OPS_ERR_IF((expertIdxShape_->GetDim(0) != xShape_->GetDim(0)),
-                OPS_LOG_E(context_, "expertId out dim[0] %ld not euqal x dim[0] %ld, please check.",
+                OPS_LOG_E(context_, "expertId out dim[0] %ld not equal x dim[0] %ld, please check.",
                      expertIdxShape_->GetDim(0), xShape_->GetDim(0)),
                 return ge::GRAPH_FAILED);
     if (outFlag_ && outShape_ != nullptr) {
@@ -461,10 +461,10 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::CheckOutShape()
     }
 
     OPS_ERR_IF((yShape_->GetDim(1) != k_),
-                OPS_LOG_E(context_, "y dim[1] %ld not euqal k %ld, please check.", yShape_->GetDim(1), k_),
+                OPS_LOG_E(context_, "y dim[1] %ld not equal k %ld, please check.", yShape_->GetDim(1), k_),
                 return ge::GRAPH_FAILED);
     OPS_ERR_IF((expertIdxShape_->GetDim(1) != k_),
-                OPS_LOG_E(context_, "expertId dim[1] %ld not euqal k %ld, please check.", expertIdxShape_->GetDim(1), k_),
+                OPS_LOG_E(context_, "expertId dim[1] %ld not equal k %ld, please check.", expertIdxShape_->GetDim(1), k_),
                 return ge::GRAPH_FAILED);
     if (outFlag_ && outShape_ != nullptr) {
         OPS_ERR_IF((outShape_->GetDim(1) != xShape_->GetDim(1)),

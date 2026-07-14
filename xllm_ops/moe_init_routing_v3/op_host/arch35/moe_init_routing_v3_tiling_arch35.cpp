@@ -134,7 +134,7 @@ protected:
     bool IsCapable() override
     {
         OP_LOGD(context_, "Entered MoeInitRoutingV3Arch35TilingClass::IsCapable()");
-        return Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_);
+        return false;
     }
     // 4、计算数据切分TilingData
     ge::graphStatus DoOpTiling() override;
