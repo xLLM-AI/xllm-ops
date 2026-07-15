@@ -23,7 +23,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, half, float> {
                          uint32_t dstStride)
     {
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
-        // A5 架构：使用 FixpipeParamsArch3510<ROW_MAJOR>，F322F16 模式不需要 cbufWorkspace
+        // A5 architecture: use FixpipeParamsArch3510<ROW_MAJOR>, F322F16 mode does not require cbufWorkspace
         AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::ROW_MAJOR> intriParams(
             nTileActual,  // nSize
             mTileActual,  // mSize
@@ -32,7 +32,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, half, float> {
         intriParams.quantPre = QuantMode_t::F322F16;
         AscendC::Fixpipe<half, float, AscendC::CFG_ROW_MAJOR>(gmTensor, l0cTensor, intriParams);
 #elif defined(__DAV_C220_CUBE__)
-        // V220 架构 (A2/A3)：使用 FixpipeParamsV220
+        // V220 architecture (A2/A3): use FixpipeParamsV220
         auto intriParams = AscendC::FixpipeParamsV220(nTileActual, // nSize
                                                       mTileActual, // mSize
                                                       srcStride,   // srcStride
@@ -42,7 +42,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, half, float> {
         intriParams.quantPre = QuantMode_t::F322F16;
         AscendC::Fixpipe<half, float, AscendC::CFG_ROW_MAJOR>(gmTensor, l0cTensor, intriParams);
 #else
-        // 其他架构：使用 FixpipeParams
+        // Other architectures: use FixpipeParams
         AscendC::FixpipeParams<float> intriParams(
             (nTileActual + BLOCK_NUM - 1) / AscendC::BLOCK_CUBE,
             static_cast<uint16_t>(mTileActual * BLOCK_NUM * sizeof(float) / BLOCK_SIZE_INT8),
@@ -64,22 +64,22 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, half, int32_t> {
                          uint32_t srcStride,
                          uint32_t dstStride)
     {
-        // VDEQF16 模式需要 cbufWorkspace，但 L0C→GM 通路不支持该模式
-        // 对于 A5 和 V220 架构，使用 scalar 量化 DEQF16 代替
+        // VDEQF16 mode requires cbufWorkspace, but L0C->GM path does not support this mode
+        // For A5 and V220 architectures, use scalar quantization DEQF16 instead
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::ROW_MAJOR> intriParams(
             nTileActual,  // nSize
             mTileActual,  // mSize
             srcStride,    // srcStride
             dstStride);   // dstStride
-        // A5 L0C→GM 通路不支持 VDEQF16（Vector Quant），使用 DEQF16（Scalar Quant）代替
-        // 注意：deqScalar 需要设置量化参数
+        // A5 L0C->GM path does not support VDEQF16 (Vector Quant), use DEQF16 (Scalar Quant) instead
+        // Note: deqScalar needs to set quantization parameters
         intriParams.quantPre = QuantMode_t::DEQF16;
-        // TODO: 设置 deqScalar 量化参数
+        // TODO: set deqScalar quantization parameters
         // intriParams.deqScalar = scaleValue;
         AscendC::Fixpipe<half, int32_t, AscendC::CFG_ROW_MAJOR>(gmTensor, l0cTensor, intriParams);
 #elif defined(__DAV_C220_CUBE__)
-        // V220 架构 (A2/A3)：使用 FixpipeParamsV220
+        // V220 architecture (A2/A3): use FixpipeParamsV220
         auto intriParams = AscendC::FixpipeParamsV220(nTileActual, // nSize
                                                       mTileActual, // mSize
                                                       srcStride,   // srcStride
@@ -89,7 +89,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, half, int32_t> {
         intriParams.quantPre = QuantMode_t::VDEQF16;
         AscendC::Fixpipe<half, int32_t, AscendC::CFG_ROW_MAJOR>(gmTensor, l0cTensor, intriParams);
 #else
-        // 其他架构：暂不支持 VDEQF16 模式
+        // Other architectures: VDEQF16 mode not supported yet
         AscendC::FixpipeParams<int32_t> intriParams(
             (nTileActual + BLOCK_NUM - 1) / AscendC::BLOCK_CUBE,
             static_cast<uint16_t>(mTileActual * BLOCK_NUM * sizeof(float) / BLOCK_SIZE_INT8),
@@ -112,7 +112,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, __bf16, float> {
                          uint32_t dstStride)
     {
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
-        // A5 架构：使用 FixpipeParamsArch3510<ROW_MAJOR>，F322BF16 模式
+        // A5 architecture: use FixpipeParamsArch3510<ROW_MAJOR>, F322BF16 mode
         AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::ROW_MAJOR> intriParams(
             nTileActual,  // nSize
             mTileActual,  // mSize
@@ -121,7 +121,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, __bf16, float> {
         intriParams.quantPre = QuantMode_t::F322BF16;
         AscendC::Fixpipe<__bf16, float, AscendC::CFG_ROW_MAJOR>(gmTensor, l0cTensor, intriParams);
 #elif defined(__DAV_C220_CUBE__)
-        // V220 架构 (A2/A3)：使用 FixpipeParamsV220
+        // V220 architecture (A2/A3): use FixpipeParamsV220
         auto intriParams = AscendC::FixpipeParamsV220(nTileActual, // nSize
                                                       mTileActual, // mSize
                                                       srcStride,   // srcStride
@@ -131,7 +131,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, __bf16, float> {
         intriParams.quantPre = QuantMode_t::F322BF16;
         AscendC::Fixpipe<__bf16, float, AscendC::CFG_ROW_MAJOR>(gmTensor, l0cTensor, intriParams);
 #else
-        // 其他架构：使用 FixpipeParams
+        // Other architectures: use FixpipeParams
         AscendC::FixpipeParams<float> intriParams(
             (nTileActual + BLOCK_NUM - 1) / AscendC::BLOCK_CUBE,
             static_cast<uint16_t>(mTileActual * BLOCK_NUM * sizeof(float) / BLOCK_SIZE_INT8),
@@ -155,7 +155,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, float, float> {
                          uint32_t dstStride)
     {
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
-        // A5 架构：使用 FixpipeParamsArch3510<ROW_MAJOR>，NoQuant 模式
+        // A5 architecture: use FixpipeParamsArch3510<ROW_MAJOR>, NoQuant mode
         AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::ROW_MAJOR> intriParams(
             nTileActual,  // nSize
             mTileActual,  // mSize
@@ -164,7 +164,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, float, float> {
         intriParams.quantPre = QuantMode_t::NoQuant;
         AscendC::Fixpipe<float, float, AscendC::CFG_ROW_MAJOR>(gmTensor, l0cTensor, intriParams);
 #elif defined(__DAV_C220_CUBE__)
-        // V220 架构 (A2/A3)：使用 FixpipeParamsV220
+        // V220 architecture (A2/A3): use FixpipeParamsV220
         auto intriParams = AscendC::FixpipeParamsV220(nTileActual, // nSize
                                                       mTileActual, // mSize
                                                       srcStride,   // srcStride
@@ -174,7 +174,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, float, float> {
         intriParams.quantPre = QuantMode_t::NoQuant;
         AscendC::Fixpipe<float, float, AscendC::CFG_ROW_MAJOR>(gmTensor, l0cTensor, intriParams);
 #else
-        // 其他架构：使用 FixpipeParams
+        // Other architectures: use FixpipeParams
         AscendC::FixpipeParams<float> intriParams(
             (nTileActual + BLOCK_NUM - 1) / AscendC::BLOCK_CUBE,
             static_cast<uint16_t>(mTileActual * BLOCK_NUM * sizeof(float) / BLOCK_SIZE_INT8),
@@ -197,16 +197,16 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::NZ, half, float> {
                          uint32_t dstStride)
     {
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
-        // A5 架构：使用 FixpipeParamsArch3510<NZ>，NZ2NZ 模式
+        // A5 architecture: use FixpipeParamsArch3510<NZ>, NZ2NZ mode
         AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::NZ> intriParams(
             nTileActual,  // nSize
             mTileActual,  // mSize
             srcStride,    // srcStride
-            dstStride - (nTileActual * sizeof(half) / sizeof(float)));  // dstStride 单位为 element
+            dstStride - (nTileActual * sizeof(half) / sizeof(float)));  // dstStride unit is element
         intriParams.quantPre = QuantMode_t::F322F16;
         AscendC::Fixpipe<half, float, AscendC::CFG_NZ>(gmTensor, l0cTensor, intriParams);
 #elif defined(__DAV_C220_CUBE__)
-        // V220 架构 (A2/A3)：使用 FixpipeParamsV220
+        // V220 architecture (A2/A3): use FixpipeParamsV220
         auto intriParams = AscendC::FixpipeParamsV220(nTileActual, // nSize
                                                       mTileActual, // mSize
                                                       srcStride,   // srcStride
@@ -216,7 +216,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::NZ, half, float> {
         intriParams.quantPre = QuantMode_t::F322F16;
         AscendC::Fixpipe<half, float, AscendC::CFG_NZ>(gmTensor, l0cTensor, intriParams);
 #else
-        // 其他架构：使用 FixpipeParams
+        // Other architectures: use FixpipeParams
         AscendC::FixpipeParams<float> intriParams(
             (nTileActual + BLOCK_NUM - 1) / AscendC::BLOCK_CUBE,
             static_cast<uint16_t>(mTileActual * BLOCK_NUM * sizeof(float) / BLOCK_SIZE_INT8),
@@ -238,7 +238,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, int32_t, int32_t> {
                          uint32_t dstStride)
     {
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
-        // A5 架构：使用 FixpipeParamsArch3510<ROW_MAJOR>，NoQuant 模式
+        // A5 architecture: use FixpipeParamsArch3510<ROW_MAJOR>, NoQuant mode
         AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::ROW_MAJOR> intriParams(
             nTileActual,  // nSize
             mTileActual,  // mSize
@@ -247,7 +247,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, int32_t, int32_t> {
         intriParams.quantPre = QuantMode_t::NoQuant;
         AscendC::Fixpipe<int32_t, int32_t, AscendC::CFG_ROW_MAJOR>(gmTensor, l0cTensor, intriParams);
 #elif defined(__DAV_C220_CUBE__)
-        // V220 架构 (A2/A3)：使用 FixpipeParamsV220
+        // V220 architecture (A2/A3): use FixpipeParamsV220
         auto intriParams = AscendC::FixpipeParamsV220(nTileActual, // nSize
                                                       mTileActual, // mSize
                                                       srcStride,   // srcStride
@@ -257,7 +257,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, int32_t, int32_t> {
         intriParams.quantPre = QuantMode_t::NoQuant;
         AscendC::Fixpipe<int32_t, int32_t, AscendC::CFG_ROW_MAJOR>(gmTensor, l0cTensor, intriParams);
 #else
-        // 其他架构：使用 FixpipeParams
+        // Other architectures: use FixpipeParams
         AscendC::FixpipeParams<int32_t> intriParams(
             (nTileActual + BLOCK_NUM - 1) / AscendC::BLOCK_CUBE,
             static_cast<uint16_t>(mTileActual * BLOCK_NUM * sizeof(int32_t) / BLOCK_SIZE_INT8),
