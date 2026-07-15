@@ -158,9 +158,21 @@ class RecConstrainedTopKKernel {
 
   __aicore__ inline float ExpScalar(float value) {
     AscendC::LocalTensor<float> math_tensor = math_buf_.Get<float>();
+    // Scalar SetValue writes to UBUF. Before the vector Exp reads it, insert an
+    // S_V sync so the vector unit sees the up-to-date data (otherwise it may
+    // read stale/uninitialized UBUF and return 0 on some SoC, e.g. ascend950).
     math_tensor.SetValue(0, value);
+    event_t ev_s_v_e = static_cast<event_t>(
+        GetTPipePtr()->FetchEventID(AscendC::HardEvent::S_V));
+    AscendC::SetFlag<AscendC::HardEvent::S_V>(ev_s_v_e);
+    AscendC::WaitFlag<AscendC::HardEvent::S_V>(ev_s_v_e);
     AscendC::Exp(math_tensor, math_tensor, 1);
-    AscendC::PipeBarrier<PIPE_V>();
+    // Vector Exp wrote to UBUF. Before the scalar GetValue reads it, insert a
+    // V_S sync so the scalar unit observes the vector result.
+    event_t ev_v_s_e = static_cast<event_t>(
+        GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
+    AscendC::SetFlag<AscendC::HardEvent::V_S>(ev_v_s_e);
+    AscendC::WaitFlag<AscendC::HardEvent::V_S>(ev_v_s_e);
     return math_tensor.GetValue(0);
   }
 
@@ -170,8 +182,19 @@ class RecConstrainedTopKKernel {
     if (exp_count <= 0) {
       return 0.0f;
     }
+    // exp_values were filled via scalar SetValue in UBUF. Add an S_V sync so the
+    // vector Exp reads the freshly written data instead of stale UBUF.
+    event_t ev_s_v_f = static_cast<event_t>(
+        GetTPipePtr()->FetchEventID(AscendC::HardEvent::S_V));
+    AscendC::SetFlag<AscendC::HardEvent::S_V>(ev_s_v_f);
+    AscendC::WaitFlag<AscendC::HardEvent::S_V>(ev_s_v_f);
     AscendC::Exp(exp_values, exp_values, exp_count);
-    AscendC::PipeBarrier<PIPE_V>();
+    // Vector Exp finished writing UBUF. Add a V_S sync before the scalar loop
+    // below reads the results via GetValue.
+    event_t ev_v_s_f = static_cast<event_t>(
+        GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
+    AscendC::SetFlag<AscendC::HardEvent::V_S>(ev_v_s_f);
+    AscendC::WaitFlag<AscendC::HardEvent::V_S>(ev_v_s_f);
     float sum_exp = 0.0f;
     for (int32_t idx = 0; idx < exp_count; ++idx) {
       sum_exp += exp_values.GetValue(idx);
@@ -181,9 +204,19 @@ class RecConstrainedTopKKernel {
 
   __aicore__ inline float LnScalar(float value) {
     AscendC::LocalTensor<float> math_tensor = math_buf_.Get<float>();
+    // Same scalar-write/vector-read hazard as ExpScalar: add an S_V sync before
+    // the vector Ln so it reads the value just written by SetValue.
     math_tensor.SetValue(0, value);
+    event_t ev_s_v_l = static_cast<event_t>(
+        GetTPipePtr()->FetchEventID(AscendC::HardEvent::S_V));
+    AscendC::SetFlag<AscendC::HardEvent::S_V>(ev_s_v_l);
+    AscendC::WaitFlag<AscendC::HardEvent::S_V>(ev_s_v_l);
     AscendC::Ln(math_tensor, math_tensor, 1);
-    AscendC::PipeBarrier<PIPE_V>();
+    // Add a V_S sync so the scalar GetValue observes the vector Ln result.
+    event_t ev_v_s_l = static_cast<event_t>(
+        GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
+    AscendC::SetFlag<AscendC::HardEvent::V_S>(ev_v_s_l);
+    AscendC::WaitFlag<AscendC::HardEvent::V_S>(ev_v_s_l);
     return math_tensor.GetValue(0);
   }
 
