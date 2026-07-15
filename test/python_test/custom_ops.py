@@ -205,6 +205,59 @@ def moe_init_routing_custom_npu(x, expert_idx, active_num=-1, expert_num=8,
         expert_tokens_num_type, expert_tokens_num_flag, quant_mode, row_idx_type)
 
 
+# moe_init_routing_v3
+# Same aclnn signature as moe_init_routing_custom (only the backend op differs).
+# row_idx_type: GATHER=0 / SCATTER=1
+# expert_tokens_num_type: CUMSUM=0 / COUNT=1 / KEY_VALUE=2
+# drop_pad_mode: DROPLESS=0 / DROP_PAD=1
+# quant_mode: UNQUANT=-1 / DYNAMIC_QUANT=1
+def moe_init_routing_v3_npu(x, expert_idx, active_num=-1, expert_num=8,
+                            drop_pad_mode=0, expert_tokens_num_type=1,
+                            expert_tokens_num_flag=True, quant_mode=-1,
+                            row_idx_type=0):
+    return custom_ops_lib.moe_init_routing_v3(
+        x, expert_idx, active_num, expert_num, drop_pad_mode,
+        expert_tokens_num_type, expert_tokens_num_flag, quant_mode, row_idx_type)
+
+
+# moe_gating_top_k
+# norm_type: SOFTMAX=0 / SIGMOID=1 / SOFTPLUS=2
+# renorm: only 0 (RENORM_NO) supported
+# out_flag=True to also output the full-expert xnorm (rows, expert_num) fp32.
+# Returns (y, expert_idx, out): y=(rows,k), expert_idx=(rows,k) int32,
+# out=(rows,expert_num) fp32.
+def moe_gating_top_k_npu(x, k, bias=None, k_group=1, group_count=1,
+                         group_select_mode=0, renorm=0, norm_type=0,
+                         out_flag=False, routed_scaling_factor=1.0,
+                         eps=1e-20):
+    return custom_ops_lib.moe_gating_top_k(
+        x, bias, k, k_group, group_count, group_select_mode, renorm,
+        norm_type, out_flag, routed_scaling_factor, eps)
+
+
+# moe_gating_top_k_hash
+# Superset of moe_gating_top_k. When both input_ids and tid2eid are provided
+# (hashFlag=1), expert_idx is looked up from tid2eid[input_ids[row]*k : +k]
+# instead of topk. input_ids/tid2eid should be int32 to hit the without_group
+# <int32,int32> branch.
+def moe_gating_top_k_hash_npu(x, k, bias=None, input_ids=None, tid2eid=None,
+                              k_group=1, group_count=1, group_select_mode=0,
+                              renorm=0, norm_type=0, out_flag=False,
+                              routed_scaling_factor=1.0, eps=1e-20):
+    return custom_ops_lib.moe_gating_top_k_hash(
+        x, bias, input_ids, tid2eid, k, k_group, group_count,
+        group_select_mode, renorm, norm_type, out_flag,
+        routed_scaling_factor, eps)
+
+
+# hc_pre_inv_rms
+# y = 1/sqrt(mean(x^2 over last two dims) + eps), output always fp32.
+# x: (b,s,hc,d) -> y: (b,s,1)  or  x: (t,hc,d) -> y: (t,1).
+# NOTE: large_d kernel path is only enabled when R = hc*d == 28672.
+def hc_pre_inv_rms_npu(x, epsilon=1e-6):
+    return custom_ops_lib.hc_pre_inv_rms(x, epsilon)
+
+
 # mega_chunk_gdn
 def mega_chunk_gdn_npu(q, k, v, g, beta, scale=None, initial_state=None,
                        output_final_state=False, cu_seqlens=None):
@@ -306,3 +359,31 @@ def dequant_swiglu_quant_npu(x, activate_left=False, quant_mode="dynamic"):
 def moe_grouped_matmul_swiglu_quant_npu(x, weight, weight_scale, x_scale, group_list):
     return custom_ops_lib.moe_grouped_matmul_swiglu_quant(
         x, weight, weight_scale, x_scale, group_list)
+
+
+# grouped_matmul_swiglu_quant_v2: int8 pertoken chain identical to v1. The v2
+# aclnn WeightNz entry only accepts MXFP8/MXFP4 (E4M3/E5M2 + E8M0 scale) on
+# CANN 8.5.0, incompatible with our int8 golden. The C++ impl therefore routes
+# to the v1 aclnnGroupedMatmulSwigluQuantWeightNZ (true int8 A8W8 path):
+#   x=int8 (M,K) ND, weight=int8 (K,2N) NZ single tensor, weight_scale float32
+#   (2N,), x_scale float32 (M,), group_list int64 CUMULATIVE offsets.
+# Wrapper takes packed weight (G,K,2N) ND / weight_scale (G,2N) and a per-group
+# COUNT group_list (groupListType=0); it casts weight to NZ and converts the
+# count list to the cumulative form the v1 kernel expects.
+def grouped_matmul_swiglu_quant_v2_npu(x, weight, weight_scale, x_scale,
+                                    group_list, group_list_type=0):
+    import torch
+    import torch_npu
+    torch_npu.npu.config.allow_internal_format = True
+    E, K, N2 = weight.shape
+    # v1 WeightNZ expects int8 weight in FRACTAL_NZ (single 3D tensor per the
+    # packed (E,K,2N) layout). Cast the whole tensor once; op keeps NZ storage.
+    weight_nz = torch_npu.npu_format_cast(weight.clone().contiguous(), 29)
+    weight_scale = weight_scale.contiguous()  # (E, 2N) float32 ND
+    # group_list_type 0 = per-group count -> convert to cumulative offsets that
+    # the v1 kernel consumes.
+    if group_list_type == 0:
+        group_list = torch.cumsum(group_list.to(torch.int64), dim=0)
+    return custom_ops_lib.grouped_matmul_swiglu_quant_v2(
+        x, weight_nz, weight_scale, x_scale, group_list,
+        group_list_type)
