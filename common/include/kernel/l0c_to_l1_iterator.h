@@ -36,6 +36,19 @@ struct l0c_to_l1<ArchTag, DataFormatT::ZN, half, int32_t> {
     {
         constexpr uint32_t BLOCK_NUM = 16;
         constexpr uint32_t BLOCK_SIZE = 32;
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        // A5 架构：使用 FixpipeParamsArch3510
+        // VDEQF16 是 Vector Quant 模式，需要传入 cbufWorkspace (deqTensor)
+        AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::NZ> intriParams(
+            (nTileActual + BLOCK_NUM - 1) / AscendC::BLOCK_CUBE,
+            static_cast<uint16_t>(mTileActual * BLOCK_NUM * sizeof(float) / BLOCK_SIZE),
+            0,
+            mTileCeil - static_cast<uint16_t>(mTileActual * BLOCK_NUM * sizeof(float) / BLOCK_SIZE) *
+                            sizeof(ElementOut) / sizeof(ElementIn));
+        intriParams.quantPre = QuantMode_t::VDEQF16;
+        AscendC::Fixpipe<half, int32_t, AscendC::CFG_NZ>(l1Tensor, l0cTensor, deqTensor, intriParams);
+#else
+        // 其他架构：保持原代码
         AscendC::FixpipeParams<ElementIn> intriParams(
             (nTileActual + BLOCK_NUM - 1) / AscendC::BLOCK_CUBE,
             static_cast<uint16_t>(mTileActual * BLOCK_NUM * sizeof(float) / BLOCK_SIZE),
@@ -45,6 +58,7 @@ struct l0c_to_l1<ArchTag, DataFormatT::ZN, half, int32_t> {
         intriParams.nz2ndParams = {false, 1, 0, 0, static_cast<uint16_t>(nTileActual)};
         intriParams.quantParams = {QuantMode_t::VDEQF16};
         AscendC::Fixpipe(l1Tensor, l0cTensor, deqTensor, intriParams);
+#endif
     };
 };
 
