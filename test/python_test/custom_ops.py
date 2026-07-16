@@ -258,6 +258,95 @@ def hc_pre_inv_rms_npu(x, epsilon=1e-6):
     return custom_ops_lib.hc_pre_inv_rms(x, epsilon)
 
 
+# laser_attention: standard flash attention (BNSD layout), used by wan2.2.
+# query/key/value: [B, N, S, D] fp16/bf16. Returns (softmax_log_max_sum, attention_out) in fp32.
+def laser_attention_npu(query, key, value, scale_value, head_num,
+                        input_layout="BNSD", atten_mask=None, alibi_mask=None,
+                        drop_mask=None, keep_prob=1.0, pre_tokens=2147483647,
+                        next_tokens=1, is_high_precision=True):
+    return custom_ops_lib.laser_attention(
+        query, key, value, atten_mask, alibi_mask, drop_mask,
+        scale_value, head_num, input_layout, keep_prob, pre_tokens,
+        next_tokens, is_high_precision,
+    )
+
+
+# x_flash_attention_infer: paged-KV flash-decoding attention (TND layout, causal mask).
+# extra_tiling encodes per-core KV-split task assignment (SplitKvExtraInfo).
+# The host tiling does NOT fill this; we build a single-core layout: core 0 handles
+# the whole (batch x kvHead) range without KV-split (isSplitKV=false -> writes attn_out
+# directly), all other cores are skipped (startBIdx = 0xFFFFFFFF).
+# Layout (matches op_kernel SplitKvExtraInfo, ALL sizes fixed by struct):
+#   CoreNode  = 6*uint32 + 2*uint64 = 40 bytes = 10 uint32 slots
+#   SplitNode = 6*uint32 + 2*uint64 = 40 bytes = 10 uint32 slots
+#   SplitKvExtraInfo = CoreNode[25] + SplitNode[25] +uint32 totalSplitNodeNum
+#                    = 25*40 + 25*40 + 4 = 2004 bytes = 501 int32 elements
+# NOTE: arrays are ALWAYS 25 (fixed by struct). cube core num (24) only decides
+#       how many entries beyond core 0 are marked as "skip" (startBIdx=UINT32_MAX).
+_XFA_MAX_KV_STACK_LEN = 512    # op_kernel MAX_KV_STACK_LEN
+_XFA_NODE_ARRAY_LEN = 25       # coreInfo[25] / splitInfo[25] (fixed by struct)
+_XFA_NODE_U32 = 10             # 6 u32 + 2 u64 (=4 u32) per node
+
+
+def _build_xfa_extra_tiling(batch, kv_heads, kv_seqlen, device):
+    import numpy as np
+    UINT32_MAX = 0xFFFFFFFF
+    cur_ks_block_num = (kv_seqlen + _XFA_MAX_KV_STACK_LEN - 1) // _XFA_MAX_KV_STACK_LEN
+    n = _XFA_NODE_ARRAY_LEN
+    core_info = np.zeros((n, _XFA_NODE_U32), dtype=np.uint32)
+    # core 0 = single worker covering the whole (batch x kvHead) range, no KV split.
+    # CoreNode u32 slots: [startBIdx, startN1Idx, startS2Idx, endBIdx, endN1Idx,
+    #                      endS2Idx, lseOff_lo, lseOff_hi, oOff_lo, oOff_hi]
+    core_info[0, 3] = batch - 1            # endBIdx
+    core_info[0, 4] = kv_heads - 1         # endN1Idx
+    core_info[0, 5] = cur_ks_block_num     # endS2Idx (== curKSBlockNum -> isSplitKV false)
+    # start* and u64 offsets already 0
+    for c in range(1, n):
+        core_info[c, 0] = UINT32_MAX       # startBIdx -> skip core -> SyncAll only
+    split_info = np.zeros((n, _XFA_NODE_U32), dtype=np.uint32)  # unused (totalSplitNodeNum=0)
+    total_split_node_num = np.zeros((1,), dtype=np.uint32)      # 0 -> no combineScale work
+    buf = np.concatenate([core_info.reshape(-1), split_info.reshape(-1),
+                          total_split_node_num])
+    t = torch.from_numpy(buf.view(np.int32).copy()).to(device)
+    return t
+
+
+# query: [numTokens, qHead, headDim] fp16/bf16 (TND). key_cache/value_cache paged:
+# [numBlocks, blockSize, kvHead, headDim]. Returns attn_out [numTokens, qHead, headDim].
+def x_flash_attention_infer_npu(query, key_cache, value_cache, block_table,
+                                actual_q_lens, actual_kv_lens, q_head, kv_head,
+                                scale, batch, kv_seqlen, mask=None, layout="TND"):
+    extra_tiling = _build_xfa_extra_tiling(batch, kv_head, kv_seqlen, query.device)
+    return custom_ops_lib.x_flash_attention_infer(
+        query, key_cache, value_cache, mask, block_table,
+        actual_q_lens, actual_kv_lens, extra_tiling,
+        layout, q_head, kv_head, scale,
+    )
+
+
+# multi_latent_attention: DeepSeek MLA split-cache paged decode.
+# Q/KV split into a NoPE (latent, 512-dim) part and a RoPE (64-dim) part; the
+# kernel hardcodes embedding=512, rope=64. K = [kvCache|kvCacheRope] (576),
+# V = kvCache NoPE part (512). Host tiling is fully automatic (no extra_tiling).
+#   query      [numTokens, q_head, 512] fp16       queryRope   [numTokens, q_head, 64]
+#   kvCache    [numBlocks, blockSize, kv_head, 512] kvCacheRope [numBlocks, blockSize, kv_head, 64]
+#   block_tables [batch, maxBlocks] int32           contextLens [batch] int32
+# Returns attenOut [numTokens, q_head, 512]. type=0 SPLIT_CACHE, maskType=0 NONE,
+# isRing=0 (no lse). Use q_head < 128 to avoid the MTP TP1 special path.
+def multi_latent_attention_npu(query, query_rope, kv_cache, kv_cache_rope,
+                               block_tables, context_lens, q_head, kv_head,
+                               scale, kv_seqlen, q_seqlen=None, mask=None,
+                               mask_type=0, is_ring=0):
+    if q_seqlen is None:
+        q_seqlen = [-1]
+    return custom_ops_lib.multi_latent_attention(
+        query, query_rope, kv_cache, kv_cache_rope, block_tables, context_lens,
+        mask, None, None, None,
+        0, q_head, scale, kv_head, mask_type,
+        q_seqlen, kv_seqlen, is_ring,
+    )
+
+
 # mega_chunk_gdn
 def mega_chunk_gdn_npu(q, k, v, g, beta, scale=None, initial_state=None,
                        output_final_state=False, cu_seqlens=None):

@@ -141,6 +141,140 @@ beam_search_rec_final_select_impl_npu(const at::Tensor& log_probs,
       out_token_ids, out_token_index, out_log_probs, out_sequence);
 }
 
+std::tuple<at::Tensor, at::Tensor> laser_attention_impl_npu(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const c10::optional<at::Tensor>& atten_mask,
+    const c10::optional<at::Tensor>& alibi_mask,
+    const c10::optional<at::Tensor>& drop_mask,
+    double scale_value,
+    int64_t head_num,
+    std::string input_layout,
+    double keep_prob,
+    int64_t pre_tokens,
+    int64_t next_tokens,
+    bool is_high_precision) {
+  // query layout BNSD: [B, N, S, D]
+  auto q_sizes = query.sizes().vec();
+  int64_t B = q_sizes[0];
+  int64_t N = q_sizes[1];
+  int64_t S = q_sizes[2];
+  auto float_opts = query.options().dtype(at::kFloat);
+  at::Tensor softmax_log_max_sum = at::zeros({B, N, S}, float_opts);
+  at::Tensor attention_out = at::zeros(q_sizes, float_opts);
+  // aclnn expects inputLayout as char* (1 slot). Passing c10::string_view
+  // (16 bytes = 2 slots) shifts all subsequent args and corrupts the output
+  // tensor pointers -> SIGSEGV. Convert to char* like dequant_swiglu_quant.
+  char* input_layout_c = const_cast<char*>(input_layout.c_str());
+  EXEC_NPU_CMD(aclnnLaserAttention,
+               query,
+               key,
+               value,
+               atten_mask,
+            alibi_mask,
+               drop_mask,
+               scale_value,
+               head_num,
+               input_layout_c,
+               keep_prob,
+               pre_tokens,
+               next_tokens,
+               is_high_precision,
+               softmax_log_max_sum,
+               attention_out);
+  return std::make_tuple(softmax_log_max_sum, attention_out);
+}
+
+at::Tensor x_flash_attention_infer_impl_npu(
+    const at::Tensor& query,
+    const at::Tensor& key_cache,
+    const at::Tensor& value_cache,
+    const c10::optional<at::Tensor>& mask,
+    const at::Tensor& block_table,
+    const at::Tensor& actual_q_lens,
+    const at::Tensor& actual_kv_lens,
+    const at::Tensor& extra_tiling,
+    std::string layout,
+    int64_t qHead,
+    int64_t kvHead,
+    double scale) {
+  // query TND layout: [numTokens, qHead, headDim]
+  auto q_sizes = query.sizes().vec();
+  at::Tensor attn_out = at::empty(q_sizes, query.options());
+  // aclnn expects layout as char* (1 slot). Passing c10::string_view
+  // (16 bytes = 2 slots) shifts subsequent args -> SIGSEGV.
+  char* layout_c = const_cast<char*>(layout.c_str());
+  EXEC_NPU_CMD(aclnnXFlashAttentionInfer,
+               query,
+               key_cache,
+               value_cache,
+               mask,
+               block_table,
+               actual_q_lens,
+               actual_kv_lens,
+               extra_tiling,
+               layout_c,
+               qHead,
+               kvHead,
+               scale,
+               attn_out);
+  return attn_out;
+}
+
+// multi_latent_attention (MLA, DeepSeek split-cache decode).
+// MLA splits Q/KV into a NoPE (latent, 512) part and a RoPE (64) part; kernel
+// dims are hardcoded (embedding=512, rope=64, hidden=576). K = [kvCache|kvCacheRope],
+// V = kvCache (NoPE only). attenOut = softmax((q_nope@k_nope^T + q_rope@k_rope^T)*tor) @ v_nope.
+// Attr order matches op def: type, headSize, tor, kvHead, maskType, qSeqLen(ListInt),
+// kvSeqLen(ListInt), isRing. lseOut only produced when isRing=1 (we pass nullopt).
+at::Tensor multi_latent_attention_impl_npu(
+    const at::Tensor& query,
+    const at::Tensor& queryRope,
+    const at::Tensor& kvCache,
+    const at::Tensor& kvCacheRope,
+    const at::Tensor& block_tables,
+    const at::Tensor& contextLens,
+    const c10::optional<at::Tensor>& mask,
+    const c10::optional<at::Tensor>& qSeqlen,
+    const c10::optional<at::Tensor>& qkDescale,
+    const c10::optional<at::Tensor>& pvDescale,
+    int64_t type,
+    int64_t headSize,
+    double tor,
+    int64_t kvHead,
+    int64_t maskType,
+    at::IntArrayRef qSeqLen,
+    at::IntArrayRef kvSeqLen,
+    int64_t isRing) {
+  // attenOut: [numTokens, qHead, embeddingSize(=512)]. query is NoPE part.
+  auto out_sizes = query.sizes().vec();
+  at::Tensor atten_out = at::empty(out_sizes, query.options());
+  c10::optional<at::Tensor> lse_out = c10::nullopt;
+  EXEC_NPU_CMD(aclnnMultiLatentAttention,
+               query,
+               queryRope,
+               kvCache,
+               kvCacheRope,
+               block_tables,
+               contextLens,
+               mask,
+               qSeqlen,
+               qkDescale,
+               pvDescale,
+               type,
+               headSize,
+               tor,
+               kvHead,
+               maskType,
+               qSeqLen,
+               kvSeqLen,
+               isRing,
+               atten_out,
+               lse_out);
+  return atten_out;
+}
+
 at::Tensor causal_conv1d(
     const at::Tensor& x,
     const at::Tensor& weight,
@@ -1049,4 +1183,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_gating_top_k", &moe_gating_top_k_impl_npu, "moe_gating_top_k");
   m.def("moe_gating_top_k_hash", &moe_gating_top_k_hash_impl_npu, "moe_gating_top_k_hash");
   m.def("hc_pre_inv_rms", &hc_pre_inv_rms_impl_npu, "hc_pre_inv_rms");
+  m.def("laser_attention", &laser_attention_impl_npu, "laser_attention");
+  m.def("x_flash_attention_infer", &x_flash_attention_infer_impl_npu, "x_flash_attention_infer");
+  m.def("multi_latent_attention", &multi_latent_attention_impl_npu, "multi_latent_attention");
 }
