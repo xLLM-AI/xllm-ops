@@ -71,7 +71,21 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
 
-    int32_t singleCoreCalcRows = ubSize / (sizeof(float) * (2 * nAlign + 1)); // input output sum
+  // UB budget per singleCoreCalcRows row (in float units), given the kernel does
+    // single_core_calc_rows /= BUFFER_NUM (BUFFER_NUM=2) before InitBuffer:
+    //   inputQUE  = 2 * (scr) * nAlign  (BUFFER_NUM double buffer)
+    //   outputQUE = 2 * (scr) * nAlign
+    //   castBUF   = 0.5 * (scr) * nAlign  (int16, i.e. 2 bytes)
+    //   workBUF   = 1.0 * (scr) * nAlign  (ReduceSum sharedTmpBuffer, ascend950 only)
+    //   sumBUF    = 0.5 * (scr)
+    // ascend950 allocates the extra workBUF, so it needs the (3*nAlign + 1) coefficient
+    // to avoid UB overflow (device error 507035). On A2/A3 the kernel does NOT allocate
+    // workBUF (see IS_ASCEND950 guard), so the tighter (2*nAlign + 1) coefficient is used
+    // to restore a larger singleCoreCalcRows / better tiling granularity there.
+    auto socVersion = platformInfo.GetSocVersion();
+    int32_t ubRowCoeff = (socVersion == platform_ascendc::SocVersion::ASCEND950) ? (3 * nAlign + 1)
+                                                                                 : (2 * nAlign + 1);
+    int32_t singleCoreCalcRows = ubSize / (sizeof(float) * ubRowCoeff); // in/out/cast/(work)/sum
     singleCoreCalcRows = align2(singleCoreCalcRows);
 
     int32_t useCoreNum = m > coreNum ? coreNum : m;
