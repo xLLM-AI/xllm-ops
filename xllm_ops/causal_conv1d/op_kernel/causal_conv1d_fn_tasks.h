@@ -60,6 +60,40 @@ __aicore__ inline FnDirectBlockTask ResolveFnDirectBlockTask(int32_t blockIdx, i
     return task;
 }
 
+__aicore__ inline FnDirectBlockTask ResolveFnPackedQkvBlockTask(int32_t blockIdx, int32_t tokenBlockCnt,
+                                                                int32_t tokenBlockSize, int32_t cuSeqlen,
+                                                                int32_t baseDimCnt, int32_t baseDim, int32_t dim,
+                                                                int32_t qDim, int32_t kDim, int32_t vDim)
+{
+    auto task = ResolveFnDirectBlockTask(blockIdx, tokenBlockCnt, tokenBlockSize, cuSeqlen, baseDimCnt, baseDim, dim);
+    if (!task.valid) {
+        return task;
+    }
+    const bool useLegacyTwoBlockMapping = baseDimCnt == 2 && dim == CAUSAL_CONV1D_PACKED_QKV_LEGACY_DIM &&
+                                          qDim + kDim == CAUSAL_CONV1D_PACKED_QK_LEGACY_DIM &&
+                                          vDim == CAUSAL_CONV1D_PACKED_V_LEGACY_DIM;
+    if (useLegacyTwoBlockMapping) {
+        if (task.baseDimIdx == 0) {
+            task.channelStart = 0;
+            task.baseDimSize = CAUSAL_CONV1D_PACKED_QK_LEGACY_DIM;
+        } else {
+            task.channelStart = CAUSAL_CONV1D_PACKED_QK_LEGACY_DIM;
+            task.baseDimSize = CAUSAL_CONV1D_PACKED_V_LEGACY_DIM;
+        }
+    }
+    return task;
+}
+
+__aicore__ inline FnDirectBlockTask ResolveFnPackedQkvBlockTask(int32_t blockIdx, int32_t tokenBlockCnt,
+                                                                int32_t tokenBlockSize, int32_t cuSeqlen,
+                                                                int32_t baseDimCnt, int32_t baseDim, int32_t dim)
+{
+    return ResolveFnPackedQkvBlockTask(blockIdx, tokenBlockCnt, tokenBlockSize, cuSeqlen, baseDimCnt, baseDim, dim,
+                                       CAUSAL_CONV1D_PACKED_QK_LEGACY_DIM / 2,
+                                       CAUSAL_CONV1D_PACKED_QK_LEGACY_DIM / 2,
+                                       CAUSAL_CONV1D_PACKED_V_LEGACY_DIM);
+}
+
 __aicore__ inline bool IsFnInitStateSnapshotOwnerBlock(const FnDirectBlockTask &task)
 {
     return task.valid && task.tokenTileId == 0;
@@ -223,8 +257,14 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessVarlenTokenTiled()
     const bool isVarlenMode = (tilingData_->inputMode == 0);
 
     const int32_t blockIdx = static_cast<int32_t>(GetBlockIdx());
-    const auto blockTask = ResolveFnDirectBlockTask(blockIdx, tokenBlockCnt, tokenBlockSize, cuSeqlen, baseDimCnt,
-                                                    baseDim, dim);
+    const auto blockTask = IsPackedQkvOutput()
+                               ? ResolveFnPackedQkvBlockTask(blockIdx, tokenBlockCnt, tokenBlockSize, cuSeqlen,
+                                                             baseDimCnt, baseDim, dim,
+                                                             static_cast<int32_t>(tilingData_->packedQDim),
+                                                             static_cast<int32_t>(tilingData_->packedKDim),
+                                                             static_cast<int32_t>(tilingData_->packedVDim))
+                               : ResolveFnDirectBlockTask(blockIdx, tokenBlockCnt, tokenBlockSize, cuSeqlen,
+                                                          baseDimCnt, baseDim, dim);
     if (tilingData_->hasInitStateWorkspace != 0) {
         if (IsFnInitStateSnapshotOwnerBlock(blockTask)) {
             PrefetchInitStatesToWorkspace(blockTask.channelStart, blockTask.baseDimSize);

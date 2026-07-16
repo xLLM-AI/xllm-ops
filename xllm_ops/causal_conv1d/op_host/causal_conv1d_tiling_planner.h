@@ -126,11 +126,19 @@ inline DimTileChoice ChooseFnTokenDimCoSplitBaseDimChoice(gert::TilingContext *c
     result.baseDimCnt = CeilDivInt64(dim, result.baseDim);
     result.gridSize = result.baseDimCnt;
 
+    const int64_t balancedBaseDim = AlignUpInt64(CeilDivInt64(dim, result.baseDimCnt), DIM_ALIGN_ELEMS);
+    if (balancedBaseDim > 0 && balancedBaseDim <= ubLimitedBaseDim) {
+        result.baseDim = balancedBaseDim;
+        result.baseDimCnt = CeilDivInt64(dim, result.baseDim);
+        result.gridSize = result.baseDimCnt;
+    }
+
     if (coreNum == 0 || result.baseDimCnt <= 1 || result.baseDimCnt >= static_cast<int64_t>(coreNum) ||
         (coreNum % result.baseDimCnt == 0)) {
         OP_LOGD(context,
-                "FnDimCoSplit: dim[%ld], ubLimitedBaseDim[%ld], baseDimCnt[%ld], coreNum[%u], adjusted[%d].", dim,
-                result.baseDim, result.baseDimCnt, coreNum, 0);
+                "FnDimCoSplit: dim[%ld], ubLimitedBaseDim[%ld], balancedBaseDim[%ld], baseDimCnt[%ld], coreNum[%u], "
+                "adjusted[%d].",
+                dim, ubLimitedBaseDim, result.baseDim, result.baseDimCnt, coreNum, 0);
         return result;
     }
 

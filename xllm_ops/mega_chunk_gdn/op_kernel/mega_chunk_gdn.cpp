@@ -39,6 +39,9 @@
 #include <type_traits>
 using namespace pto;
 
+static_assert(std::is_same_v<DTYPE_Q, half> || std::is_same_v<DTYPE_Q, bfloat16_t>,
+              "MegaChunkGdn supports FP16 or BF16 compute tensors.");
+
 struct MegaChunkGdnKernelTilingData {
     uint32_t block_dim;
     uint32_t num_matrices;
@@ -56,12 +59,8 @@ struct MegaChunkGdnKernelTilingData {
 // ===================================================================
 #ifdef __CCE_AICORE__
 
-constexpr uint16_t SYNC_AIV_FLAG = 12;
-constexpr uint16_t SYNC_AIC_FLAG = 11;
-constexpr uint16_t SYNC_AIC_AIV_FLAG = 13;
-// NOTE: SYNC_AIV_ONLY_ALL (==14) is provided by pto (pto::SYNC_AIV_ONLY_ALL) via
-// `using namespace pto;`. Defining it here again causes an ambiguous reference,
-// so rely on the pto-provided constant instead.
+// Sync flag ids are provided by PTO. Keep this kernel on the shared sync
+// contract so updates to the runtime synchronization framework stay aligned.
 constexpr uint16_t SYNC_MODE_SHIFT_VALUE = 4;
 constexpr uint16_t SYNC_FLAG_SHIFT_VALUE = 8;
 
@@ -173,7 +172,7 @@ AICORE inline void mega_transpose_TH_to_HT(__gm__ T *src, __gm__ T *dst, int64_t
 }
 
 template <int32_t H, int32_t C>
-AICORE inline void mega_cast_fp32_to_fp16_bsnd(__gm__ float *src, __gm__ half *dst, uint32_t num_matrices,
+AICORE inline void mega_cast_fp32_to_dtype_bsnd(__gm__ float *src, __gm__ DTYPE_Q *dst, uint32_t num_matrices,
                                                int64_t total_tokens)
 {
 #if defined(__DAV_C220_VEC__)
@@ -190,8 +189,8 @@ AICORE inline void mega_cast_fp32_to_fp16_bsnd(__gm__ float *src, __gm__ half *d
     using SrcUB = Tile<TileType::Vec, float, 1, C, BLayout::RowMajor, 1, C, SLayout::NoneBox, 512, PadValue::Zero>;
     using DynSrcUB =
         Tile<TileType::Vec, float, 1, C, BLayout::RowMajor, DYNAMIC, DYNAMIC, SLayout::NoneBox, 512, PadValue::Zero>;
-    using DstUB = Tile<TileType::Vec, half, 1, C, BLayout::RowMajor, 1, C, SLayout::NoneBox, 512>;
-    using DynDstUB = Tile<TileType::Vec, half, 1, C, BLayout::RowMajor, DYNAMIC, DYNAMIC, SLayout::NoneBox, 512>;
+    using DstUB = Tile<TileType::Vec, DTYPE_Q, 1, C, BLayout::RowMajor, 1, C, SLayout::NoneBox, 512>;
+    using DynDstUB = Tile<TileType::Vec, DTYPE_Q, 1, C, BLayout::RowMajor, DYNAMIC, DYNAMIC, SLayout::NoneBox, 512>;
     using Gm1D = Shape<1, 1, 1, 1, DYNAMIC>;
     using GmS1 = Stride<1, 1, 1, 1, 1>;
 
@@ -225,7 +224,7 @@ AICORE inline void mega_cast_fp32_to_fp16_bsnd(__gm__ float *src, __gm__ half *d
             {
                 Gm1D gs;
                 gs.shape[4] = C;
-                GlobalTensor<half, Gm1D, GmS1> gm(dst + off, gs);
+                GlobalTensor<DTYPE_Q, Gm1D, GmS1> gm(dst + off, gs);
                 DstUB st;
                 TASSIGN(st, F16_UB);
                 TSTORE(gm, st);
@@ -278,18 +277,18 @@ namespace mk_o {
 #define GDN_CHUNK_O_CALL chunk_o_kernel
 #endif
 
-AICORE inline void mega_solve_tril(__gm__ half *out, __gm__ half *in, __gm__ half *minus_id, uint32_t matrix_size,
+AICORE inline void mega_solve_tril(__gm__ DTYPE_Q *out, __gm__ DTYPE_Q *in, __gm__ DTYPE_Q *minus_id, uint32_t matrix_size,
                                    uint32_t num_matrices, uint32_t num_bsnd_heads, __gm__ int32_t *cu_seqlens,
                                    uint32_t is_lower)
 {
     if (num_matrices <= get_block_num())
-        mk_solve::runKernelTriInvRecUnroll<half, float, GDN_C, 1, true, half>(out, in, minus_id, num_matrices,
+        mk_solve::runKernelTriInvRecUnroll<DTYPE_Q, float, GDN_C, 1, true, DTYPE_Q>(out, in, minus_id, num_matrices,
                                                                               num_bsnd_heads, cu_seqlens, is_lower);
     else if (num_matrices <= 2u * get_block_num())
-        mk_solve::runKernelTriInvRecUnroll<half, float, GDN_C, 2, true, half>(out, in, minus_id, num_matrices,
+        mk_solve::runKernelTriInvRecUnroll<DTYPE_Q, float, GDN_C, 2, true, DTYPE_Q>(out, in, minus_id, num_matrices,
                                                                               num_bsnd_heads, cu_seqlens, is_lower);
     else
-        mk_solve::runKernelTriInvRecUnroll<half, float, GDN_C, 4, true, half>(out, in, minus_id, num_matrices,
+        mk_solve::runKernelTriInvRecUnroll<DTYPE_Q, float, GDN_C, 4, true, DTYPE_Q>(out, in, minus_id, num_matrices,
                                                                               num_bsnd_heads, cu_seqlens, is_lower);
 }
 
@@ -329,8 +328,8 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
 
     mega_transpose_TH_to_HT<float>(reinterpret_cast<__gm__ float *>(g_sum_ptr),
                                    reinterpret_cast<__gm__ float *>(g_t_ptr), total_tokens, H);
-    mega_transpose_TH_to_HT<half>(reinterpret_cast<__gm__ half *>(beta_ptr),
-                                  reinterpret_cast<__gm__ half *>(beta_t_ptr), total_tokens, H);
+    mega_transpose_TH_to_HT<DTYPE_Q>(reinterpret_cast<__gm__ DTYPE_Q *>(beta_ptr),
+                                  reinterpret_cast<__gm__ DTYPE_Q *>(beta_t_ptr), total_tokens, H);
 
 #ifdef MEGA_STOP_AFTER_TRANSPOSE
     pipe_barrier(PIPE_ALL);
@@ -340,9 +339,9 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
     SyncAllImpl<false>();
 
     mk_kkt::kkt_kernel<D, C>(
-        reinterpret_cast<__gm__ half *>(k_ptr), reinterpret_cast<__gm__ half *>(beta_t_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(k_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(beta_t_ptr),
         reinterpret_cast<__gm__ float *>(g_t_ptr), reinterpret_cast<__gm__ float *>(msk_lower_ptr),
-        reinterpret_cast<__gm__ half *>(kkt_ws_ptr), reinterpret_cast<__gm__ half *>(A_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(kkt_ws_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(A_ptr),
         reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len, total_tokens,
         static_cast<uint32_t>(H), num_key_heads, ffts_addr);
 
@@ -359,8 +358,8 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
 
     SyncAllImpl<false>();
 
-    mega_solve_tril(reinterpret_cast<__gm__ half *>(A_inv_ptr), reinterpret_cast<__gm__ half *>(A_ptr),
-                    reinterpret_cast<__gm__ half *>(minus_id_ptr), C, num_matrices, H,
+    mega_solve_tril(reinterpret_cast<__gm__ DTYPE_Q *>(A_inv_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(A_ptr),
+                    reinterpret_cast<__gm__ DTYPE_Q *>(minus_id_ptr), C, num_matrices, H,
                     reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), 1);
 
 #ifdef MEGA_STOP_AFTER_SOLVE
@@ -382,11 +381,11 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
 #endif
 
     mk_wy::GDN_WY_FAST_CALL<D, C>(
-        reinterpret_cast<__gm__ half *>(k_ptr), reinterpret_cast<__gm__ half *>(v_ptr),
-        reinterpret_cast<__gm__ half *>(beta_t_ptr), reinterpret_cast<__gm__ float *>(g_t_ptr),
-        reinterpret_cast<__gm__ half *>(A_inv_ptr), reinterpret_cast<__gm__ half *>(wy_ws_a1_ptr),
-        reinterpret_cast<__gm__ half *>(wy_ws_a2_ptr), reinterpret_cast<__gm__ half *>(w_ptr),
-        reinterpret_cast<__gm__ half *>(u_ptr), reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len,
+        reinterpret_cast<__gm__ DTYPE_Q *>(k_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(v_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(beta_t_ptr), reinterpret_cast<__gm__ float *>(g_t_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(A_inv_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(wy_ws_a1_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(wy_ws_a2_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(w_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(u_ptr), reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len,
         total_tokens, static_cast<uint32_t>(H), num_key_heads, ffts_addr);
 
 #if defined(__DAV_C220_VEC__)
@@ -405,12 +404,12 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
     SyncAllImpl<false>();
 
     mk_h::chunk_h_kernel<D, C>(
-        reinterpret_cast<__gm__ half *>(k_ptr), reinterpret_cast<__gm__ half *>(w_ptr),
-        reinterpret_cast<__gm__ half *>(u_ptr), reinterpret_cast<__gm__ float *>(g_t_ptr),
-        reinterpret_cast<__gm__ half *>(s_ptr), reinterpret_cast<__gm__ half *>(v_new_ptr),
-        reinterpret_cast<__gm__ half *>(fs_ptr), reinterpret_cast<__gm__ half *>(h0_ptr), has_initial_state,
+        reinterpret_cast<__gm__ DTYPE_Q *>(k_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(w_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(u_ptr), reinterpret_cast<__gm__ float *>(g_t_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(s_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(v_new_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(fs_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(h0_ptr), has_initial_state,
         1,
-        reinterpret_cast<__gm__ half *>(h_ws_ptr), reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size,
+        reinterpret_cast<__gm__ DTYPE_Q *>(h_ws_ptr), reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size,
         seq_len, total_tokens, static_cast<uint32_t>(H), num_key_heads, ffts_addr);
 
 #ifdef MEGA_STOP_AFTER_H
@@ -421,11 +420,11 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
     SyncAllImpl<false>();
 
     mk_o::GDN_CHUNK_O_CALL<D, C>(
-        reinterpret_cast<__gm__ half *>(q_ptr), reinterpret_cast<__gm__ half *>(k_ptr),
-        reinterpret_cast<__gm__ half *>(v_new_ptr), reinterpret_cast<__gm__ half *>(s_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(q_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(k_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(v_new_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(s_ptr),
         reinterpret_cast<__gm__ float *>(g_t_ptr), reinterpret_cast<__gm__ float *>(msk_full_ptr),
-        reinterpret_cast<__gm__ half *>(o_ws_qk_ptr), reinterpret_cast<__gm__ half *>(o_ws_qs_ptr),
-        reinterpret_cast<__gm__ half *>(o_ws_gated_ptr), reinterpret_cast<__gm__ half *>(o_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(o_ws_qk_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(o_ws_qs_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(o_ws_gated_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(o_ptr),
         reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len, total_tokens,
         static_cast<uint32_t>(H), num_key_heads, ffts_addr);
 
@@ -450,7 +449,7 @@ GDN_KERNEL_NAME(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr, GM_ADDR g_in_ptr, G
     REGISTER_TILING_DEFAULT(MegaChunkGdnKernelTilingData);
     GET_TILING_DATA_WITH_STRUCT(MegaChunkGdnKernelTilingData, tiling_data, tiling);
     GM_ADDR user_ws = AscendC::GetUserWorkspace(workspace);
-    const uint64_t tile_bytes = static_cast<uint64_t>(GDN_C) * GDN_C * sizeof(half);
+    const uint64_t tile_bytes = static_cast<uint64_t>(GDN_C) * GDN_C * sizeof(DTYPE_Q);
 
     GM_ADDR kkt_ws_ptr = user_ws;
     GM_ADDR wy_ws_a1_ptr = kkt_ws_ptr + static_cast<uint64_t>(tiling_data.block_dim) * 2 * tile_bytes;

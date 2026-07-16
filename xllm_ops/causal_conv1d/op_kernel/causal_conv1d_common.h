@@ -24,6 +24,12 @@ constexpr int32_t MAX_WIDTH = 4;
 constexpr int32_t MAX_BLOCK_DIM = 4096;
 constexpr int32_t RING_SLOTS = 5;
 
+constexpr int32_t PACKED_QKV_HEAD_DIM = 128;
+constexpr int32_t PACKED_QKV_NORM_HEADS_PER_PASS = 16;
+constexpr int32_t PACKED_QKV_REDUCE_TMP_ELEMS = PACKED_QKV_NORM_HEADS_PER_PASS * 64;
+constexpr int32_t PACKED_QKV_REDUCE_SUM_ELEMS = 64;
+constexpr int32_t PACKED_QKV_NORM_ELEMS = PACKED_QKV_NORM_HEADS_PER_PASS * PACKED_QKV_HEAD_DIM;
+
 __aicore__ inline int32_t SlotCurr(int32_t t)
 {
     return (t + 3) % RING_SLOTS;
