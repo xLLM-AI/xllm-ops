@@ -110,6 +110,7 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
         "moe_init_routing_custom"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
+        "gamma_add_rms_norm"
         "lightning_indexer_quant"
         "compressor"
         "quant_lightning_indexer"  ## 已在 CANN 中内置，见 opp/built-in/op_impl/ai_core/tbe/impl/ops_transformer/ascendc/quant_lightning_indexer
@@ -218,6 +219,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "moe_init_routing_custom"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
+        "gamma_add_rms_norm"
         "lightning_indexer_quant"
         "lightning_indexer_quant_metadata"
         "compressor"
@@ -290,6 +292,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "moe_init_routing_custom"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
+        "gamma_add_rms_norm"
         "lightning_indexer_quant" 
         "lightning_indexer_quant_metadata"
         "compressor"

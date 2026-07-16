@@ -601,6 +601,37 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> add_rms_norm_bias_impl_npu(
   return std::make_tuple(y, rstd, x);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor>
+gamma_add_rms_norm_impl_npu(const at::Tensor& x1,
+                            const at::Tensor& x2,
+                            const at::Tensor& gamma,
+                            double epsilon,
+                            bool add_gamma_offset) {
+  auto sizes = x1.sizes().vec();
+  const int64_t dim_x = static_cast<int64_t>(sizes.size());
+  const int64_t dim_gamma = gamma.dim();
+  std::vector<int64_t> rstd_shape(sizes.begin(), sizes.end());
+  for (int64_t i = dim_x - dim_gamma; i < dim_x && i >= 0; ++i) {
+    rstd_shape[i] = 1;
+  }
+
+  at::Tensor y = at::empty(sizes, x1.options());
+  at::Tensor rstd =
+      at::empty(rstd_shape, x1.options().dtype(at::ScalarType::Float));
+  at::Tensor x = at::empty(sizes, x1.options());
+
+  EXEC_NPU_CMD(aclnnGammaAddRmsNorm,
+               x1,
+               x2,
+               gamma,
+               epsilon,
+               add_gamma_offset,
+               y,
+               rstd,
+               x);
+  return std::make_tuple(y, rstd, x);
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 moe_init_routing_custom_impl_npu(const at::Tensor& x,
                                  const at::Tensor& expert_idx,
@@ -1171,6 +1202,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("scatter_nd_update_v2", &scatter_nd_update_v2_impl_npu, "scatter_nd_update_v2");
   m.def("hc_post", &hc_post_impl_npu, "hc_post");
   m.def("add_rms_norm_bias", &add_rms_norm_bias_impl_npu, "add_rms_norm_bias");
+  m.def("gamma_add_rms_norm",
+        &gamma_add_rms_norm_impl_npu,
+        "gamma_add_rms_norm");
   m.def("moe_init_routing_custom", &moe_init_routing_custom_impl_npu, "moe_init_routing_custom");
   m.def("moe_init_routing_v3", &moe_init_routing_v3_impl_npu, "moe_init_routing_v3");
   m.def("hc_pre_sinkhorn", &hc_pre_sinkhorn_impl_npu, "hc_pre_sinkhorn");

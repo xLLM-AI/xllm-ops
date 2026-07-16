@@ -181,6 +181,12 @@ def add_rms_norm_bias_npu(x1, x2, gamma, beta=None, eps=1e-6):
     return custom_ops_lib.add_rms_norm_bias(x1, x2, gamma, beta, eps)
 
 
+def gamma_add_rms_norm_npu(x1, x2, gamma, eps=1e-6,
+                           add_gamma_offset=False):
+    return custom_ops_lib.gamma_add_rms_norm(
+        x1, x2, gamma, eps, add_gamma_offset)
+
+
 # hc_pre_sinkhorn (per-token: pre/post gating + sinkhorn-normalized comb_frag)
 # mixes last dim = 2*hc_mult + hc_mult^2 ([pre | post | comb]).
 # returns (y[bs,d] bf16, post[bs,hc_mult] fp32, comb_frag[bs,hc_mult,hc_mult] fp32)
