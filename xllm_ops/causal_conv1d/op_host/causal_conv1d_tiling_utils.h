@@ -31,6 +31,10 @@ constexpr uint32_t NUM_ACCEPTED_TOKENS_INDEX = 7;
 constexpr int32_t ATTR_ACTIVATION_MODE_INDEX = 0;
 constexpr int32_t ATTR_PAD_SLOT_ID_INDEX = 1;
 constexpr int32_t ATTR_RUN_MODE_INDEX = 2;
+constexpr int32_t ATTR_PACKED_Q_DIM_INDEX = 3;
+constexpr int32_t ATTR_PACKED_K_DIM_INDEX = 4;
+constexpr int32_t ATTR_PACKED_V_DIM_INDEX = 5;
+constexpr int32_t ATTR_PACKED_HEAD_DIM_INDEX = 6;
 
 constexpr int64_t ASCENDC_RESERVED_WORKSPACE_SIZE = 16 * 1024 * 1024;
 
@@ -43,6 +47,10 @@ struct CausalConv1dAttrInfo {
     int64_t activationMode = 0;
     int64_t padSlotId = -1;
     int64_t runMode = 0;
+    int64_t packedQDim = 0;
+    int64_t packedKDim = 0;
+    int64_t packedVDim = 0;
+    int64_t packedHeadDim = 0;
 };
 
 struct DimTileChoice {

@@ -33,6 +33,7 @@ public:
         this->cacheIndicesGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(cacheIndices));
         this->initialStateModeGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(initialStateMode));
         this->yGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y));
+        this->packedQkvYGm.SetGlobalBuffer(reinterpret_cast<__gm__ PackedQkvT *>(y));
         if (tilingData->hasInitStateWorkspace != 0) {
             const uint64_t syncElems =
                 static_cast<uint64_t>(GetBlockNum()) * INIT_STATE_SYNCALL_NEED_SIZE;

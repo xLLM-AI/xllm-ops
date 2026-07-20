@@ -114,10 +114,10 @@ def _mega_get_masks(device):
     return _MEGA_MASK_CACHE[key]
 
 
-def _mega_get_minus_identity(device):
-    key = _mega_device_key(device)
+def _mega_get_minus_identity(device, dtype):
+    key = (*_mega_device_key(device), dtype)
     if key not in _MEGA_MINUS_IDENTITY_CACHE:
-        minus_identity = torch.zeros(CHUNK_SIZE, CHUNK_SIZE, device=device, dtype=torch.float16)
+        minus_identity = torch.zeros(CHUNK_SIZE, CHUNK_SIZE, device=device, dtype=dtype)
         minus_identity.fill_diagonal_(-1)
         _MEGA_MINUS_IDENTITY_CACHE[key] = minus_identity
     return _MEGA_MINUS_IDENTITY_CACHE[key]
@@ -360,7 +360,13 @@ def mega_chunk_gdn_npu(q, k, v, g, beta, scale=None, initial_state=None,
         scale = k.shape[-1] ** -0.5
 
     q_dtype, k_dtype, v_dtype = q.dtype, k.dtype, v.dtype
-    q, k, v, beta = (t.half() for t in (q, k, v, beta))
+    supported_compute_dtypes = (torch.float16, torch.bfloat16)
+    compute_dtype = (
+        q.dtype
+        if q.dtype in supported_compute_dtypes and k.dtype == q.dtype and v.dtype == q.dtype
+        else torch.float16
+    )
+    q, k, v, beta = (t.to(compute_dtype) for t in (q, k, v, beta))
 
     _, total_tokens, _, _ = q.shape
     num_value_heads = v.shape[-2]
@@ -374,7 +380,7 @@ def mega_chunk_gdn_npu(q, k, v, g, beta, scale=None, initial_state=None,
     num_matrices = num_chunks * num_value_heads
     has_initial_state = initial_state is not None
     if has_initial_state:
-        initial_state_arg = initial_state.half()
+        initial_state_arg = initial_state.to(compute_dtype)
     else:
         initial_state_arg = torch.zeros(
             num_sequences,
@@ -382,11 +388,11 @@ def mega_chunk_gdn_npu(q, k, v, g, beta, scale=None, initial_state=None,
             q.shape[-1],
             q.shape[-1],
             device=q.device,
-            dtype=torch.float16,
+            dtype=compute_dtype,
         )
 
     mask_lower, mask_full = _mega_get_masks(q.device)
-    minus_identity = _mega_get_minus_identity(q.device)
+    minus_identity = _mega_get_minus_identity(q.device, compute_dtype)
 
     (out, g_sum, _, _, _, _, a_inv, w, _, h, v_new, final_state) = custom_ops_lib.mega_chunk_gdn(
         q,

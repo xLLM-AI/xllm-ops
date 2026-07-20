@@ -18,7 +18,10 @@
 #define __CAUSAL_CONV1D_TILING_KEY_H__
 
 #include "causal_conv1d_tiling_data.h"
+
+#ifndef CAUSAL_CONV1D_SKIP_TPL_REGISTRATION
 #include "ascendc/host_api/tiling/template_argument.h"
+#endif
 
 #define CAUSAL_CONV1D_TPL_RUN_MODE_FN 0
 #define CAUSAL_CONV1D_TPL_RUN_MODE_UPDATE 1
@@ -29,6 +32,8 @@
 #define CAUSAL_CONV1D_TPL_FN_PLAN_INVALID 0
 #define CAUSAL_CONV1D_TPL_FN_PLAN_CUTBS 1
 #define CAUSAL_CONV1D_TPL_FN_PLAN_CUTBSD 2
+
+#ifndef CAUSAL_CONV1D_SKIP_TPL_REGISTRATION
 ASCENDC_TPL_ARGS_DECL(CausalConv1d,
                       ASCENDC_TPL_UINT_DECL(runModeKey, 1, ASCENDC_TPL_UI_LIST, CAUSAL_CONV1D_TPL_RUN_MODE_FN,
                                             CAUSAL_CONV1D_TPL_RUN_MODE_UPDATE),
@@ -61,5 +66,6 @@ ASCENDC_TPL_SEL(
                                 CAUSAL_CONV1D_TPL_FN_PLAN_CUTBSD));
 
 #undef CAUSAL_CONV1D_TPL_SEL_ENTRY
+#endif
 
 #endif // __CAUSAL_CONV1D_TILING_KEY_H__

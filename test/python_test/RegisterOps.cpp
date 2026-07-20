@@ -307,6 +307,115 @@ at::Tensor causal_conv1d(
     return output;
 }
 
+at::Tensor causal_conv1d_packed_qkv_general_impl(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_state,
+    at::IntArrayRef query_start_loc_opt,
+    at::IntArrayRef cache_indices_opt,
+    at::IntArrayRef initial_state_mode_opt,
+    int64_t q_dim,
+    int64_t k_dim,
+    int64_t v_dim,
+    int64_t head_dim,
+    at::ScalarType output_dtype)
+{
+    constexpr int64_t kPackedQkvActivationMode = 2;
+    constexpr int64_t kPadSlotId = -1;
+    constexpr int64_t kForwardRunMode = 0;
+    at::Tensor output = at::empty(x.sizes(), x.options().dtype(output_dtype));
+    c10::optional<at::Tensor> bias_opt = c10::nullopt;
+    at::IntArrayRef num_accepted_tokens_opt;
+    EXEC_NPU_CMD(aclnnCausalConv1dQkv,
+                 x,
+                 weight,
+                 bias_opt,
+                 conv_state,
+                 query_start_loc_opt,
+                 cache_indices_opt,
+                 initial_state_mode_opt,
+                 num_accepted_tokens_opt,
+                 kPackedQkvActivationMode,
+                 kPadSlotId,
+                 kForwardRunMode,
+                 q_dim,
+                 k_dim,
+                 v_dim,
+                 head_dim,
+                 output);
+    return output;
+}
+
+at::Tensor causal_conv1d_packed_qkv_general(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_state,
+    at::IntArrayRef query_start_loc_opt,
+    at::IntArrayRef cache_indices_opt,
+    at::IntArrayRef initial_state_mode_opt,
+    int64_t q_dim,
+    int64_t k_dim,
+    int64_t v_dim,
+    int64_t head_dim)
+{
+    return causal_conv1d_packed_qkv_general_impl(x,
+                                                 weight,
+                                                 conv_state,
+                                                 query_start_loc_opt,
+                                                 cache_indices_opt,
+                                                 initial_state_mode_opt,
+                                                 q_dim,
+                                                 k_dim,
+                                                 v_dim,
+                                                 head_dim,
+                                                 at::kHalf);
+}
+
+at::Tensor causal_conv1d_packed_qkv_general_bf16(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_state,
+    at::IntArrayRef query_start_loc_opt,
+    at::IntArrayRef cache_indices_opt,
+    at::IntArrayRef initial_state_mode_opt,
+    int64_t q_dim,
+    int64_t k_dim,
+    int64_t v_dim,
+    int64_t head_dim)
+{
+    return causal_conv1d_packed_qkv_general_impl(x,
+                                                 weight,
+                                                 conv_state,
+                                                 query_start_loc_opt,
+                                                 cache_indices_opt,
+                                                 initial_state_mode_opt,
+                                                 q_dim,
+                                                 k_dim,
+                                                 v_dim,
+                                                 head_dim,
+                                                 at::kBFloat16);
+}
+
+at::Tensor causal_conv1d_packed_qkv(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_state,
+    at::IntArrayRef query_start_loc_opt,
+    at::IntArrayRef cache_indices_opt,
+    at::IntArrayRef initial_state_mode_opt)
+{
+    return causal_conv1d_packed_qkv_general(x,
+                                            weight,
+                                            conv_state,
+                                            query_start_loc_opt,
+                                            cache_indices_opt,
+                                            initial_state_mode_opt,
+                                            1024,
+                                            1024,
+                                            3072,
+                                            128);
+}
+
 at::Tensor recurrent_gated_delta_rule(
     const at::Tensor &query,
     const at::Tensor &key,
@@ -1191,6 +1300,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &beam_search_rec_final_select_impl_npu,
         "beam_search_rec_final_select");
   m.def("causal_conv1d", &causal_conv1d, "causal_conv1d");
+  m.def("causal_conv1d_packed_qkv",
+        &causal_conv1d_packed_qkv,
+        "causal_conv1d_packed_qkv");
+  m.def("causal_conv1d_packed_qkv_general",
+        &causal_conv1d_packed_qkv_general,
+        "causal_conv1d_packed_qkv_general");
+  m.def("causal_conv1d_packed_qkv_general_bf16",
+        &causal_conv1d_packed_qkv_general_bf16,
+        "causal_conv1d_packed_qkv_general_bf16");
   m.def("recurrent_gated_delta_rule", &recurrent_gated_delta_rule, "recurrent_gated_delta_rule");
   m.def("rec_constrained_topk", &rec_constrained_topk_impl_npu, "rec_constrained_topk");
   m.def("mega_chunk_gdn", &mega_chunk_gdn, "mega_chunk_gdn");

@@ -60,8 +60,10 @@ inline ge::graphStatus GetAttrsInfo(gert::TilingContext *context, CausalConv1dAt
     const int64_t *activationModePtr = attrs->GetAttrPointer<int64_t>(ATTR_ACTIVATION_MODE_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context, activationModePtr);
     attrInfo.activationMode = *activationModePtr;
-    OP_CHECK_IF(attrInfo.activationMode != 0 && attrInfo.activationMode != 1,
-                OP_LOGE(context, "activationMode only supports 0/1"),
+    OP_CHECK_IF(attrInfo.activationMode != CAUSAL_CONV1D_ACTIVATION_NONE &&
+                    attrInfo.activationMode != CAUSAL_CONV1D_ACTIVATION_SILU &&
+                    attrInfo.activationMode != CAUSAL_CONV1D_ACTIVATION_SILU_PACKED_QKV,
+                OP_LOGE(context, "activationMode only supports 0/1/2"),
                 return ge::GRAPH_FAILED);
 
     const int64_t *padSlotIdPtr = attrs->GetAttrPointer<int64_t>(ATTR_PAD_SLOT_ID_INDEX);
@@ -72,6 +74,21 @@ inline ge::graphStatus GetAttrsInfo(gert::TilingContext *context, CausalConv1dAt
     attrInfo.runMode = (runModePtr == nullptr) ? 0 : *runModePtr;
     OP_CHECK_IF(attrInfo.runMode != 0 && attrInfo.runMode != 1, OP_LOGE(context, "runMode only supports 0/1"),
                 return ge::GRAPH_FAILED);
+
+    if (attrInfo.activationMode == CAUSAL_CONV1D_ACTIVATION_SILU_PACKED_QKV) {
+        const int64_t *packedQDimPtr = attrs->GetAttrPointer<int64_t>(ATTR_PACKED_Q_DIM_INDEX);
+        const int64_t *packedKDimPtr = attrs->GetAttrPointer<int64_t>(ATTR_PACKED_K_DIM_INDEX);
+        const int64_t *packedVDimPtr = attrs->GetAttrPointer<int64_t>(ATTR_PACKED_V_DIM_INDEX);
+        const int64_t *packedHeadDimPtr = attrs->GetAttrPointer<int64_t>(ATTR_PACKED_HEAD_DIM_INDEX);
+        OP_CHECK_NULL_WITH_CONTEXT(context, packedQDimPtr);
+        OP_CHECK_NULL_WITH_CONTEXT(context, packedKDimPtr);
+        OP_CHECK_NULL_WITH_CONTEXT(context, packedVDimPtr);
+        OP_CHECK_NULL_WITH_CONTEXT(context, packedHeadDimPtr);
+        attrInfo.packedQDim = *packedQDimPtr;
+        attrInfo.packedKDim = *packedKDimPtr;
+        attrInfo.packedVDim = *packedVDimPtr;
+        attrInfo.packedHeadDim = *packedHeadDimPtr;
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -93,6 +110,10 @@ inline ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, const Cau
     const bool isDecodeMode = (attrInfo.runMode == 1);
     tiling.activationMode = attrInfo.activationMode;
     tiling.padSlotId = attrInfo.padSlotId;
+    tiling.packedQDim = attrInfo.packedQDim;
+    tiling.packedKDim = attrInfo.packedKDim;
+    tiling.packedVDim = attrInfo.packedVDim;
+    tiling.packedHeadDim = attrInfo.packedHeadDim;
 
     auto xShapePtr = context->GetInputShape(X_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context, xShapePtr);
@@ -418,6 +439,25 @@ inline ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, const Cau
     OP_CHECK_NULL_WITH_CONTEXT(context, sDesc);
     OP_CHECK_IF(sDesc->GetDataType() != xDtype, OP_LOGE(context, "convStates dtype must equal x dtype"),
                 return ge::GRAPH_FAILED);
+
+    if (attrInfo.activationMode == CAUSAL_CONV1D_ACTIVATION_SILU_PACKED_QKV) {
+        auto yDesc = context->GetOutputDesc(0);
+        OP_CHECK_NULL_WITH_CONTEXT(context, yDesc);
+        const int64_t qDim = attrInfo.packedQDim;
+        const int64_t kDim = attrInfo.packedKDim;
+        const int64_t vDim = attrInfo.packedVDim;
+        const int64_t headDim = attrInfo.packedHeadDim;
+        const ge::DataType yDtype = yDesc->GetDataType();
+        const bool validPackedLayout = qDim > 0 && qDim == kDim && vDim > 0 && headDim == 128 &&
+                                       qDim % headDim == 0 && kDim % headDim == 0 && vDim % headDim == 0 &&
+                                       qDim + kDim + vDim == dim;
+        OP_CHECK_IF(attrInfo.runMode != 0 || inputMode != 0 || width != 4 || !validPackedLayout || hasBias ||
+                        xDtype != ge::DT_BF16 || (yDtype != ge::DT_FLOAT16 && yDtype != ge::DT_BF16),
+                    OP_LOGE(context,
+                            "activationMode=2 requires BF16 2D varlen prefill, width=4, qDim=kDim, "
+                            "128-aligned Q/K/V dimensions whose sum equals dim, no bias, and FP16/BF16 output"),
+                    return ge::GRAPH_FAILED);
+    }
 
     if (!qslAbsent) {
         auto qslDesc2 = context->GetOptionalInputDesc(QUERY_START_LOC_INDEX);

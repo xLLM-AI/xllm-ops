@@ -143,14 +143,14 @@ def _native_reference(q, k, v, g, beta, cu_seqlens=None, initial_state=None, out
     return torch.cat(outs, dim=1), torch.cat(final_states, dim=0) if output_final_state else None
 
 
-def _make_inputs(total_tokens, num_value_heads, num_key_heads, seed):
+def _make_inputs(total_tokens, num_value_heads, num_key_heads, seed, dtype=torch.float16):
     torch.manual_seed(seed)
     head_dim = 128
-    q = F.normalize(torch.randn(1, total_tokens, num_key_heads, head_dim), p=2, dim=-1).half()
-    k = F.normalize(torch.randn(1, total_tokens, num_key_heads, head_dim), p=2, dim=-1).half()
-    v = torch.randn(1, total_tokens, num_value_heads, head_dim, dtype=torch.float16)
+    q = F.normalize(torch.randn(1, total_tokens, num_key_heads, head_dim), p=2, dim=-1).to(dtype)
+    k = F.normalize(torch.randn(1, total_tokens, num_key_heads, head_dim), p=2, dim=-1).to(dtype)
+    v = torch.randn(1, total_tokens, num_value_heads, head_dim, dtype=dtype)
     g = F.logsigmoid(torch.randn(1, total_tokens, num_value_heads, dtype=torch.float32))
-    beta = torch.rand(1, total_tokens, num_value_heads, dtype=torch.float16)
+    beta = torch.rand(1, total_tokens, num_value_heads, dtype=dtype)
     return q, k, v, g, beta
 
 
@@ -184,10 +184,14 @@ def _run_mega(q_cpu, k_cpu, v_cpu, g_cpu, beta_cpu, cu_list=None, initial_state_
         pytest.param(512, [0, 96, 128, 512], 48, 16, id="long-varlen-H48-Hg16"),
     ],
 )
-def test_mega_chunk_gdn_e2e(total_tokens, cu_list, num_value_heads, num_key_heads):
-    q, k, v, g, beta = _make_inputs(total_tokens, num_value_heads, num_key_heads, seed=0)
+@pytest.mark.parametrize("compute_dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+def test_mega_chunk_gdn_e2e(total_tokens, cu_list, num_value_heads, num_key_heads, compute_dtype):
+    q, k, v, g, beta = _make_inputs(
+        total_tokens, num_value_heads, num_key_heads, seed=0, dtype=compute_dtype
+    )
     actual, _ = _run_mega(q, k, v, g, beta, cu_list)
     expected, _ = _native_reference(q, k, v, g, beta, cu_list)
+    assert actual.dtype == compute_dtype
     _assert_close("mega_vs_native", actual, expected)
 
 
@@ -199,13 +203,18 @@ def test_mega_chunk_gdn_e2e(total_tokens, cu_list, num_value_heads, num_key_head
     ],
 )
 @pytest.mark.parametrize("state_kind", ["zero", "random"])
-def test_mega_chunk_gdn_initial_state(total_tokens, cu_list, num_value_heads, num_key_heads, state_kind):
-    q, k, v, g, beta = _make_inputs(total_tokens, num_value_heads, num_key_heads, seed=1)
+@pytest.mark.parametrize("compute_dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+def test_mega_chunk_gdn_initial_state(
+    total_tokens, cu_list, num_value_heads, num_key_heads, state_kind, compute_dtype
+):
+    q, k, v, g, beta = _make_inputs(
+        total_tokens, num_value_heads, num_key_heads, seed=1, dtype=compute_dtype
+    )
     num_sequences = 1 if cu_list is None else len(cu_list) - 1
     if state_kind == "zero":
-        h0 = torch.zeros(num_sequences, num_value_heads, 128, 128, dtype=torch.float16)
+        h0 = torch.zeros(num_sequences, num_value_heads, 128, 128, dtype=compute_dtype)
     else:
-        h0 = (0.1 * torch.randn(num_sequences, num_value_heads, 128, 128)).half()
+        h0 = (0.1 * torch.randn(num_sequences, num_value_heads, 128, 128)).to(compute_dtype)
 
     actual, actual_final_state = _run_mega(q, k, v, g, beta, cu_list, h0, output_final_state=True)
     expected, expected_final_state = _native_reference(q, k, v, g, beta, cu_list, h0, output_final_state=True)
@@ -214,11 +223,14 @@ def test_mega_chunk_gdn_initial_state(total_tokens, cu_list, num_value_heads, nu
 
 
 @pytest.mark.parametrize(("num_value_heads", "num_key_heads"), SUPPORTED_HEAD_CONFIGS)
-def test_mega_chunk_gdn_supported_head_configs(num_value_heads, num_key_heads):
+@pytest.mark.parametrize("compute_dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+def test_mega_chunk_gdn_supported_head_configs(num_value_heads, num_key_heads, compute_dtype):
     total_tokens = 129
     cu_list = [0, 64, total_tokens]
-    q, k, v, g, beta = _make_inputs(total_tokens, num_value_heads, num_key_heads, seed=2)
-    h0 = (0.05 * torch.randn(len(cu_list) - 1, num_value_heads, 128, 128)).half()
+    q, k, v, g, beta = _make_inputs(
+        total_tokens, num_value_heads, num_key_heads, seed=2, dtype=compute_dtype
+    )
+    h0 = (0.05 * torch.randn(len(cu_list) - 1, num_value_heads, 128, 128)).to(compute_dtype)
 
     actual, actual_final_state = _run_mega(q, k, v, g, beta, cu_list, h0, output_final_state=True)
     expected, expected_final_state = _native_reference(q, k, v, g, beta, cu_list, h0, output_final_state=True)

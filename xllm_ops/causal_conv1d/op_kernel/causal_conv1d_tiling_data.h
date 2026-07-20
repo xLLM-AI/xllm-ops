@@ -25,6 +25,16 @@ enum FnExecutionPlan : int64_t {
     FN_EXECUTION_PLAN_CUTBSD = 2,
 };
 
+enum CausalConv1dActivationMode : int64_t {
+    CAUSAL_CONV1D_ACTIVATION_NONE = 0,
+    CAUSAL_CONV1D_ACTIVATION_SILU = 1,
+    CAUSAL_CONV1D_ACTIVATION_SILU_PACKED_QKV = 2,
+};
+
+inline constexpr int64_t CAUSAL_CONV1D_PACKED_QKV_LEGACY_DIM = 5120;
+inline constexpr int64_t CAUSAL_CONV1D_PACKED_QK_LEGACY_DIM = 2048;
+inline constexpr int64_t CAUSAL_CONV1D_PACKED_V_LEGACY_DIM = 3072;
+
 inline constexpr int64_t ResolveFnExecutionPlan(int64_t baseDimCnt)
 {
     if (baseDimCnt <= 0) {
@@ -53,6 +63,11 @@ struct CausalConv1dTilingData {
     int64_t activationMode;
     int64_t padSlotId;
     int64_t hasBias;
+
+    int64_t packedQDim;
+    int64_t packedKDim;
+    int64_t packedVDim;
+    int64_t packedHeadDim;
 
     int64_t baseDim;
     int64_t baseDimCnt;

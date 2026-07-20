@@ -15,6 +15,7 @@
  */
 
 #include "causal_conv1d_tiling_planner.h"
+#include "causal_conv1d_tiling.h"
 #include "causal_conv1d_tiling_validation.h"
 #include <cstdio>
 #include <cstdlib>
@@ -32,9 +33,59 @@ bool HostTilingDebugEnabled()
     return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
+FnHostPlan ChoosePackedQkvFnHostPlan(gert::TilingContext *context, const CausalConv1dTilingData &tiling,
+                                     uint64_t ubSize, uint32_t coreNum)
+{
+    FnHostPlan plan;
+    if (tiling.inputMode != 0 || tiling.batch <= 0 || tiling.cuSeqlen <= 0 || tiling.dim <= 0 ||
+        tiling.packedHeadDim <= 0 || coreNum == 0) {
+        return plan;
+    }
+
+    if (tiling.dim == CAUSAL_CONV1D_PACKED_QKV_LEGACY_DIM &&
+        tiling.packedQDim + tiling.packedKDim == CAUSAL_CONV1D_PACKED_QK_LEGACY_DIM &&
+        tiling.packedVDim == CAUSAL_CONV1D_PACKED_V_LEGACY_DIM) {
+        plan.baseDimChoice.baseDim = CAUSAL_CONV1D_PACKED_V_LEGACY_DIM;
+        plan.baseDimChoice.baseDimCnt = 2;
+    } else if (tiling.dim <= MAX_DIM_TILE_SIZE) {
+        plan.baseDimChoice.baseDim = tiling.dim;
+        plan.baseDimChoice.baseDimCnt = 1;
+    } else {
+        const int64_t ubLimitedBaseDim =
+            AlignDownInt64(ComputeFnUbLimitedBaseDim(ubSize), tiling.packedHeadDim);
+        if (ubLimitedBaseDim <= 0) {
+            return plan;
+        }
+        const int64_t baseDimCnt = CeilDivInt64(tiling.dim, ubLimitedBaseDim);
+        const int64_t balancedBaseDim =
+            AlignUpInt64(CeilDivInt64(tiling.dim, baseDimCnt), tiling.packedHeadDim);
+        plan.baseDimChoice.baseDim =
+            (balancedBaseDim > 0 && balancedBaseDim <= ubLimitedBaseDim) ? balancedBaseDim : ubLimitedBaseDim;
+        plan.baseDimChoice.baseDimCnt = CeilDivInt64(tiling.dim, plan.baseDimChoice.baseDim);
+    }
+
+    plan.executionPlan =
+        static_cast<FnExecutionPlan>(ResolveFnExecutionPlan(plan.baseDimChoice.baseDimCnt));
+    plan.caseKind = (plan.baseDimChoice.baseDimCnt == 1) ? FN_TILING_CASE_TOKEN_FIRST
+                                                        : FN_TILING_CASE_TOKEN_DIM_CO_SPLIT;
+    plan.baseDimChoice.gridSize = tiling.batch * plan.baseDimChoice.baseDimCnt;
+    plan.tokenBlockChoice =
+        ChooseUnifiedFnTokenBlockPlan(context, tiling, plan.baseDimChoice, plan.executionPlan, coreNum);
+    if (!plan.tokenBlockChoice.enabled) {
+        return {};
+    }
+    plan.tokenCoreMapping = BuildFnTokenCoreMappingChoice(
+        plan.tokenBlockChoice.tokenBlockCnt, plan.baseDimChoice.baseDimCnt, plan.executionPlan, coreNum);
+    if (plan.tokenCoreMapping.tokenCoreBudget <= 0 || plan.tokenCoreMapping.blockDim <= 0) {
+        return {};
+    }
+    plan.tokenCoreMapping.blockDim = std::min<int64_t>(plan.tokenCoreMapping.blockDim, coreNum);
+    return plan;
+}
+
 } // namespace
 
-static ge::graphStatus CausalConv1dTilingFunc(gert::TilingContext *context)
+ge::graphStatus CausalConv1dTilingFunc(gert::TilingContext *context)
 {
     uint64_t ubSize = 0;
     uint32_t coreNum = 0;
@@ -71,7 +122,9 @@ static ge::graphStatus CausalConv1dTilingFunc(gert::TilingContext *context)
     }
 
     if (isFn) {
-        fnHostPlan = ChooseFnHostPlan(context, *tiling, ubSize, coreNum);
+        fnHostPlan = attrInfo.activationMode == CAUSAL_CONV1D_ACTIVATION_SILU_PACKED_QKV
+                         ? ChoosePackedQkvFnHostPlan(context, *tiling, ubSize, coreNum)
+                         : ChooseFnHostPlan(context, *tiling, ubSize, coreNum);
         plannerModeTag = GetFnTilingCaseName(fnHostPlan.caseKind);
         baseDimChoice = fnHostPlan.baseDimChoice;
         fnExecutionPlan = fnHostPlan.executionPlan;
@@ -168,7 +221,7 @@ static ge::graphStatus CausalConv1dTilingFunc(gert::TilingContext *context)
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus TilingParseForCausalConv1d(gert::TilingParseContext *context)
+ge::graphStatus TilingParseForCausalConv1d(gert::TilingParseContext *context)
 {
     OP_LOGD(context, "Enter TilingParseForCausalConv1d.");
     return ge::GRAPH_SUCCESS;
