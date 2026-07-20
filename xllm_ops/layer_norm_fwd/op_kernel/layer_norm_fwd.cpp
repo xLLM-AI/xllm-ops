@@ -53,37 +53,43 @@ __aicore__ inline float NormalizeEps(float eps) {
 }
 
 __aicore__ inline void WaitMte2ToV() {
-  event_t event_id = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+  event_t event_id = static_cast<event_t>(EVENT_ID0);
   SetFlag<HardEvent::MTE2_V>(event_id);
   WaitFlag<HardEvent::MTE2_V>(event_id);
 }
 
 __aicore__ inline void WaitSToMte3() {
-  event_t event_id = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_MTE3));
+  event_t event_id = static_cast<event_t>(EVENT_ID1);
   SetFlag<HardEvent::S_MTE3>(event_id);
   WaitFlag<HardEvent::S_MTE3>(event_id);
 }
 
 __aicore__ inline void WaitVToS() {
-  event_t event_id = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+  event_t event_id = static_cast<event_t>(EVENT_ID7);
   SetFlag<HardEvent::V_S>(event_id);
   WaitFlag<HardEvent::V_S>(event_id);
 }
 
+__aicore__ inline void WaitSToV() {
+  event_t event_id = static_cast<event_t>(EVENT_ID6);
+  SetFlag<HardEvent::S_V>(event_id);
+  WaitFlag<HardEvent::S_V>(event_id);
+}
+
 __aicore__ inline void WaitVToMte3() {
-  event_t event_id = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+  event_t event_id = static_cast<event_t>(EVENT_ID2);
   SetFlag<HardEvent::V_MTE3>(event_id);
   WaitFlag<HardEvent::V_MTE3>(event_id);
 }
 
 __aicore__ inline void WaitVToMte2() {
-  event_t event_id = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+  event_t event_id = static_cast<event_t>(EVENT_ID3);
   SetFlag<HardEvent::V_MTE2>(event_id);
   WaitFlag<HardEvent::V_MTE2>(event_id);
 }
 
 __aicore__ inline void WaitMte3ToV() {
-  event_t event_id = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+  event_t event_id = static_cast<event_t>(EVENT_ID4);
   SetFlag<HardEvent::MTE3_V>(event_id);
   WaitFlag<HardEvent::MTE3_V>(event_id);
 }
@@ -167,6 +173,7 @@ __aicore__ inline float ReduceSumValue(LocalTensor<float> scalar,
   PipeBarrier<PIPE_V>();
   ReduceSum(scalar, backup, reduce_tmp, count);
   PipeBarrier<PIPE_V>();
+  WaitVToS();
   return scalar.GetValue(0);
 }
 
@@ -174,15 +181,21 @@ __aicore__ inline float ReduceSumValueNoCopy(LocalTensor<float> scalar,
                                              LocalTensor<float> src,
                                              LocalTensor<float> reduce_tmp,
                                              uint32_t count) {
+  WaitSToV();
   ReduceSum(scalar, src, reduce_tmp, count);
   PipeBarrier<PIPE_V>();
-  return scalar.GetValue(0);
+  WaitVToS();
+  float v = scalar.GetValue(0);
+  WaitSToV();
+  return v;
 }
 
 __aicore__ inline float SqrtValue(LocalTensor<float> scalar, float value) {
+  WaitVToS();
   scalar.SetValue(0, value);
+  WaitSToV();
   Sqrt(scalar, scalar, 1);
-  PipeBarrier<PIPE_V>();
+  WaitVToS();
   return scalar.GetValue(0);
 }
 
@@ -228,8 +241,9 @@ __aicore__ inline float RstdFromSquareSum(LocalTensor<float> scalar,
   Mul(square_buf, row_x, row_x, count);
   PipeBarrier<PIPE_V>();
   const float square_sum =
-      ReduceSumValueNoCopy(scalar, square_buf, reduce_tmp, count);
-  return RstdFromVariance<T>(scalar, square_sum / U32ToFloat(count), eps);
+      ReduceSumValue(scalar, square_buf, square_buf, reduce_tmp, count);
+  const float variance = square_sum / U32ToFloat(count);
+  return RstdFromVariance<T>(scalar, variance, eps);
 }
 
 __aicore__ inline void ReduceSumRowsN128(LocalTensor<float> dst,
@@ -262,7 +276,7 @@ __aicore__ inline void ReduceSumRowsN128(LocalTensor<float> dst,
     WholeReduceSum<float, false>(dst, work, MASK_PLACEHOLDER, rows, 1, 1,
                                  kFp32RepeatElems / kFp32BlockElems);
   }
-#elif defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003
+#elif defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3510)
   WholeReduceSum(dst, work, kFp32RepeatElems, rows, 1, 1,
                  kFp32RepeatElems / kFp32BlockElems);
 #else
@@ -289,15 +303,16 @@ __aicore__ inline void RstdRowsN128(LocalTensor<float> rstd,
     row_offset += batch_rows;
   }
 
-  Muls(rstd, rstd, kInvQwenGroupSize, rows);
+  const uint32_t aligned_rows = AlignUp(rows, kFp32BlockElems);
+  Muls(rstd, rstd, kInvQwenGroupSize, aligned_rows);
   PipeBarrier<PIPE_V>();
-  Adds(rstd, rstd, eps, rows);
+  Adds(rstd, rstd, eps, aligned_rows);
   PipeBarrier<PIPE_V>();
-  Sqrt(rstd, rstd, rows);
+  Sqrt(rstd, rstd, aligned_rows);
   PipeBarrier<PIPE_V>();
-  Duplicate(reduce_work, 1.0f, rows);
+  Duplicate(reduce_work, 1.0f, aligned_rows);
   PipeBarrier<PIPE_V>();
-  Div(rstd, reduce_work, rstd, rows);
+  Div(rstd, reduce_work, rstd, aligned_rows);
   PipeBarrier<PIPE_V>();
 }
 
@@ -422,7 +437,7 @@ class KernelFullRow {
     }
     pipe_.InitBuffer(xFp32Buf_, tile_elems * sizeof(float));
     pipe_.InitBuffer(tmpFp32Buf_, tile_elems * sizeof(float));
-    pipe_.InitBuffer(reduceTmpBuf_, AlignUp(groupAlign_, kFp32BlockElems) * sizeof(float));
+    pipe_.InitBuffer(reduceTmpBuf_, tileRows_ * AlignUp(groupAlign_, kFp32BlockElems) * sizeof(float));
     if (IsRmsGateN128() || IsRmsN128NoZ()) {
       pipe_.InitBuffer(rowReduceTmpBuf_,
                        kN128ReduceBatchRows * kFp32RepeatElems * sizeof(float));
@@ -656,33 +671,12 @@ class KernelFullRow {
 
   __aicore__ inline void ProcessTilesRmsN128NoZ(uint32_t row_start,
                                                 uint32_t rows_left) {
-    uint32_t current_row = row_start;
-    uint32_t current_rows = MinU32(tileRows_, rows_left);
-    PrefetchTileRmsN128NoZ(current_row, current_rows);
-    rows_left -= current_rows;
-    uint32_t next_row = current_row + current_rows;
-
-    while (true) {
-      LocalTensor<T> x_local;
-      WaitTileRmsN128NoZ(x_local);
-
-      const bool has_next = rows_left > 0;
-      uint32_t prefetched_row = next_row;
-      uint32_t prefetched_rows = 0;
-      if (has_next) {
-        prefetched_rows = MinU32(tileRows_, rows_left);
-        PrefetchTileRmsN128NoZ(prefetched_row, prefetched_rows);
-      }
-
-      ComputeTileRmsN128NoZ(current_row, current_rows, x_local);
-      if (!has_next) {
-        break;
-      }
-
-      current_row = prefetched_row;
-      current_rows = prefetched_rows;
-      next_row = prefetched_row + prefetched_rows;
-      rows_left -= prefetched_rows;
+    uint32_t cur = row_start;
+    while (rows_left > 0) {
+      const uint32_t cur_rows = MinU32(tileRows_, rows_left);
+      ProcessTileRmsN128NoZ(cur, cur_rows);
+      cur += cur_rows;
+      rows_left -= cur_rows;
     }
   }
 
@@ -810,11 +804,12 @@ class KernelFullRow {
     for (uint32_t r = 0; r < rows; ++r) {
       LocalTensor<float> row_x = x_fp32[r * groupAlign_];
       LocalTensor<float> row_tmp = tmp_fp32[r * groupAlign_];
+      LocalTensor<float> row_reduce = reduce_tmp[r * AlignUp(groupAlign_, kFp32BlockElems)];
 
       if (hasZ_ != 0 && normBeforeGate_ == 0) {
         CastToFloat<T>(row_tmp, z_local[r * groupAlign_], groupAlign_);
         PipeBarrier<PIPE_V>();
-        Silu(row_tmp, row_tmp, reduce_tmp, groupSize_);
+        Silu(row_tmp, row_tmp, row_reduce, groupSize_);
         Mul(row_x, row_x, row_tmp, groupSize_);
         PipeBarrier<PIPE_V>();
       }
@@ -822,7 +817,7 @@ class KernelFullRow {
       float mean_val = 0.0f;
       if (isRmsNorm_ == 0) {
         const float sum_val =
-            ReduceSumValue(scalar, row_x, row_tmp, reduce_tmp, groupSize_);
+            ReduceSumValue(scalar, row_x, row_tmp, row_reduce, groupSize_);
         mean_val = sum_val / U32ToFloat(groupSize_);
         mean_stat.SetValue(stat_offset + r, mean_val);
         Adds(row_x, row_x, -mean_val, groupSize_);
@@ -830,7 +825,7 @@ class KernelFullRow {
       }
 
       const float rstd_val =
-          RstdFromSquareSum<T>(scalar, row_x, row_tmp, reduce_tmp,
+          RstdFromSquareSum<T>(scalar, row_x, row_tmp, row_reduce,
                                groupSize_, eps_);
       rstd_stat.SetValue(stat_offset + r, rstd_val);
 
@@ -846,7 +841,7 @@ class KernelFullRow {
       if (hasZ_ != 0 && normBeforeGate_ != 0) {
         CastToFloat<T>(row_tmp, z_local[r * groupAlign_], groupAlign_);
         PipeBarrier<PIPE_V>();
-        Silu(row_tmp, row_tmp, reduce_tmp, groupSize_);
+        Silu(row_tmp, row_tmp, row_reduce, groupSize_);
         Mul(row_x, row_x, row_tmp, groupSize_);
         PipeBarrier<PIPE_V>();
       }

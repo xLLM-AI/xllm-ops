@@ -28,6 +28,10 @@ def beam_search_group_npu(log_probs, top_tokens, top_probs, sequence, current_st
     return custom_ops_lib.beam_search_group(log_probs, top_tokens, top_probs, sequence, current_step, top_k)
 
 
+def beam_search_npu(log_probs, top_tokens, top_probs):
+    return custom_ops_lib.beam_search(log_probs, top_tokens, top_probs)
+
+
 def beam_search_rec_final_select_npu(log_probs: torch.Tensor,
                                      top_tokens: torch.Tensor,
                                      top_probs: torch.Tensor,
