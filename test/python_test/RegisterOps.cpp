@@ -664,6 +664,19 @@ std::tuple<at::Tensor&, at::Tensor&> convert_kv_cache_format_impl_npu(
   return std::tuple<at::Tensor&, at::Tensor&>(k_cache_ptr, v_cache_ptr);
 }
 
+at::Tensor& inplace_partial_rotary_mul_impl_npu(
+    at::Tensor& x,
+    const at::Tensor& cos,
+    const at::Tensor& sin,
+    int64_t mode,
+    at::IntArrayRef partial_slice) {
+  // In-place interleaved partial RoPE: x[..., start:end] is rotated in place.
+  // aclnn signature: (xRef, cos, sin, int64 mode, aclIntArray* partialSlice).
+  // mode must be 1 (interleave); partial_slice = {start, end}.
+  EXEC_NPU_CMD(aclnnInplacePartialRotaryMul, x, cos, sin, mode, partial_slice);
+  return x;
+}
+
 at::Tensor& scatter_nd_update_v2_impl_npu(
     at::Tensor& var,
     const at::Tensor& indices,
@@ -1106,6 +1119,116 @@ std::tuple<at::Tensor, at::Tensor> dequant_swiglu_quant_impl_npu(
   return std::make_tuple(y, scale);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+rms_norm_dynamic_quant_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& gamma,
+    const c10::optional<at::Tensor>& smooth_scale1,
+    const c10::optional<at::Tensor>& smooth_scale2,
+    const c10::optional<at::Tensor>& beta,
+    double epsilon) {
+  // RmsNorm + dynamic per-token int8 quant.
+  //   rstd = 1/sqrt(mean(x^2, last dim) + eps); out = x*rstd*gamma (+ beta).
+  //   t1 = out*smooth1 (or out); scale1 = max(|t1|)/127; y1 = round(t1/scale1).
+  //   t2/y2/scale2 mirror t1 via smooth2. y1/y2:(x shape) int8,
+  //   scale1/scale2:(x shape without last dim) fp32.
+  // aclnn signature: x, gamma, smoothScale1, smoothScale2, beta, epsilon(double),
+  //   outputMask(aclBoolArray), dstType(int64), y1, y2, scale1, scale2.
+  // Empty outputMask -> "isOld" full-output path (all four tensors written).
+  auto sizes = x.sizes().vec();
+  std::vector<int64_t> scale_shape(sizes.begin(), sizes.end() - 1);
+
+  at::Tensor y1 = at::empty(sizes, x.options().dtype(at::ScalarType::Char));
+  at::Tensor y2 = at::empty(sizes, x.options().dtype(at::ScalarType::Char));
+  at::Tensor scale1 = at::zeros(scale_shape,
+                                x.options().dtype(at::ScalarType::Float));
+  at::Tensor scale2 = at::zeros(scale_shape,
+                                x.options().dtype(at::ScalarType::Float));
+
+  // outputMask semantics (see rms_norm_dynamic_quant_tiling.cpp):
+  //   size == 2 -> parse [outQuant1Flag, outQuant2Flag] (0/1); this "oldDouble"
+  //     path has a per-row scale-init bug on small shapes.
+  //   size != 2 (or nullptr) -> outQuant1Flag = outQuant2Flag = -1, the correct
+  //     "isOld" full-output path.
+  // Empty array is rejected by aclnn (NnopbaseAddBoolArrayAttr failed), so we
+  // pass a single-element array (size == 1) to hit the isOld path safely.
+  const bool output_mask_data[1] = {true};
+  at::ArrayRef<bool> output_mask(output_mask_data, 1);
+  // dstType = ACL_INT8 (2): quantized outputs are int8.
+  constexpr int64_t DST_TYPE_INT8 = 2;
+
+  EXEC_NPU_CMD(aclnnRmsNormDynamicQuant,
+               x,
+               gamma,
+               smooth_scale1,
+               smooth_scale2,
+               beta,
+               epsilon,
+               output_mask,
+               DST_TYPE_INT8,
+               y1,
+               y2,
+               scale1,
+               scale2);
+  return std::make_tuple(y1, y2, scale1, scale2);
+}
+
+at::Tensor lightning_indexer_quant_impl_npu(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& weights,
+    const at::Tensor& query_dequant_scale,
+    const at::Tensor& key_dequant_scale,
+    int64_t query_quant_mode,
+    int64_t key_quant_mode,
+    std::string layout_query,
+    std::string layout_key,
+    int64_t sparse_count,
+    int64_t sparse_mode) {
+  // int8 grouped weighted dot-product indexer + topk sparse index selection.
+  //   query : int8 [B, S1, N, 128] BSND (N = qHeadNum, headDim must be 128)
+  //   key   : int8 [B, S2, 1, 128] BSND (keyHeadNum must be 1)
+  //   weights / query_dequant_scale : fp16 [B, S1, N]
+  //   key_dequant_scale             : fp16 [B, S2, 1]
+  //   score[b,s1,s2] = sum_n( w * qScale * kScale * sum_d(q*k) ), then
+  //   topk descending over valid s2 (causal when sparse_mode == 3).
+  //   output int32 [B, S1, keyHeadNum, sparse_count] (BSND), -1 padded.
+  // aclnn signature: query, key, weights, queryDequantScale, keyDequantScale,
+  //   actualSeqLengthsQuery(opt), actualSeqLengthsKey(opt), blockTable(opt),
+  //   queryQuantMode(i64), keyQuantMode(i64), layoutQuery(char*),
+  //   layoutKey(char*), sparseCount(i64), sparseMode(i64), out.
+  // Non-PA (BSND key) path: block_table / actual_seq_lengths must be null,
+  //   and layout_query must equal layout_key.
+  auto q_sizes = query.sizes().vec();
+  const int64_t B = q_sizes[0];
+  const int64_t S1 = q_sizes[1];
+  const int64_t key_head_num = key.sizes()[2];
+  at::Tensor out = at::empty({B, S1, key_head_num, sparse_count},
+                             query.options().dtype(at::ScalarType::Int));
+  // aclnn expects layout as char* (1 slot). Passing c10::string_view shifts
+  // subsequent args -> SIGSEGV (see laser_attention).
+  char* layout_query_c = const_cast<char*>(layout_query.c_str());
+  char* layout_key_c = const_cast<char*>(layout_key.c_str());
+  const c10::optional<at::Tensor> null_opt;  // non-PA: all null.
+  EXEC_NPU_CMD(aclnnLightningIndexerQuant,
+               query,
+               key,
+               weights,
+               query_dequant_scale,
+               key_dequant_scale,
+               null_opt,
+               null_opt,
+               null_opt,
+               query_quant_mode,
+               key_quant_mode,
+               layout_query_c,
+               layout_key_c,
+               sparse_count,
+               sparse_mode,
+               out);
+  return out;
+}
+
 std::tuple<at::Tensor, at::Tensor> moe_grouped_matmul_swiglu_quant_impl_npu(
     const at::Tensor& x,
     const at::Tensor& weight,
@@ -1318,6 +1441,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("replace_token", &replace_token_impl_npu, "replace_token");
   m.def("convert_kv_cache_format", &convert_kv_cache_format_impl_npu, "convert_kv_cache_format");
   m.def("scatter_nd_update_v2", &scatter_nd_update_v2_impl_npu, "scatter_nd_update_v2");
+  m.def("inplace_partial_rotary_mul", &inplace_partial_rotary_mul_impl_npu, "inplace_partial_rotary_mul");
   m.def("hc_post", &hc_post_impl_npu, "hc_post");
   m.def("add_rms_norm_bias", &add_rms_norm_bias_impl_npu, "add_rms_norm_bias");
   m.def("gamma_add_rms_norm",
@@ -1338,4 +1462,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("laser_attention", &laser_attention_impl_npu, "laser_attention");
   m.def("x_flash_attention_infer", &x_flash_attention_infer_impl_npu, "x_flash_attention_infer");
   m.def("multi_latent_attention", &multi_latent_attention_impl_npu, "multi_latent_attention");
+  m.def("rms_norm_dynamic_quant", &rms_norm_dynamic_quant_impl_npu, "rms_norm_dynamic_quant");
+  m.def("lightning_indexer_quant", &lightning_indexer_quant_impl_npu, "lightning_indexer_quant");
 }

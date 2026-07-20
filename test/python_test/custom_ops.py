@@ -171,6 +171,13 @@ def scatter_nd_update_v2_npu(var, indices, updates, strides):
     return custom_ops_lib.scatter_nd_update_v2(var, indices, updates, strides)
 
 
+# inplace_partial_rotary_mul (in-place interleaved partial RoPE on x[..., start:end])
+#   x: [B, S, N, allHeadDim]; cos/sin: [B, S, 1, headDim] with headDim=end-start
+#   mode must be 1 (interleave); partial_slice=[start, end]
+def inplace_partial_rotary_mul_npu(x, cos, sin, mode, partial_slice):
+    return custom_ops_lib.inplace_partial_rotary_mul(x, cos, sin, mode, partial_slice)
+
+
 # hc_post (per-token fused combine:
 #   y[b,hc,d] = sum_j residual[b,j,d]*comb[b,j,hc] + x[b,d]*post[b,hc])
 def hc_post_npu(x, residual, post, comb):
@@ -488,3 +495,33 @@ def grouped_matmul_swiglu_quant_v2_npu(x, weight, weight_scale, x_scale,
     return custom_ops_lib.grouped_matmul_swiglu_quant_v2(
         x, weight_nz, weight_scale, x_scale, group_list,
         group_list_type)
+
+
+# rms_norm_dynamic_quant: RmsNorm + dynamic per-token int8 quant (dual output).
+#   rstd = 1/sqrt(mean(x^2, -1) + eps); out = x*rstd*gamma (+ beta).
+#   t1 = out*smooth1 (or out); scale1 = max(|t1|,-1)/127; y1 = round(t1/scale1).
+#   t2/y2/scale2 mirror via smooth2. x:(...,H) bf16/fp16, gamma:(H,).
+#   smooth1/smooth2:(H,) optional, beta:(H,) optional. Full-output path
+#   (output_mask empty) writes all four: y1,y2 int8 (x shape), scale1,scale2
+#   fp32 (x shape without last dim). H should be a multiple of 32.
+def rms_norm_dynamic_quant_npu(x, gamma, smooth_scale1=None, smooth_scale2=None,
+                               beta=None, epsilon=1e-6):
+    return custom_ops_lib.rms_norm_dynamic_quant(
+        x, gamma, smooth_scale1, smooth_scale2, beta, epsilon)
+
+
+# lightning_indexer_quant: int8 grouped weighted dot-product indexer + topk.
+#   query:(B,S1,N,128) int8, key:(B,S2,1,128) int8 (keyHeadNum must be 1),
+#   weights/query_scale:(B,S1,N) fp16, key_scale:(B,S2,1) fp16.
+#   score[b,s1,s2] = sum_n(w * qScale * kScale * sum_d(q*k)); topk descending
+#   over valid s2 (causal when sparse_mode==3). Output int32
+#   [B,S1,keyHeadNum,sparse_count], -1 padded. Non-PA (BSND key): block_table
+#   / actual_seq_lengths are null and layout_query must equal layout_key.
+def lightning_indexer_quant_npu(query, key, weights, query_scale, key_scale,
+                                query_quant_mode=0, key_quant_mode=0,
+                                layout_query="BSND", layout_key="BSND",
+                                sparse_count=128, sparse_mode=0):
+    return custom_ops_lib.lightning_indexer_quant(
+        query, key, weights, query_scale, key_scale,
+        query_quant_mode, key_quant_mode,
+        layout_query, layout_key, sparse_count, sparse_mode)
