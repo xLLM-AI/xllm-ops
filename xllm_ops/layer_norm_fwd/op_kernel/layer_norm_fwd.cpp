@@ -26,6 +26,11 @@ constexpr uint32_t kQwenGroupSize = 128;
 constexpr uint32_t kN128ReduceBatchRows = 32;
 constexpr float kInvQwenGroupSize = 0.0078125f;
 constexpr float kDefaultEps = 1e-6f;
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510
+constexpr bool kNeedsExplicitScalarSync = true;
+#else
+constexpr bool kNeedsExplicitScalarSync = false;
+#endif
 
 enum KernelMode : uint32_t {
   kFullRow = 0,
@@ -52,44 +57,60 @@ __aicore__ inline float NormalizeEps(float eps) {
   return eps > 0.0f ? eps : kDefaultEps;
 }
 
+template <HardEvent event>
+__aicore__ inline event_t ResolveEventId(event_t fixed_event_id) {
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510
+  return fixed_event_id;
+#else
+  return static_cast<event_t>(GetTPipePtr()->FetchEventID(event));
+#endif
+}
+
 __aicore__ inline void WaitMte2ToV() {
-  event_t event_id = static_cast<event_t>(EVENT_ID0);
+  const event_t event_id =
+      ResolveEventId<HardEvent::MTE2_V>(static_cast<event_t>(EVENT_ID0));
   SetFlag<HardEvent::MTE2_V>(event_id);
   WaitFlag<HardEvent::MTE2_V>(event_id);
 }
 
 __aicore__ inline void WaitSToMte3() {
-  event_t event_id = static_cast<event_t>(EVENT_ID1);
+  const event_t event_id =
+      ResolveEventId<HardEvent::S_MTE3>(static_cast<event_t>(EVENT_ID1));
   SetFlag<HardEvent::S_MTE3>(event_id);
   WaitFlag<HardEvent::S_MTE3>(event_id);
 }
 
 __aicore__ inline void WaitVToS() {
-  event_t event_id = static_cast<event_t>(EVENT_ID7);
+  const event_t event_id =
+      ResolveEventId<HardEvent::V_S>(static_cast<event_t>(EVENT_ID7));
   SetFlag<HardEvent::V_S>(event_id);
   WaitFlag<HardEvent::V_S>(event_id);
 }
 
 __aicore__ inline void WaitSToV() {
-  event_t event_id = static_cast<event_t>(EVENT_ID6);
+  const event_t event_id =
+      ResolveEventId<HardEvent::S_V>(static_cast<event_t>(EVENT_ID6));
   SetFlag<HardEvent::S_V>(event_id);
   WaitFlag<HardEvent::S_V>(event_id);
 }
 
 __aicore__ inline void WaitVToMte3() {
-  event_t event_id = static_cast<event_t>(EVENT_ID2);
+  const event_t event_id =
+      ResolveEventId<HardEvent::V_MTE3>(static_cast<event_t>(EVENT_ID2));
   SetFlag<HardEvent::V_MTE3>(event_id);
   WaitFlag<HardEvent::V_MTE3>(event_id);
 }
 
 __aicore__ inline void WaitVToMte2() {
-  event_t event_id = static_cast<event_t>(EVENT_ID3);
+  const event_t event_id =
+      ResolveEventId<HardEvent::V_MTE2>(static_cast<event_t>(EVENT_ID3));
   SetFlag<HardEvent::V_MTE2>(event_id);
   WaitFlag<HardEvent::V_MTE2>(event_id);
 }
 
 __aicore__ inline void WaitMte3ToV() {
-  event_t event_id = static_cast<event_t>(EVENT_ID4);
+  const event_t event_id =
+      ResolveEventId<HardEvent::MTE3_V>(static_cast<event_t>(EVENT_ID4));
   SetFlag<HardEvent::MTE3_V>(event_id);
   WaitFlag<HardEvent::MTE3_V>(event_id);
 }
@@ -173,7 +194,9 @@ __aicore__ inline float ReduceSumValue(LocalTensor<float> scalar,
   PipeBarrier<PIPE_V>();
   ReduceSum(scalar, backup, reduce_tmp, count);
   PipeBarrier<PIPE_V>();
-  WaitVToS();
+  if constexpr (kNeedsExplicitScalarSync) {
+    WaitVToS();
+  }
   return scalar.GetValue(0);
 }
 
@@ -181,21 +204,34 @@ __aicore__ inline float ReduceSumValueNoCopy(LocalTensor<float> scalar,
                                              LocalTensor<float> src,
                                              LocalTensor<float> reduce_tmp,
                                              uint32_t count) {
-  WaitSToV();
+  if constexpr (kNeedsExplicitScalarSync) {
+    WaitSToV();
+  }
   ReduceSum(scalar, src, reduce_tmp, count);
   PipeBarrier<PIPE_V>();
-  WaitVToS();
-  float v = scalar.GetValue(0);
-  WaitSToV();
-  return v;
+  if constexpr (kNeedsExplicitScalarSync) {
+    WaitVToS();
+    const float value = scalar.GetValue(0);
+    WaitSToV();
+    return value;
+  }
+  return scalar.GetValue(0);
 }
 
 __aicore__ inline float SqrtValue(LocalTensor<float> scalar, float value) {
-  WaitVToS();
+  if constexpr (kNeedsExplicitScalarSync) {
+    WaitVToS();
+  }
   scalar.SetValue(0, value);
-  WaitSToV();
+  if constexpr (kNeedsExplicitScalarSync) {
+    WaitSToV();
+  }
   Sqrt(scalar, scalar, 1);
-  WaitVToS();
+  if constexpr (kNeedsExplicitScalarSync) {
+    WaitVToS();
+  } else {
+    PipeBarrier<PIPE_V>();
+  }
   return scalar.GetValue(0);
 }
 
@@ -437,7 +473,9 @@ class KernelFullRow {
     }
     pipe_.InitBuffer(xFp32Buf_, tile_elems * sizeof(float));
     pipe_.InitBuffer(tmpFp32Buf_, tile_elems * sizeof(float));
-    pipe_.InitBuffer(reduceTmpBuf_, tileRows_ * AlignUp(groupAlign_, kFp32BlockElems) * sizeof(float));
+    // Rows are processed serially, so they can share one reduction scratch.
+    pipe_.InitBuffer(reduceTmpBuf_,
+                     AlignUp(groupAlign_, kFp32BlockElems) * sizeof(float));
     if (IsRmsGateN128() || IsRmsN128NoZ()) {
       pipe_.InitBuffer(rowReduceTmpBuf_,
                        kN128ReduceBatchRows * kFp32RepeatElems * sizeof(float));
@@ -804,7 +842,7 @@ class KernelFullRow {
     for (uint32_t r = 0; r < rows; ++r) {
       LocalTensor<float> row_x = x_fp32[r * groupAlign_];
       LocalTensor<float> row_tmp = tmp_fp32[r * groupAlign_];
-      LocalTensor<float> row_reduce = reduce_tmp[r * AlignUp(groupAlign_, kFp32BlockElems)];
+      LocalTensor<float> row_reduce = reduce_tmp;
 
       if (hasZ_ != 0 && normBeforeGate_ == 0) {
         CastToFloat<T>(row_tmp, z_local[r * groupAlign_], groupAlign_);

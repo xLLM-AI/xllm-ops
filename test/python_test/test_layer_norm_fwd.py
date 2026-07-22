@@ -139,3 +139,27 @@ def test_layer_norm_fwd_npu(dtype, batch, full_n, group_size, has_bias,
     if not is_rms_norm:
         mean_npu = mean_npu.cpu().float()
         assert torch.allclose(mean_npu, mean_ref, atol=1e-2, rtol=1e-2)
+
+
+def test_layer_norm_fwd_large_n128_ub_budget():
+    try:
+        torch_npu.npu.set_device(0)
+    except Exception as e:
+        pytest.skip(f"NPU device not available: {e}")
+
+    torch.manual_seed(2026)
+    eps = 1e-6
+    x = torch.randn(4096, 128, dtype=torch.bfloat16)
+    weight = torch.randn(128, dtype=torch.bfloat16)
+    z = torch.randn_like(x)
+
+    x_fp32 = x.float()
+    rstd_ref = torch.rsqrt((x_fp32 * x_fp32).mean(dim=-1) + eps)
+    y_ref = (x_fp32 * rstd_ref[:, None] * weight.float()) * _silu(z.float())
+
+    y_npu, _, rstd_npu = custom_ops.layer_norm_fwd_npu(
+        x.npu(), weight.npu(), None, z.npu(), eps, -1, True, True)
+
+    assert torch.allclose(y_npu.cpu().float(), y_ref, atol=1e-2, rtol=1e-2)
+    assert torch.allclose(rstd_npu.cpu().float(), rstd_ref, atol=1e-2,
+                          rtol=1e-2)
