@@ -1445,41 +1445,22 @@ qwen35_gdn_decode_super_op(
     const at::Tensor& norm_weight) {
   at::Tensor conv_out = at::empty_like(qkv);
   at::Tensor out = at::empty_like(z);
-  if (qkv.size(0) == 1) {
-    EXEC_NPU_CMD(aclnnQwen35GdnDecodeSuperOp,
-                 qkv,
-                 z,
-                 b,
-                 a,
-                 conv_weight,
-                 conv_state,
-                 a_log,
-                 dt_bias,
-                 ssm_state,
-                 state_indices,
-                 norm_weight,
-                 conv_out,
-                 conv_state,
-                 ssm_state,
-                 out);
-  } else {
-    EXEC_NPU_CMD(aclnnQwen35GdnDecodeSuperOpBatch,
-                 qkv,
-                 z,
-                 b,
-                 a,
-                 conv_weight,
-                 conv_state,
-                 a_log,
-                 dt_bias,
-                 ssm_state,
-                 state_indices,
-                 norm_weight,
-                 conv_out,
-                 conv_state,
-                 ssm_state,
-                 out);
-  }
+  EXEC_NPU_CMD(aclnnQwen35GdnDecodeSuperOp,
+               qkv,
+               z,
+               b,
+               a,
+               conv_weight,
+               conv_state,
+               a_log,
+               dt_bias,
+               ssm_state,
+               state_indices,
+               norm_weight,
+               conv_out,
+               conv_state,
+               ssm_state,
+               out);
   return std::tuple<at::Tensor, at::Tensor&, at::Tensor&, at::Tensor>(
       conv_out, conv_state, ssm_state, out);
 }
