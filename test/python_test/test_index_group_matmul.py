@@ -35,6 +35,11 @@ import torch
 torch_npu = pytest.importorskip("torch_npu")
 custom_ops = pytest.importorskip("custom_ops")
 
+try:
+    torch_npu.npu.config.allow_internal_format = True  # allow FRACTAL_NZ tensors
+except Exception:
+    pass
+
 
 def index_group_matmul_golden(a, b, scale, per_token_scale, group_list):
     """Reference int8 grouped matmul + dequant, computed in fp32 -> bf16."""

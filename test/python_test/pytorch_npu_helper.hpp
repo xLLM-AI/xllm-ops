@@ -357,8 +357,16 @@ limitations under the License.
      return nullptr;
    }
    at::ScalarType scalar_data_type = at_tensor.scalar_type();
-   aclDataType acl_data_type =
-       kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(scalar_data_type)];
+   aclDataType acl_data_type;
+   if (scalar_data_type == at::ScalarType::Float8_e5m2) {
+     acl_data_type = static_cast<aclDataType>(35);
+   } else if (scalar_data_type == at::ScalarType::Float8_e4m3fn) {
+     acl_data_type = static_cast<aclDataType>(36);
+   } else {
+     auto idx = static_cast<int64_t>(scalar_data_type);
+     acl_data_type = (idx >= 0 && idx <= static_cast<int64_t>(at::ScalarType::NumOptions))
+         ? kATenScalarTypeToAclDataTypeTable[idx] : ACL_DT_UNDEFINED;
+   }
    TORCH_CHECK(
        acl_data_type != ACL_DT_UNDEFINED,
        std::string(c10::toString(scalar_data_type)) + " has not been supported")
@@ -516,7 +524,17 @@ limitations under the License.
  }
  
  inline aclDataType ConvertType(const at::ScalarType scalarType) {
-   return kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(scalarType)];
+   // Float8 types: enum values beyond old table coverage
+    if (scalarType == at::ScalarType::Float8_e5m2) {
+      return static_cast<aclDataType>(35); // ACL_FLOAT8_E5M2
+    } else if (scalarType == at::ScalarType::Float8_e4m3fn) {
+      return static_cast<aclDataType>(36); // ACL_FLOAT8_E4M3FN
+    }
+    auto idx = static_cast<int64_t>(scalarType);
+    if (idx < 0 || idx > static_cast<int64_t>(at::ScalarType::NumOptions)) {
+      return ACL_DT_UNDEFINED;
+    }
+    return kATenScalarTypeToAclDataTypeTable[idx];
  }
  
  template <typename T>

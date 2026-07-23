@@ -529,3 +529,160 @@ def lightning_indexer_quant_npu(query, key, weights, query_scale, key_scale,
         query, key, weights, query_scale, key_scale,
         query_quant_mode, key_quant_mode,
         layout_query, layout_key, sparse_count, sparse_mode)
+
+
+# compressor: single-step fusion (matmul + gate + softmax + compressKV + RmsNorm + RoPE).
+#   x:(B,S,HIDDEN), wkv/wgate:(COFF_D,HIDDEN), kv_state/score_state:(blockNum,blockSize,COFF_D) fp32 in-place,
+#   ape:(CMP_RATIO,COFF_D) fp32, norm_weight:(HEAD_DIM), rope_sin/cos:(B,SR,ROPE_HEAD_DIM),
+#   kv/score_block_table:(B,maxBlock) int32.
+#   Output: cmp_kv (B, SR, HEAD_DIM). enable_grad=False -> auxiliary outputs are placeholder.
+def compressor_npu(x, wkv, wgate, kv_state, score_state, ape, norm_weight,
+                   rope_sin, rope_cos, kv_block_table, score_block_table,
+                   rope_head_dim=64, cmp_ratio=128, coff=1,
+                   norm_eps=1e-6, rotary_mode=1, enable_grad=False):
+    return custom_ops_lib.compressor(
+        x, wkv, wgate, kv_state, score_state, ape, norm_weight,
+        rope_sin, rope_cos, kv_block_table, score_block_table,
+        rope_head_dim, cmp_ratio, coff, norm_eps, rotary_mode, enable_grad)
+
+
+# sparse_attn_sharedkv: two-stage (metadata + main) flash-attention with sliding window + sink.
+#   query:(B,S1,N1,D), ori_kv:(blockNum,blockSize,KV_N,D) paged, ori_bt:(B,maxBlocks) int32,
+#   seqused_kv:(B,) int32, sinks:(N1,) fp32.
+#   Output: attn_out (B, S1, N1, D).
+def sparse_attn_sharedkv_npu(query, ori_kv, ori_bt, seqused_kv, sinks,
+                              n1=64, kv_n=1, d=512, s1=4, s2=16,
+                              ori_mask_mode=4, cmp_mask_mode=3,
+                              ori_win_left=127, ori_win_right=0,
+                              softmax_scale=None, cmp_ratio=1,
+                              layout_q="BSND", layout_kv="PA_ND"):
+    import math
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(d)
+    return custom_ops_lib.sparse_attn_sharedkv(
+        query, ori_kv, ori_bt, seqused_kv, sinks,
+        n1, kv_n, d, s1, s2,
+        ori_mask_mode, cmp_mask_mode, ori_win_left, ori_win_right,
+        softmax_scale, cmp_ratio, layout_q, layout_kv)
+
+
+# quant_lightning_indexer: two-stage (metadata + main) fp8 quantized indexer with PA.
+#   query:(B,qSeq,numHeadsQ,headDim) fp8_e4m3, key:(blockNum,blockSize,numHeadsK,headDim) fp8_e4m3,
+#   weights:(B,qSeq,numHeadsQ) fp32, q_scale:(B,qSeq,numHeadsQ) fp32,
+#   k_scale:(blockNum,blockSize,numHeadsK) fp32, aslq/aslk:(B,) int32, block_table:(B,maxBlocks) int32.
+#   Output: idx_out (B, qSeq, numHeadsK, sparseCount) int32.
+def quant_lightning_indexer_npu(query, key, weights, q_scale, k_scale,
+                                aslq, aslk, block_table,
+                                num_heads_q=64, num_heads_k=1, head_dim=128,
+                                query_quant_mode=0, key_quant_mode=0,
+                                layout_query="BSND", layout_key="PA_BSND",
+                                sparse_count=8, sparse_mode=3,
+                                pre_token=9223372036854775807,
+                                next_token=9223372036854775807,
+                                cmp_ratio=1):
+    return custom_ops_lib.quant_lightning_indexer(
+        query, key, weights, q_scale, k_scale, aslq, aslk, block_table,
+        num_heads_q, num_heads_k, head_dim,
+        query_quant_mode, key_quant_mode,
+        layout_query, layout_key,
+        sparse_count, sparse_mode, pre_token, next_token, cmp_ratio)
+
+
+# dispatch_ffn_combine (multi-card MoE dispatch+FFN+combine fusion, int8 path)
+# weight1/weight2: list of tensors (per-expert NZ int8), scale1/scale2: list of tensors,
+# probs:(M,topk) fp32, group: HCCL comm name string.
+# out/expert_token_nums: pre-allocated output tensors (in-place write).
+def dispatch_ffn_combine_npu(x, weight1, weight2, expert_idx,
+                              scale1, scale2, probs, group,
+                              max_output_size, out, expert_token_nums,
+                              x_active_mask=None, swiglu_limit=0.0):
+    return custom_ops_lib.dispatch_ffn_combine(
+        x, weight1, weight2, expert_idx, scale1, scale2, probs,
+        group, max_output_size, out, expert_token_nums,
+        x_active_mask, swiglu_limit)
+
+
+# dispatch_gmm_combine_decode (multi-card MoE dispatch+GMM+combine decode fusion)
+# gmm1/gmm2 weight/scale: list of tensors.
+# group_ep: HCCL comm name string. Returns (output, expert_token_nums).
+def dispatch_gmm_combine_decode_npu(x, expert_ids, gmm1_permuted_weight,
+                                     gmm1_permuted_weight_scale,
+                                     gmm2_weight, gmm2_weight_scale,
+                                     expert_scales, group_ep,
+                                     ep_rank_size, ep_rank_id,
+                                     moe_expert_num, shared_expert_num=1,
+                                     shared_expert_rank_num=0, quant_mode=0,
+                                     global_bs=0, expert_smooth_scales=None,
+                                     x_active_mask=None):
+    return custom_ops_lib.dispatch_gmm_combine_decode(
+        x, expert_ids, gmm1_permuted_weight, gmm1_permuted_weight_scale,
+        gmm2_weight, gmm2_weight_scale, expert_scales,
+        expert_smooth_scales, x_active_mask,
+        group_ep, ep_rank_size, ep_rank_id, moe_expert_num,
+        shared_expert_num, shared_expert_rank_num, quant_mode, global_bs)
+
+
+# ==================== standalone metadata ops ====================
+
+# sparse_attn_sharedkv_metadata: AICPU metadata op for sparse_attn_sharedkv.
+#   Computes tiling/scheduling metadata for the two-stage sparse attention.
+#   Output: int32 tensor of size 1024 (opaque scheduling metadata).
+def sparse_attn_sharedkv_metadata_npu(cu_seq_q, cu_seq_ori_kv, cu_seq_cmp_kv,
+                                       seqused_q, seqused_kv,
+                                       num_heads_q=64, num_heads_kv=1, head_dim=512,
+                                       batch_size=1, max_seq_q=4, max_seq_kv=16,
+                                       ori_top_k=0, cmp_top_k=0, cmp_ratio=1,
+                                       ori_mask_mode=4, cmp_mask_mode=3,
+                                       ori_win_left=127, ori_win_right=0,
+                                       layout_q="BSND", layout_kv="PA_ND",
+                                       has_ori_kv=True, has_cmp_kv=False):
+    return custom_ops_lib.sparse_attn_sharedkv_metadata(
+        cu_seq_q, cu_seq_ori_kv, cu_seq_cmp_kv, seqused_q, seqused_kv,
+        num_heads_q, num_heads_kv, head_dim,
+        batch_size, max_seq_q, max_seq_kv,
+        ori_top_k, cmp_top_k, cmp_ratio,
+        ori_mask_mode, cmp_mask_mode, ori_win_left, ori_win_right,
+        layout_q, layout_kv, has_ori_kv, has_cmp_kv)
+
+
+# quant_lightning_indexer_metadata: AICPU metadata op for quant_lightning_indexer.
+#   Computes tiling/scheduling metadata for two-stage fp8 quantized indexer.
+#   Output: int32 tensor of size 1024 (opaque scheduling metadata).
+def quant_lightning_indexer_metadata_npu(aslq, aslk,
+                                         num_heads_q=64, num_heads_k=1, head_dim=128,
+                                         query_quant_mode=0, key_quant_mode=0,
+                                         batch_size=1, max_seq_q=1, max_seq_k=128,
+                                         layout_query="BSND", layout_key="PA_BSND",
+                                         sparse_count=8, sparse_mode=3,
+                                         pre_token=9223372036854775807,
+                                         next_token=9223372036854775807,
+                                         cmp_ratio=1):
+    return custom_ops_lib.quant_lightning_indexer_metadata(
+        aslq, aslk,
+        num_heads_q, num_heads_k, head_dim,
+        query_quant_mode, key_quant_mode,
+        batch_size, max_seq_q, max_seq_k,
+        layout_query, layout_key,
+        sparse_count, sparse_mode, pre_token, next_token, cmp_ratio)
+
+
+# lightning_indexer_quant_metadata: AICPU metadata op for lightning_indexer_quant.
+#   Similar to quant_lightning_indexer_metadata but with additional isFd parameter.
+#   Output: int32 tensor of size 1024 (opaque scheduling metadata).
+def lightning_indexer_quant_metadata_npu(aslq, aslk,
+                                         num_heads_q=64, num_heads_k=1, head_dim=128,
+                                         query_quant_mode=0, key_quant_mode=0,
+                                         batch_size=1, max_seq_q=1, max_seq_k=128,
+                                         layout_query="BSND", layout_key="BSND",
+                                         sparse_count=128, sparse_mode=0,
+                                         is_fd=False,
+                                         pre_token=9223372036854775807,
+                                         next_token=9223372036854775807,
+                                         cmp_ratio=1):
+    return custom_ops_lib.lightning_indexer_quant_metadata(
+        aslq, aslk,
+        num_heads_q, num_heads_k, head_dim,
+        query_quant_mode, key_quant_mode,
+        batch_size, max_seq_q, max_seq_k,
+        layout_query, layout_key,
+        sparse_count, sparse_mode, is_fd, pre_token, next_token, cmp_ratio)

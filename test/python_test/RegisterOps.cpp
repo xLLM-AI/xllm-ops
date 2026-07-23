@@ -1430,6 +1430,420 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_impl_npu(
   return std::make_tuple(y, expert_idx, out);
 }
 
+// ==================== compressor ====================
+// Single-step op (25 params). kv_state/score_state are in-place (Ref).
+// When enable_grad=false, wkvProj/softmaxRes/normX/normRstd are {1} placeholders.
+at::Tensor compressor_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& wkv,
+    const at::Tensor& wgate,
+    at::Tensor& kv_state,
+    at::Tensor& score_state,
+    const at::Tensor& ape,
+    const at::Tensor& norm_weight,
+    const at::Tensor& rope_sin,
+    const at::Tensor& rope_cos,
+    const at::Tensor& kv_block_table,
+    const at::Tensor& score_block_table,
+    int64_t rope_head_dim,
+    int64_t cmp_ratio,
+    int64_t coff,
+    double norm_eps,
+    int64_t rotary_mode,
+    bool enable_grad) {
+  auto x_sizes = x.sizes().vec();
+  const int64_t B = x_sizes[0];
+  const int64_t S = x_sizes[1];
+  const int64_t HEAD_DIM = wkv.sizes()[0] / coff;  // coff_d / coff
+  const int64_t SR = (S + cmp_ratio - 1) / cmp_ratio;
+  at::Tensor cmp_kv = at::empty({B, SR, HEAD_DIM}, x.options());
+  at::Tensor wkv_proj = at::empty({1}, x.options());
+  at::Tensor softmax_res = at::empty({1}, x.options());
+  at::Tensor norm_x = at::empty({1}, x.options());
+  at::Tensor norm_rstd = at::empty({1}, x.options());
+  const c10::optional<at::Tensor> null_opt;
+  EXEC_NPU_CMD(aclnnCompressor,
+               x, wkv, wgate, kv_state, score_state, ape, norm_weight,
+            rope_sin, rope_cos, kv_block_table, score_block_table,
+               null_opt, null_opt, null_opt,
+               rope_head_dim, cmp_ratio, coff, norm_eps, rotary_mode, enable_grad,
+               cmp_kv, wkv_proj, softmax_res, norm_x, norm_rstd);
+  return cmp_kv;
+}
+
+// ==================== sparse_attn_sharedkv (two-stage) ====================
+// Helper: metadata op (AICPU). Must be in separate function due to
+// EXEC_NPU_CMD static variable binding.
+static void sparse_attn_sharedkv_metadata_helper(
+    const at::Tensor& cu_seq_q,
+    const at::Tensor& cu_seq_ori_kv,
+    const at::Tensor& cu_seq_cmp_kv,
+    const at::Tensor& seqused_q,
+    const at::Tensor& seqused_kv,
+    int64_t n1, int64_t kv_n, int64_t d,
+    int64_t batch, int64_t s1, int64_t s2,
+    int64_t ori_top_k, int64_t cmp_top_k, int64_t cmp_ratio,
+    int64_t ori_mask_mode, int64_t cmp_mask_mode,
+    int64_t ori_win_left, int64_t ori_win_right,
+    char* layout_q_c, char* layout_kv_c,
+    bool is_prefill, bool return_metadata_only,
+    at::Tensor& meta_t) {
+  EXEC_NPU_CMD(aclnnSparseAttnSharedkvMetadata,
+               cu_seq_q, cu_seq_ori_kv, cu_seq_cmp_kv, seqused_q, seqused_kv,
+               n1, kv_n, d, batch, s1, s2,
+               ori_top_k, cmp_top_k, cmp_ratio,
+               ori_mask_mode, cmp_mask_mode, ori_win_left, ori_win_right,
+               layout_q_c, layout_kv_c, is_prefill, return_metadata_only,
+               meta_t);
+}
+
+// Helper: main op.
+static void sparse_attn_sharedkv_main_helper(
+    const at::Tensor& query,
+    const at::Tensor& ori_kv,
+    const c10::optional<at::Tensor>& cmp_kv,
+    const c10::optional<at::Tensor>& ori_sparse_idx,
+    const c10::optional<at::Tensor>& cmp_sparse_idx,
+    const at::Tensor& ori_bt,
+    const c10::optional<at::Tensor>& cmp_bt,
+    const c10::optional<at::Tensor>& cu_seq_q,
+    const c10::optional<at::Tensor>& cu_seq_ori_kv,
+    const c10::optional<at::Tensor>& cu_seq_cmp_kv,
+    const c10::optional<at::Tensor>& seqused_q,
+    const at::Tensor& seqused_kv,
+    const at::Tensor& sinks,
+    const at::Tensor& meta_t,
+    double softmax_scale, int64_t cmp_ratio,
+    int64_t ori_mask_mode, int64_t cmp_mask_mode,
+    int64_t ori_kv_stride, int64_t cmp_kv_stride,
+    int64_t ori_win_left, int64_t ori_win_right,
+    char* layout_q_c, char* layout_kv_c,
+    bool return_softmax_lse,
+    at::Tensor& attn_out, at::Tensor& lse_out) {
+  EXEC_NPU_CMD(aclnnSparseAttnSharedkv,
+               query, ori_kv, cmp_kv, ori_sparse_idx, cmp_sparse_idx,
+               ori_bt, cmp_bt,
+               cu_seq_q, cu_seq_ori_kv, cu_seq_cmp_kv, seqused_q,
+               seqused_kv, sinks, meta_t,
+               softmax_scale, cmp_ratio, ori_mask_mode, cmp_mask_mode,
+               ori_kv_stride, cmp_kv_stride,
+               ori_win_left, ori_win_right,
+               layout_q_c, layout_kv_c, return_softmax_lse,
+               attn_out, lse_out);
+}
+
+// Public impl: runs metadata then main, returns attn_out.
+at::Tensor sparse_attn_sharedkv_impl_npu(
+    const at::Tensor& query,
+    const at::Tensor& ori_kv,
+    const at::Tensor& ori_bt,
+    const at::Tensor& seqused_kv,
+    const at::Tensor& sinks,
+    int64_t n1, int64_t kv_n, int64_t d,
+    int64_t s1, int64_t s2,
+    int64_t ori_mask_mode, int64_t cmp_mask_mode,
+    int64_t ori_win_left, int64_t ori_win_right,
+    double softmax_scale, int64_t cmp_ratio,
+    std::string layout_q, std::string layout_kv) {
+  auto q_sizes = query.sizes().vec();
+  const int64_t B = q_sizes[0];
+  // Metadata inputs: cu_seqlens (prefix-sum of lengths), seqused_q
+  auto opts_i32 = query.options().dtype(at::kInt);
+  std::vector<int32_t> cu_q_h(B + 1, 0), cu_ori_h(B + 1, 0), cu_cmp_h(B + 1, 0);
+  std::vector<int32_t> sused_q_h(B, (int32_t)s1);
+  for (int64_t i = 0; i < B; ++i) {
+    cu_q_h[i + 1] = cu_q_h[i] + (int32_t)s1;
+    cu_ori_h[i + 1] = cu_ori_h[i] + (int32_t)s2;
+    cu_cmp_h[i + 1] = cu_cmp_h[i] + (int32_t)s2;
+  }
+  at::Tensor cu_seq_q = at::from_blob(cu_q_h.data(), {B + 1}, at::kInt).to(query.device());
+  at::Tensor cu_seq_ori_kv = at::from_blob(cu_ori_h.data(), {B + 1}, at::kInt).to(query.device());
+  at::Tensor cu_seq_cmp_kv = at::from_blob(cu_cmp_h.data(), {B + 1}, at::kInt).to(query.device());
+  at::Tensor seqused_q = at::from_blob(sused_q_h.data(), {B}, at::kInt).to(query.device());
+  const int64_t SAS_META_SIZE = 1024;
+  at::Tensor meta_t = at::empty({SAS_META_SIZE}, opts_i32.device(query.device()));
+  char* lq = const_cast<char*>(layout_q.c_str());
+  char* lk = const_cast<char*>(layout_kv.c_str());
+  // Step 1: metadata
+  sparse_attn_sharedkv_metadata_helper(
+      cu_seq_q, cu_seq_ori_kv, cu_seq_cmp_kv, seqused_q, seqused_kv,
+      n1, kv_n, d, B, s1, s2,
+      512, 512, cmp_ratio,  // ori_top_k, cmp_top_k
+      ori_mask_mode, cmp_mask_mode, ori_win_left, ori_win_right,
+      lq, lk, true, false, meta_t);
+  // Step 2: main
+  at::Tensor attn_out = at::empty({B, s1, n1, d}, query.options());
+  at::Tensor lse_out = at::empty({B, s1, n1}, query.options().dtype(at::kFloat));
+  const c10::optional<at::Tensor> null_opt;
+  sparse_attn_sharedkv_main_helper(
+      query, ori_kv, null_opt, null_opt, null_opt, ori_bt, null_opt,
+      null_opt, null_opt, null_opt, null_opt,
+      seqused_kv, sinks, meta_t,
+      softmax_scale, cmp_ratio, ori_mask_mode, cmp_mask_mode, 0, 0,
+      ori_win_left, ori_win_right, lq, lk, false,
+      attn_out, lse_out);
+  return attn_out;
+}
+
+// ==================== quant_lightning_indexer (two-stage) ====================
+// Helper: metadata op.
+static void quant_lightning_indexer_metadata_helper(
+    const at::Tensor& aslq, const at::Tensor& aslk,
+    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim,
+    int64_t query_quant_mode, int64_t key_quant_mode,
+    int64_t batch_size, int64_t max_seq_q, int64_t max_seq_k,
+    char* layout_query_c, char* layout_key_c,
+    int64_t sparse_count, int64_t sparse_mode,
+    int64_t pre_token, int64_t next_token, int64_t cmp_ratio,
+    at::Tensor& meta_t) {
+  EXEC_NPU_CMD(aclnnQuantLightningIndexerMetadata,
+               aslq, aslk, num_heads_q, num_heads_k, head_dim,
+               query_quant_mode, key_quant_mode,
+               batch_size, max_seq_q, max_seq_k,
+               layout_query_c, layout_key_c,
+               sparse_count, sparse_mode, pre_token, next_token, cmp_ratio,
+               meta_t);
+}
+
+// Helper: main op.
+static void quant_lightning_indexer_main_helper(
+    const at::Tensor& query, const at::Tensor& key,
+    const at::Tensor& weights, const at::Tensor& q_scale, const at::Tensor& k_scale,
+    const at::Tensor& aslq, const at::Tensor& aslk,
+    const at::Tensor& bt, const at::Tensor& meta_t,
+    int64_t query_quant_mode, int64_t key_quant_mode,
+    char* layout_query_c, char* layout_key_c,
+    int64_t sparse_count, int64_t sparse_mode,
+    int64_t pre_token, int64_t next_token, int64_t cmp_ratio,
+    bool return_values, int64_t stride, int64_t scale_stride,
+    at::Tensor& idx_out, at::Tensor& val_out) {
+  EXEC_NPU_CMD(aclnnQuantLightningIndexer,
+               query, key, weights, q_scale, k_scale,
+               aslq, aslk, bt, meta_t,
+               query_quant_mode, key_quant_mode,
+               layout_query_c, layout_key_c,
+               sparse_count, sparse_mode, pre_token, next_token, cmp_ratio,
+               return_values, stride, scale_stride,
+               idx_out, val_out);
+}
+
+// Public impl: runs metadata then main, returns idx_out.
+at::Tensor quant_lightning_indexer_impl_npu(
+    const at::Tensor& query, const at::Tensor& key,
+    const at::Tensor& weights, const at::Tensor& q_scale, const at::Tensor& k_scale,
+    const at::Tensor& aslq, const at::Tensor& aslk,
+    const at::Tensor& block_table,
+    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim,
+    int64_t query_quant_mode, int64_t key_quant_mode,
+    std::string layout_query, std::string layout_key,
+    int64_t sparse_count, int64_t sparse_mode,
+    int64_t pre_token, int64_t next_token, int64_t cmp_ratio) {
+  auto q_sizes = query.sizes().vec();
+  const int64_t batch_size = q_sizes[0];
+  const int64_t max_seq_q = q_sizes[1];
+  const int64_t max_seq_k = aslk.max().item<int64_t>();
+  const int64_t QLI_META_SIZE = 1024;
+  auto opts_i32 = query.options().dtype(at::kInt);
+  at::Tensor meta_t = at::empty({QLI_META_SIZE}, opts_i32.device(query.device()));
+  char* lq = const_cast<char*>(layout_query.c_str());
+  char* lk = const_cast<char*>(layout_key.c_str());
+  // Step 1: metadata
+  quant_lightning_indexer_metadata_helper(
+      aslq, aslk, num_heads_q, num_heads_k, head_dim,
+      query_quant_mode, key_quant_mode,
+      batch_size, max_seq_q, max_seq_k, lq, lk,
+      sparse_count, sparse_mode, pre_token, next_token, cmp_ratio, meta_t);
+  // Step 2: main
+  at::Tensor idx_out = at::empty({batch_size, max_seq_q, num_heads_k, sparse_count}, opts_i32.device(query.device()));
+  at::Tensor val_out = at::empty({batch_size, max_seq_q, num_heads_k, sparse_count},
+                                  query.options().dtype(at::kFloat));
+  quant_lightning_indexer_main_helper(
+      query, key, weights, q_scale, k_scale, aslq, aslk, block_table, meta_t,
+      query_quant_mode, key_quant_mode, lq, lk,
+      sparse_count, sparse_mode, pre_token, next_token, cmp_ratio,
+      false, 1, 1, idx_out, val_out);
+  return idx_out;
+}
+
+// dispatch_ffn_combine (int8 path: aclnnDispatchFFNCombine)
+std::tuple<at::Tensor, at::Tensor> dispatch_ffn_combine_impl_npu(
+    const at::Tensor& x,
+    std::vector<at::Tensor> weight1,
+    std::vector<at::Tensor> weight2,
+    const at::Tensor& expert_idx,
+    std::vector<at::Tensor> scale1,
+    std::vector<at::Tensor> scale2,
+    const at::Tensor& probs,
+    std::string group,
+    int64_t max_output_size,
+    at::Tensor& out,
+    at::Tensor& expert_token_nums,
+    const c10::optional<at::Tensor>& x_active_mask,
+    double swiglu_limit) {
+  at::TensorList weight1_list = at::TensorList(weight1);
+  at::TensorList weight2_list = at::TensorList(weight2);
+  at::TensorList scale1_list = at::TensorList(scale1);
+  at::TensorList scale2_list = at::TensorList(scale2);
+  char* group_ep_ptr = const_cast<char*>(group.c_str());
+  at::Tensor mask_tensor = x_active_mask.has_value() ? x_active_mask.value() : at::Tensor();
+  EXEC_NPU_CMD(aclnnDispatchFFNCombine,
+               x,
+               weight1_list,
+               weight2_list,
+               expert_idx,
+               scale1_list,
+               scale2_list,
+               probs,
+               mask_tensor,
+               group_ep_ptr,
+               max_output_size,
+               swiglu_limit,
+               out,
+               expert_token_nums);
+  return std::make_tuple(out, expert_token_nums);
+}
+
+// dispatch_gmm_combine_decode (aclnnDispatchGmmCombineDecode)
+std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& expert_ids,
+    std::vector<at::Tensor> gmm1_permuted_weight,
+    std::vector<at::Tensor> gmm1_permuted_weight_scale,
+    std::vector<at::Tensor> gmm2_weight,
+    std::vector<at::Tensor> gmm2_weight_scale,
+    const at::Tensor& expert_scales,
+    const c10::optional<at::Tensor>& expert_smooth_scales,
+    const c10::optional<at::Tensor>& x_active_mask,
+    std::string group_ep,
+    int64_t ep_rank_size,
+    int64_t ep_rank_id,
+    int64_t moe_expert_num,
+    int64_t shared_expert_num,
+    int64_t shared_expert_rank_num,
+    int64_t quant_mode,
+    int64_t global_bs) {
+  auto x_shape = x.sizes();
+  int bs = x_shape[0];
+  int h = x_shape[1];
+  at::Tensor output = at::empty({bs, h}, x.options());
+
+  bool is_shared_expert = (ep_rank_id < shared_expert_rank_num);
+  int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (ep_rank_size - shared_expert_rank_num);
+  at::Tensor expert_token_nums = at::empty({num_local_experts}, expert_ids.options().dtype(at::kLong));
+
+  at::TensorList gmm1_w_list = at::TensorList(gmm1_permuted_weight);
+  at::TensorList gmm1_ws_list = at::TensorList(gmm1_permuted_weight_scale);
+  at::TensorList gmm2_w_list = at::TensorList(gmm2_weight);
+  at::TensorList gmm2_ws_list = at::TensorList(gmm2_weight_scale);
+
+  std::vector<char> group_ep_chrs(group_ep.begin(), group_ep.end());
+  group_ep_chrs.push_back('\0');
+  char* group_ep_ptr = &group_ep_chrs[0];
+
+  EXEC_NPU_CMD(aclnnDispatchGmmCombineDecode,
+               x,
+        expert_ids,
+               gmm1_w_list,
+               gmm1_ws_list,
+               gmm2_w_list,
+               gmm2_ws_list,
+               expert_scales,
+               expert_smooth_scales,
+               x_active_mask,
+               group_ep_ptr,
+               ep_rank_size,
+               ep_rank_id,
+               moe_expert_num,
+               shared_expert_num,
+      shared_expert_rank_num,
+               quant_mode,
+               global_bs,
+               output,
+               expert_token_nums);
+  return std::make_tuple(output, expert_token_nums);
+}
+
+// ==================== standalone metadata ops ====================
+
+// sparse_attn_sharedkv_metadata (standalone entry)
+at::Tensor sparse_attn_sharedkv_metadata_impl_npu(
+    const at::Tensor& cu_seq_q,
+    const at::Tensor& cu_seq_ori_kv,
+    const at::Tensor& cu_seq_cmp_kv,
+    const at::Tensor& seqused_q,
+    const at::Tensor& seqused_kv,
+    int64_t num_heads_q, int64_t num_heads_kv, int64_t head_dim,
+    int64_t batch_size, int64_t max_seq_q, int64_t max_seq_kv,
+    int64_t ori_top_k, int64_t cmp_top_k, int64_t cmp_ratio,
+    int64_t ori_mask_mode, int64_t cmp_mask_mode,
+    int64_t ori_win_left, int64_t ori_win_right,
+    std::string layout_q, std::string layout_kv,
+    bool has_ori_kv, bool has_cmp_kv) {
+  const int64_t META_SIZE = 1024;
+  auto opts_i32 = cu_seq_q.options().dtype(at::kInt);
+  at::Tensor meta_t = at::empty({META_SIZE}, opts_i32.device(cu_seq_q.device()));
+  char* lq = const_cast<char*>(layout_q.c_str());
+  char* lkv = const_cast<char*>(layout_kv.c_str());
+  EXEC_NPU_CMD(aclnnSparseAttnSharedkvMetadata,
+               cu_seq_q, cu_seq_ori_kv, cu_seq_cmp_kv, seqused_q, seqused_kv,
+               num_heads_q, num_heads_kv, head_dim,
+               batch_size, max_seq_q, max_seq_kv,
+               ori_top_k, cmp_top_k, cmp_ratio,
+               ori_mask_mode, cmp_mask_mode, ori_win_left, ori_win_right,
+               lq, lkv, has_ori_kv, has_cmp_kv,
+               meta_t);
+  return meta_t;
+}
+
+// quant_lightning_indexer_metadata (standalone entry)
+at::Tensor quant_lightning_indexer_metadata_impl_npu(
+    const at::Tensor& aslq, const at::Tensor& aslk,
+    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim,
+    int64_t query_quant_mode, int64_t key_quant_mode,
+    int64_t batch_size, int64_t max_seq_q, int64_t max_seq_k,
+    std::string layout_query, std::string layout_key,
+    int64_t sparse_count, int64_t sparse_mode,
+    int64_t pre_token, int64_t next_token, int64_t cmp_ratio) {
+  const int64_t QLI_META_SIZE = 1024;
+  auto opts_i32 = aslq.options().dtype(at::kInt);
+  at::Tensor meta_t = at::empty({QLI_META_SIZE}, opts_i32.device(aslq.device()));
+  char* lq = const_cast<char*>(layout_query.c_str());
+  char* lk = const_cast<char*>(layout_key.c_str());
+  EXEC_NPU_CMD(aclnnQuantLightningIndexerMetadata,
+               aslq, aslk, num_heads_q, num_heads_k, head_dim,
+               query_quant_mode, key_quant_mode,
+               batch_size, max_seq_q, max_seq_k,
+               lq, lk,
+               sparse_count, sparse_mode, pre_token, next_token, cmp_ratio,
+               meta_t);
+  return meta_t;
+}
+
+// lightning_indexer_quant_metadata (standalone entry)
+at::Tensor lightning_indexer_quant_metadata_impl_npu(
+    const at::Tensor& aslq, const at::Tensor& aslk,
+    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim,
+    int64_t query_quant_mode, int64_t key_quant_mode,
+    int64_t batch_size, int64_t max_seq_q, int64_t max_seq_k,
+    std::string layout_query, std::string layout_key,
+    int64_t sparse_count, int64_t sparse_mode,
+    bool is_fd,
+    int64_t pre_token, int64_t next_token, int64_t cmp_ratio) {
+  const int64_t LIQ_META_SIZE = 1024;
+  auto opts_i32 = aslq.options().dtype(at::kInt);
+  at::Tensor meta_t = at::empty({LIQ_META_SIZE}, opts_i32.device(aslq.device()));
+  char* lq = const_cast<char*>(layout_query.c_str());
+  char* lk = const_cast<char*>(layout_key.c_str());
+  EXEC_NPU_CMD(aclnnLightningIndexerQuantMetadata,
+               aslq, aslk, num_heads_q, num_heads_k, head_dim,
+               query_quant_mode, key_quant_mode,
+               batch_size, max_seq_q, max_seq_k,
+               lq, lk,
+               sparse_count, sparse_mode, is_fd, pre_token, next_token, cmp_ratio,
+               meta_t);
+  return meta_t;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("select_unshared_kv", &select_unshared_kv_impl_npu, "select_unshared_kv");
   m.def("cache_unshared_kv", &cache_unshared_kv_impl_npu, "cache_unshared_kv");
@@ -1481,4 +1895,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_latent_attention", &multi_latent_attention_impl_npu, "multi_latent_attention");
   m.def("rms_norm_dynamic_quant", &rms_norm_dynamic_quant_impl_npu, "rms_norm_dynamic_quant");
   m.def("lightning_indexer_quant", &lightning_indexer_quant_impl_npu, "lightning_indexer_quant");
+  m.def("compressor", &compressor_impl_npu, "compressor");
+  m.def("sparse_attn_sharedkv", &sparse_attn_sharedkv_impl_npu, "sparse_attn_sharedkv");
+  m.def("quant_lightning_indexer", &quant_lightning_indexer_impl_npu, "quant_lightning_indexer");
+  m.def("dispatch_ffn_combine", &dispatch_ffn_combine_impl_npu, "dispatch_ffn_combine");
+  m.def("dispatch_gmm_combine_decode", &dispatch_gmm_combine_decode_impl_npu, "dispatch_gmm_combine_decode");
+  m.def("sparse_attn_sharedkv_metadata", &sparse_attn_sharedkv_metadata_impl_npu, "sparse_attn_sharedkv_metadata");
+  m.def("quant_lightning_indexer_metadata", &quant_lightning_indexer_metadata_impl_npu, "quant_lightning_indexer_metadata");
+  m.def("lightning_indexer_quant_metadata", &lightning_indexer_quant_metadata_impl_npu, "lightning_indexer_quant_metadata");
 }
