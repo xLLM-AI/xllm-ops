@@ -374,8 +374,6 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
     return;
 #endif
 
-    SyncAllImpl<false>();
-
 #ifdef MEGA_STOP_AFTER_SYNC_BEFORE_WY
     return;
 #endif

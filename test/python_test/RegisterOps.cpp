@@ -1430,6 +1430,160 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_impl_npu(
   return std::make_tuple(y, expert_idx, out);
 }
 
+std::tuple<at::Tensor, at::Tensor&, at::Tensor&, at::Tensor>
+qwen35_gdn_decode_super_op(
+    const at::Tensor& qkv,
+    const at::Tensor& z,
+    const at::Tensor& b,
+    const at::Tensor& a,
+    const at::Tensor& conv_weight,
+    at::Tensor& conv_state,
+    const at::Tensor& a_log,
+    const at::Tensor& dt_bias,
+    at::Tensor& ssm_state,
+    const at::Tensor& state_indices,
+    const at::Tensor& norm_weight) {
+  at::Tensor conv_out = at::empty_like(qkv);
+  at::Tensor out = at::empty_like(z);
+  EXEC_NPU_CMD(aclnnQwen35GdnDecodeSuperOp,
+               qkv,
+               z,
+               b,
+               a,
+               conv_weight,
+               conv_state,
+               a_log,
+               dt_bias,
+               ssm_state,
+               state_indices,
+               norm_weight,
+               conv_out,
+               conv_state,
+               ssm_state,
+               out);
+  return std::tuple<at::Tensor, at::Tensor&, at::Tensor&, at::Tensor>(
+      conv_out, conv_state, ssm_state, out);
+}
+
+std::tuple<at::Tensor,
+           at::Tensor,
+           at::Tensor,
+           at::Tensor,
+           at::Tensor,
+           at::Tensor,
+           at::Tensor&,
+           at::Tensor&,
+           at::Tensor>
+qwen35_gdn_prefill_super_op(
+    const at::Tensor& mixed_qkv,
+    const at::Tensor& z,
+    const at::Tensor& b,
+    const at::Tensor& a,
+    const at::Tensor& conv_weight,
+    at::Tensor& conv_state,
+    const at::Tensor& a_log,
+    const at::Tensor& dt_bias,
+    at::Tensor& ssm_state,
+    const at::Tensor& norm_weight,
+    const at::Tensor& mask_lower,
+    const at::Tensor& mask_full,
+    const at::Tensor& minus_identity,
+    const at::Tensor& cu_seqlens,
+    int64_t conv_state_index,
+    int64_t ssm_state_index) {
+  constexpr int64_t kChunkSize = 128;
+  constexpr int64_t kHeadDim = 128;
+  constexpr int64_t kValueHeads = 24;
+  const int64_t total_tokens = mixed_qkv.size(0);
+  const int64_t num_matrices =
+      ((total_tokens + kChunkSize - 1) / kChunkSize) * kValueHeads;
+  auto opts_fp16 = mixed_qkv.options().dtype(at::kHalf);
+  auto opts_fp32 = mixed_qkv.options().dtype(at::kFloat);
+
+  at::Tensor packed_qkv = at::empty({total_tokens, 5120}, opts_fp16);
+  at::Tensor g = at::empty({1, total_tokens, kValueHeads}, opts_fp32);
+  at::Tensor beta = at::empty({1, total_tokens, kValueHeads}, opts_fp16);
+  at::Tensor initial_state =
+      at::empty({1, kValueHeads, kHeadDim, kHeadDim}, opts_fp16);
+  at::Tensor mega_out =
+      at::empty({1, total_tokens, kValueHeads, kHeadDim}, opts_fp16);
+  at::Tensor g_sum =
+      at::empty({1, total_tokens, kValueHeads}, opts_fp32);
+  at::Tensor g_t = at::empty({kValueHeads, total_tokens}, opts_fp32);
+  at::Tensor beta_t = at::empty({kValueHeads, total_tokens}, opts_fp16);
+  at::Tensor mega_a =
+      at::zeros({1, total_tokens, kValueHeads, kChunkSize}, opts_fp16);
+  at::Tensor a_inv_f32 =
+      at::zeros({1, total_tokens, kValueHeads, kChunkSize}, opts_fp32);
+  at::Tensor a_inv =
+      at::zeros({1, total_tokens, kValueHeads, kChunkSize}, opts_fp16);
+  at::Tensor w =
+      at::empty({1, total_tokens, kValueHeads, kHeadDim}, opts_fp16);
+  at::Tensor u = at::empty_like(w);
+  at::Tensor h =
+      at::zeros({num_matrices, kHeadDim, kHeadDim}, opts_fp16);
+  at::Tensor v_new = at::empty_like(w);
+  at::Tensor final_state =
+      at::zeros({kValueHeads, kHeadDim, kHeadDim}, opts_fp16);
+  at::Tensor out =
+      at::empty({total_tokens, kValueHeads, kHeadDim}, mixed_qkv.options());
+
+  EXEC_NPU_CMD(aclnnQwen35GdnPrefillSuperOp,
+               mixed_qkv,
+               z,
+               b,
+               a,
+               conv_weight,
+               conv_state,
+               a_log,
+               dt_bias,
+               ssm_state,
+               norm_weight,
+               mask_lower,
+               mask_full,
+               minus_identity,
+               cu_seqlens,
+               num_matrices,
+               conv_state_index,
+               ssm_state_index,
+               packed_qkv,
+               g,
+               beta,
+               initial_state,
+               mega_out,
+               g_sum,
+               g_t,
+               beta_t,
+               mega_a,
+               a_inv_f32,
+               a_inv,
+               w,
+               u,
+               h,
+               v_new,
+               final_state,
+               conv_state,
+               ssm_state,
+               out);
+  return std::tuple<at::Tensor,
+                    at::Tensor,
+                    at::Tensor,
+                    at::Tensor,
+                    at::Tensor,
+                    at::Tensor,
+                    at::Tensor&,
+                    at::Tensor&,
+                    at::Tensor>(packed_qkv,
+                                g,
+                                beta,
+                                initial_state,
+                                mega_out,
+                                final_state,
+                                conv_state,
+                                ssm_state,
+                                out);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("select_unshared_kv", &select_unshared_kv_impl_npu, "select_unshared_kv");
   m.def("cache_unshared_kv", &cache_unshared_kv_impl_npu, "cache_unshared_kv");
@@ -1452,6 +1606,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("recurrent_gated_delta_rule", &recurrent_gated_delta_rule, "recurrent_gated_delta_rule");
   m.def("rec_constrained_topk", &rec_constrained_topk_impl_npu, "rec_constrained_topk");
   m.def("mega_chunk_gdn", &mega_chunk_gdn, "mega_chunk_gdn");
+  m.def("qwen35_gdn_decode_super_op",
+        &qwen35_gdn_decode_super_op,
+        "qwen35_gdn_decode_super_op");
+  m.def("qwen35_gdn_prefill_super_op",
+        &qwen35_gdn_prefill_super_op,
+        "qwen35_gdn_prefill_super_op");
   m.def("layer_norm_fwd", &layer_norm_fwd_impl_npu, "layer_norm_fwd");
   m.def("moe_fused_add_topk", &moe_fused_add_topk_impl_npu, "moe_fused_add_topk");
   m.def("moe_fused_reducesum_div", &moe_fused_reducesum_div_impl_npu, "moe_fused_reducesum_div");
