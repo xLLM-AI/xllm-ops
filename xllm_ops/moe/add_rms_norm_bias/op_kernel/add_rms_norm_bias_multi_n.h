@@ -68,7 +68,7 @@ public:
             Ppipe->InitBuffer(inQueueBeta, BUFFER_NUM, numColAlign * sizeof(T));
         }
         Ppipe->InitBuffer(outQueueY, DOUBLE_BUFFER_NUM, ubFactor * sizeof(T));
-#if __CCE_AICORE__ == 220 || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
+#if (defined(__CCE_AICORE__) && (__CCE_AICORE__ == 220 || __CCE_AICORE__ == 310)) || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
         Ppipe->InitBuffer(outQueueRstd, BUFFER_NUM, rowFactor * NUM_PER_BLK_FP32 * sizeof(float));
 #else
         Ppipe->InitBuffer(rstdBuf, rowFactor * NUM_PER_BLK_FP32 * sizeof(float));
@@ -108,7 +108,7 @@ public:
         CopyInX(gm_bias, calc_row_num);
         LocalTensor<T> xLocal = ComputeX(calc_row_num);
         CopyOutX(gm_bias, calc_row_num);
-#if __CCE_AICORE__ == 220 || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
+#if (defined(__CCE_AICORE__) && (__CCE_AICORE__ == 220 || __CCE_AICORE__ == 310)) || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
         LocalTensor<float> rstdLocal = outQueueRstd.AllocTensor<float>();
         ComputeRstd(xLocal, rstdLocal, calc_row_num);
         outQueueRstd.EnQue<float>(rstdLocal);
@@ -284,7 +284,7 @@ private:
         outQueueY.FreeTensor(yLocal);
     }
 
-#if __CCE_AICORE__ == 220 || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
+#if (defined(__CCE_AICORE__) && (__CCE_AICORE__ == 220 || __CCE_AICORE__ == 310)) || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
     __aicore__ inline void CopyOutRstd(uint32_t outer_progress, uint32_t num)
     {
         LocalTensor<float> rstdLocal = outQueueRstd.DeQue<float>();
@@ -303,7 +303,7 @@ private:
     TQue<QuePosition::VECIN, BUFFER_NUM> inQueueBeta;
     TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueX;
     // create queues for output, in this case depth is equal to buffer num
-#if __CCE_AICORE__ == 220 || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
+#if (defined(__CCE_AICORE__) && (__CCE_AICORE__ == 220 || __CCE_AICORE__ == 310)) || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
     TQue<QuePosition::VECOUT, BUFFER_NUM> outQueueRstd;
 #else
     TBuf<TPosition::VECCALC> rstdBuf;

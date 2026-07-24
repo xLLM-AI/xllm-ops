@@ -229,7 +229,7 @@ __aicore__ inline void BlockReduceSumFP32(
 template <typename T, typename U, typename R>
 __aicore__ inline void DataCopyCustom(const U& dstTensor, const R& srcTensor, const uint32_t count)
 {
-#if (defined(__CCE_AICORE__) && __CCE_AICORE__ == 220) || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
+#if (defined(__CCE_AICORE__) && (__CCE_AICORE__ == 220 || __CCE_AICORE__ == 310)) || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
     DataCopyParams copyParams;
     copyParams.blockLen = count * sizeof(T);
     copyParams.blockCount = 1;
@@ -273,7 +273,7 @@ template <typename T>
 __aicore__ inline void DataCopyCustom(
     const LocalTensor<T>& dstTensor, const GlobalTensor<T>& srcTensor, const uint32_t numRow, const uint32_t numCol)
 {
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 220 || __CCE_AICORE__ == 310)
     DataCopyParams copyParams;
     copyParams.blockLen = numCol * sizeof(T);
     copyParams.blockCount = numRow;
@@ -286,7 +286,7 @@ template <typename T>
 __aicore__ inline void DataCopyCustom(
     const GlobalTensor<T>& dstTensor, const LocalTensor<T>& srcTensor, const uint32_t numRow, const uint32_t numCol)
 {
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 220 || __CCE_AICORE__ == 310)
     DataCopyParams copyParams;
     copyParams.blockLen = numCol * sizeof(T);
     copyParams.blockCount = numRow;
