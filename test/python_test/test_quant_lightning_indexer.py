@@ -26,7 +26,7 @@ def _get_platform():
     """Detect SOC platform: 'A5' or '910C' or 'unknown'."""
     soc = torch_npu._C._npu_get_soc_version()
     # ascend950 -> A5, Ascend910C/Ascend910B -> 910C family
-    if soc in (200, ):  # SOC_VERSION_ASCEND950 == 200
+    if soc in (200, 260):  # SOC_VERSION_ASCEND950 == 200
         return "A5"
     # 910C soc version is typically 220 / 221
     return "910C"
@@ -142,7 +142,7 @@ def test_quant_lightning_indexer(B, Q_SEQ, K_SEQ, Q_HEAD, K_HEAD, HD, BLOCK_SIZE
     # Platform-dependent dtype selection
     if PLATFORM == "A5":
         qk_dtype = torch.float8_e4m3fn   # A5: fp8 query/key
-        scale_dtype = torch.float32       # A5: fp32 weights/scale
+        scale_dtype= torch.float32       # A5: fp32 weights/scale
     else:
         qk_dtype = torch.int8             # 910C: int8 query/key
         scale_dtype = torch.float16       # 910C: fp16 weights/scale

@@ -16,8 +16,13 @@
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
 #include "sparse_attn_sharedkv_template_tiling_key.h"
+#if (__CCE_AICORE__ == 220)
 #include "arch32/sparse_attn_sharedkv_scfa_kernel.h"
 #include "arch32/sparse_attn_sharedkv_swa_kernel.h"
+#else
+#include "arch35/sparse_attn_sharedkv_scfa_kernel.h"
+#include "arch35/sparse_attn_sharedkv_swa_kernel.h"
+#endif
 #include "sparse_attn_sharedkv_metadata.h"
 
 using namespace AscendC;

@@ -50,11 +50,14 @@ def _valid_set(row):
 
 
 # (B, S1, S2, N)  N = qHeadNum, keyHeadNum fixed to 1, D fixed to 128.
+# N = qHeadNum must equal gSize; kernel design point is gSize=64
+# (s1BaseSize = ceil(256/gSize) = 4 -> UB buffers fit). Small gSize
+# (1/2/4/8) blows up sortOutBuf_ and overflows UB (aicore exception 507015).
 CASES = [
-    (1, 8, 8, 1),
-    (1, 16, 16, 2),
-    (2, 8, 8, 4),
-    (1, 32, 32, 8),
+    (1, 8, 8, 64),
+    (1, 16, 16, 64),
+    (2, 8, 8, 64),
+    (1, 32, 32, 64),
 ]
 
 

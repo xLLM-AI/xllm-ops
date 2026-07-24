@@ -22,7 +22,7 @@ using namespace AscendC;
 using std::map;
 using std::string;
 namespace optiling {
-// --------------------------LIQInfoParser类成员函数定义-------------------------------------
+// --------------------------LIQInfoParser class member function definitions-------------------------------------
 ge::graphStatus LIQInfoParser::CheckRequiredInOutExistence() const
 {
     OPS_ERR_IF(opParamInfo_.query.shape == nullptr, OPS_LOG_E(opName_, "Shape of tensor query is nullptr"),
@@ -104,7 +104,8 @@ ge::graphStatus LIQInfoParser::GetNpuInfo()
 
     socVersion_ = ascendcPlatform.GetSocVersion();
     if ((socVersion_ != platform_ascendc::SocVersion::ASCEND910B) &&
-        (socVersion_ != platform_ascendc::SocVersion::ASCEND910_93)) {
+        (socVersion_ != platform_ascendc::SocVersion::ASCEND910_93) &&
+        (socVersion_ != platform_ascendc::SocVersion::ASCEND950)) {
         OPS_LOG_E(opName_, "SOC Version[%d] is not support.", (int32_t)socVersion_);
         return GRAPH_FAILED;
     }
@@ -271,7 +272,7 @@ ge::graphStatus LIQInfoParser::GetAndCheckInOutDataType()
 
 ge::graphStatus LIQInfoParser::GetQueryKeyAndOutLayout()
 {
-    // 获取query,key的Layout基准值
+    // Get the layout reference value of query and key
     const map<string, DataLayout> layoutQueryMap = {{"BSND", DataLayout::BSND}, {"TND", DataLayout::TND}};
 
     std::string layout_query(opParamInfo_.layOutQuery);
@@ -416,9 +417,9 @@ ge::graphStatus LIQInfoParser::GetGSize()
 
 ge::graphStatus LIQInfoParser::GetBatchSize()
 {
-    // 获取B基准值
-    // 1、非TND/NTD时, 以query的batch_size维度为基准;
-    // 2、TND/NTD时, actual_seq_lens_q必须传入, 以actual_seq_lens_q数组的长度为B轴大小
+    // Get the B (batch) reference value
+    // 1. For non-TND/NTD, use the batch_size dimension of query as the reference;
+    // 2. For TND/NTD, actual_seq_lens_q must be provided, and its array length is used as the B-axis size
     if (qLayout_ == DataLayout::TND) {
         return GetActualSeqLenSize(bSize_, opParamInfo_.actualSeqLengthsQ.tensor, "input actual_seq_lengths_query");
     } else {  // BSND
@@ -434,16 +435,16 @@ ge::graphStatus LIQInfoParser::GetBatchSize()
 
 ge::graphStatus LIQInfoParser::GetHeadDim()
 {
-    // 以query的D维度为基准
+    // Use the D dimension of query as the reference
     uint32_t dIndex = DIM_IDX_TWO;
-    // 根据layout确定D维度在shape中的位置
+    // Determine the position of the D dimension in the shape according to the layout
     switch (qLayout_) {
         case DataLayout::TND:
-            // TND格式: [Total, N, D] -> D是第2维(索引2)
+            // TND format: [Total, N, D] -> D is the 3rd dimension (index 2)
             dIndex = DIM_IDX_TWO;
             break;
         case DataLayout::BSND:
-            // BSND格式: [Batch, SeqLen, N, D] -> D是第3维(索引3)
+            // BSND format: [Batch, SeqLen, N, D] -> D is the 4th dimension (index 3)
             dIndex = DIM_IDX_THREE;
             break;
         default:
@@ -511,9 +512,9 @@ ge::graphStatus LIQInfoParser::GetS2SizeForBatchContinuous()
 
 ge::graphStatus LIQInfoParser::GetS2Size()
 {
-    // 获取S2基准值
-    // 1、BATCH_CONTINUOUS时, 从key的S轴获取
-    // 3、PAGE_ATTENTION时, S2 = block_table.dim1 * block_size
+    // Get the S2 reference value
+    // 1. For BATCH_CONTINUOUS, obtain it from the S axis of key
+    // 3. For PAGE_ATTENTION, S2 = block_table.dim1 * block_size
     if (kLayout_ == DataLayout::PA_BSND) {
         return GetS2SizeForPageAttention();
     }
@@ -538,7 +539,7 @@ ge::graphStatus LIQInfoParser::ValidateInputShapesMatch()
     weight [BatchSize,S1,N1],
     block_table [BatchSize, BatchMaxBlockNum],
     act_seq_k [BatchSize]
-    act_seq_q [BatchSize] 可选
+    act_seq_q [BatchSize] optional
     out [BatchSize,S1,N2,topk]
     */
     uint32_t queryWeightsN1Dim = 1;
@@ -546,7 +547,7 @@ ge::graphStatus LIQInfoParser::ValidateInputShapesMatch()
 
     if (qLayout_ == DataLayout::TND) {
         // -----------------------check BatchSize-------------------
-        // bSize_ 来源于act_seq_q
+        // bSize_ is derived from act_seq_q
         OPS_ERR_IF((kLayout_ == DataLayout::PA_BSND) &&
                 ((opParamInfo_.actualSeqLengthsK.tensor->GetShapeSize() != bSize_) ||
                 (opParamInfo_.blockTable.tensor != nullptr &&
@@ -575,7 +576,7 @@ ge::graphStatus LIQInfoParser::ValidateInputShapesMatch()
                    return ge::GRAPH_FAILED);
     } else {
         // -----------------------check BatchSize-------------------
-        // bSize_ 来源于query
+        // bSize_ is derived from query
         OPS_ERR_IF((kLayout_ == DataLayout::PA_BSND) &&
                     ((opParamInfo_.weights.shape->GetStorageShape().GetDim(0) != bSize_) ||
                     (opParamInfo_.blockTable.tensor != nullptr &&
@@ -738,13 +739,13 @@ ge::graphStatus LIQInfoParser::ParseAndCheck(LIQTilingInfo &liqInfo)
     return ge::GRAPH_SUCCESS;
 }
 
-// --------------------------TilingPrepare函数定义-------------------------------------
+// --------------------------TilingPrepare function definition-------------------------------------
 static ge::graphStatus TilingPrepareForLightningIndexerQuant(gert::TilingParseContext * /* context */)
 {
     return ge::GRAPH_SUCCESS;
 }
 
-// --------------------------LightningIndexerQuantTiling类成员函数定义-----------------------
+// --------------------------LightningIndexerQuantTiling class member function definitions-----------------------
 ge::graphStatus LightningIndexerQuantTiling::DoTiling(LIQTilingInfo *tilingInfo)
 {
     // -------------set blockdim-----------------
@@ -756,24 +757,24 @@ ge::graphStatus LightningIndexerQuantTiling::DoTiling(LIQTilingInfo *tilingInfo)
 
     // -------------set workspacesize-----------------
     constexpr uint32_t MM1_RES_ELEM_SIZE = 4;          // 4: fp32
-    constexpr uint32_t DOUBLE_BUFFER = 2;              // 双Buffer
-    constexpr uint32_t M_BASE_SIZE = 512;              // m轴基本块大小
-    constexpr uint32_t S2_BASE_SIZE = 512;             // S2轴基本块大小
+    constexpr uint32_t DOUBLE_BUFFER = 2;              // Double buffer
+    constexpr uint32_t M_BASE_SIZE = 512;              // Basic block size of the m axis
+    constexpr uint32_t S2_BASE_SIZE = 512;             // Basic block size of the S2 axis
     constexpr uint32_t V1_RES_ELEM_SIZE = 4;           // 4: int32
-    constexpr uint32_t V1_RES_ELEM_TYPE = 2;           // 保留Index和Value 2种数据
+    constexpr uint32_t V1_RES_ELEM_TYPE = 2;           // Keep two kinds of data: Index and Value
     constexpr uint32_t V1_DECODE_PARAM_ELEM_SIZE = 8;  // 8: int64
-    constexpr uint32_t V1_DECODE_PARAM_NUM = 16;       // Decode参数个数
-    constexpr uint32_t V1_DECODE_DATA_NUM = 2;         // Decode每个核需要存储头和尾部两块数据
-    constexpr uint32_t S1_BASE_SIZE = 8;               // S1轴基本块的大小
-    constexpr uint32_t TOPK_MAX_SIZE = 2048;           // TopK选取个数
+    constexpr uint32_t V1_DECODE_PARAM_NUM = 16;       // Number of Decode parameters
+    constexpr uint32_t V1_DECODE_DATA_NUM = 2;         // Each core in Decode needs to store two blocks of data: head and tail
+    constexpr uint32_t S1_BASE_SIZE = 8;               // Basic block size of the S1 axis
+    constexpr uint32_t TOPK_MAX_SIZE = 2048;           // Number of elements selected by TopK
     uint32_t workspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
-    // 主流程需Workspace大小
+    // Workspace size required by the main flow
     uint32_t mm1ResSize = M_BASE_SIZE * S2_BASE_SIZE;
     workspaceSize += mm1ResSize * MM1_RES_ELEM_SIZE * DOUBLE_BUFFER * aicNum;
-    // Decode流程(LD)需要Workspace大小
-    // 临时存储Decode中间结果大小: 2(头/尾)*8(s1Base)*2(idx/value)*2048(K)*sizeof(int32)*24=6M
+    // Workspace size required by the Decode flow (LD)
+    // Size for temporarily storing Decode intermediate results: 2(head/tail)*8(s1Base)*2(idx/value)*2048(K)*sizeof(int32)*24=6M
     workspaceSize += V1_DECODE_DATA_NUM * S1_BASE_SIZE * V1_RES_ELEM_TYPE * TOPK_MAX_SIZE * V1_RES_ELEM_SIZE * aicNum;
-    // 临时存储Decode中间参数信息大小: 2(头/尾)*8(s1Base)*16(paramNum)*sizeof(int64_t)*24=48k
+    // Size for temporarily storing Decode intermediate parameter info: 2(head/tail)*8(s1Base)*16(paramNum)*sizeof(int64_t)*24=48k
     workspaceSize += V1_DECODE_DATA_NUM * S1_BASE_SIZE * V1_DECODE_PARAM_NUM * V1_DECODE_PARAM_ELEM_SIZE * aicNum;
     size_t *workSpaces = context_->GetWorkspaceSizes(1);
     workSpaces[0] = workspaceSize;
@@ -806,7 +807,7 @@ ge::graphStatus LightningIndexerQuantTiling::DoTiling(LIQTilingInfo *tilingInfo)
     return ge::GRAPH_SUCCESS;
 }
 
-// --------------------------Tiling函数定义---------------------------
+// --------------------------Tiling function definition---------------------------
 ge::graphStatus TilingForLightningIndexerQuant(gert::TilingContext *context)
 {
     OPS_ERR_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("LightningIndexerQuant", "Tiling context is null."),
@@ -820,7 +821,7 @@ ge::graphStatus TilingForLightningIndexerQuant(gert::TilingContext *context)
     return liqTiling.DoTiling(&liqInfo);
 }
 
-// --------------------------Tiling及函数TilingPrepare函数注册--------
+// --------------------------Registration of Tiling and TilingPrepare functions--------
 IMPL_OP_OPTILING(LightningIndexerQuant)
     .Tiling(TilingForLightningIndexerQuant)
     .TilingParse<LIQCompileInfo>(TilingPrepareForLightningIndexerQuant);
