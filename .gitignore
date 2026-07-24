@@ -89,3 +89,14 @@ ENV/
 *.h264
 *.h265
 *.bin
+
+# Build outputs
+/build/
+/xllm_ops/build/
+
+# Third-party dependencies fetched during build
+/third_party/abseil-cpp/
+/third_party/ascend_protobuf/
+/third_party/json/
+/third_party/makeself/
+/third_party/pkg/
