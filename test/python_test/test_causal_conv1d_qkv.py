@@ -73,6 +73,10 @@ def _packed_reference(conv_output, q_dim, k_dim, v_dim, output_dtype):
         pytest.param(4, 12, (256,), (0,), id="tp4"),
         pytest.param(2, 6, (63, 65), (1, 0), id="tp8-ragged"),
         pytest.param(1, 3, (129,), (1,), id="tp16"),
+        pytest.param(
+            16, 16, (22,), (0,),
+            id="qwen35-2b-prefill",
+        ),
     ],
 )
 @pytest.mark.parametrize(
