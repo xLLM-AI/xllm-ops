@@ -1,5 +1,4 @@
 import os
-import glob
 import torch
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import BuildExtension
@@ -11,7 +10,7 @@ PYTORCH_NPU_INSTALL_PATH = os.path.dirname(os.path.abspath(torch_npu.__file__))
 USE_NINJA = os.getenv('USE_NINJA') == '1'
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 
-source_files = glob.glob(os.path.join(BASE_DIR, "*.cpp"), recursive=True)
+source_files = [os.path.join(BASE_DIR, "RegisterOps.cpp")]
 
 exts = []
 ext = NpuExtension(

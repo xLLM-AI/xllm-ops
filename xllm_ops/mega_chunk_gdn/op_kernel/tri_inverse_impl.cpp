@@ -86,12 +86,11 @@ AICORE inline void CopyDiagonalFractalsL1ToL0(SrcL1TileT src, DstL0TileT dst)
 {
     constexpr uint32_t NumFractals = MatrixSize / FractalSize;
     constexpr bool is_left = std::is_same_v<DstL0TileT, TileLeft<InputT, MatrixSize, MatrixSize>>;
-    constexpr TileType LeftOrRight = is_left ? TileType::Left : TileType::Right;
-    constexpr SLayout InnerLayout = is_left ? SLayout::RowMajor : SLayout::ColMajor;
 
-    Tile<LeftOrRight, InputT, FractalSize, FractalSize, BLayout::RowMajor, FractalSize, FractalSize, InnerLayout,
-         TileConfig::fractalABSize>
-        fractals[NumFractals];
+    using FractalTile =
+        std::conditional_t<is_left, TileLeft<InputT, FractalSize, FractalSize>,
+                           TileRight<InputT, FractalSize, FractalSize>>;
+    FractalTile fractals[NumFractals];
     const std::uintptr_t starting_address = reinterpret_cast<std::uintptr_t>(dst.data());
     for (uint32_t i = 0; i < NumFractals; ++i) {
         TASSIGN(fractals[i], starting_address + i * FractalSize * (MatrixSize + FractalSize) * sizeof(InputT));
@@ -124,8 +123,6 @@ AICORE inline void CopyOddOrEvenBlocksL1ToL0(SrcL1TileT src, DstL0TileT dst, uin
                                              bool swap_parity = false)
 {
     constexpr bool is_left = std::is_same_v<DstL0TileT, TileLeft<InputT, MatrixSize, MatrixSize>>;
-    constexpr TileType LeftOrRight = is_left ? TileType::Left : TileType::Right;
-    constexpr SLayout InnerLayout = is_left ? SLayout::RowMajor : SLayout::ColMajor;
 
     // Default: left→even(0), right→odd(1). swap_parity flips this.
     const uint32_t starting_block_index = (is_left ? 0u : 1u) ^ (swap_parity ? 1u : 0u);
@@ -134,9 +131,10 @@ AICORE inline void CopyOddOrEvenBlocksL1ToL0(SrcL1TileT src, DstL0TileT dst, uin
     const uint32_t num_fractals_per_block = block_size / FractalSize;
 
     // might need fewer fractals if block_size < FractalSize
-    Tile<LeftOrRight, InputT, FractalSize, FractalSize, BLayout::RowMajor, FractalSize, FractalSize, InnerLayout,
-         TileConfig::fractalABSize>
-        fractals[MatrixSize / FractalSize];
+    using FractalTile =
+        std::conditional_t<is_left, TileLeft<InputT, FractalSize, FractalSize>,
+                           TileRight<InputT, FractalSize, FractalSize>>;
+    FractalTile fractals[MatrixSize / FractalSize];
 
     const std::uintptr_t starting_address = reinterpret_cast<std::uintptr_t>(dst.data());
     for (uint32_t i = 0; i < num_fractals_per_block; ++i) {
@@ -654,7 +652,7 @@ AICORE void runKernelTriInvRecUnroll(__gm__ StoreT *M_inv, __gm__ InputT *M, __g
                                      uint32_t num_bsnd_heads = 0, __gm__ int32_t *cu_seqlens = nullptr,
                                      uint32_t is_lower = 0)
 {
-#if (__CHECK_FEATURE_AT_PRECOMPILE) || (__CCE_AICORE__ == 220 && defined(__DAV_C220_CUBE__))  // Cube compilation
+#if (__CHECK_FEATURE_AT_PRECOMPILE) || defined(__DAV_CUBE__)
 
     TriInvRecUnrollKernel<InputT, OutputT, MatrixSize, NumTilesPerCubeIter, IsBSND, StoreT>(
         M_inv, M, I_neg, total_tiles, num_bsnd_heads, cu_seqlens, is_lower);

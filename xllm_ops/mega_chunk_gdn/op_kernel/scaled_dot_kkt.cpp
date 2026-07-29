@@ -7,13 +7,13 @@
 //   A[i,j] = KK^T[i,j] · coeff[i,j] · causal_mask[i,j]
 //
 // Inputs:
-//   K       [total_tokens, Hg, D] DTYPE_Q  — key vectors (BSND along seq; stride Hg * D)
-//   Beta    [H, total_tokens]     DTYPE_Q  — gate bias per **value** head (pre-transposed)
+//   K       [total_tokens, Hg, D] ComputeT  — key vectors (BSND along seq; stride Hg * D)
+//   Beta    [H, total_tokens]     ComputeT  — gate bias per **value** head (pre-transposed)
 //   G       [H, total_tokens]     float — cumulative gate sum per **value** head
 //   Msk     [C, C]                float — lower-triangular causal mask
 //
 // Output:
-//   A       [total_tokens, H, C]  DTYPE_Q  — gated attention matrix in BSND
+//   A       [total_tokens, H, C]  ComputeT  — gated attention matrix in BSND
 //
 // Architecture: Cube + Vec cross-core kernel.
 //   Cube phase: K→L1, GEMM K@K^T→L0C, store to workspace (GM)
@@ -50,7 +50,7 @@
 //   TEXTRACT(l0, l1, r, c)  — Copy L1 sub-block → L0A or L0B (MTE1 pipe)
 //   TRESHAPE(dst, src)      — Reinterpret L1 tile layout (NZ↔ZN for transpose)
 //   TMATMUL(C, A, B)        — Matrix multiply: C = A @ B in Cube engine
-//   TCVT(dst, src, mode)    — converts between float and DTYPE_Q
+//   TCVT(dst, src, mode)    — converts between float and ComputeT
 //   TMOV(dst, src)          — Copy: dst = src.clone()
 //   TADD(d, a, b)           — Element-wise add: d = a + b
 //   TSUB(d, a, b)           — Element-wise subtract: d = a - b
@@ -62,15 +62,15 @@
 //   TCOLEXPAND(2d, row)     — Broadcast row → cols: 2d[i,j] = row[j]
 //   set_flag(P1, P2, EVT)   — Signal from pipe P1 to pipe P2 (like a semaphore post)
 //   wait_flag(P1, P2, EVT)  — Wait for signal from P1 (like a semaphore wait)
-//   pipe_barrier(PIPE_V)    — Local Vec barrier (ensure all Vec ops complete)
+//   gdn_sync::VectorBarrier()    — Local Vec barrier (ensure all Vec ops complete)
 //   pipe_barrier(PIPE_ALL)  — Barrier for all local pipes
-//   ffts_cross_core_sync()  — Cross-core signal (Cube↔Vec, different physical cores)
-//   wait_flag_dev(flag)     — Wait for cross-core signal
+//   gdn_sync::Signal()  — Cross-core signal (Cube↔Vec, different physical cores)
+//   gdn_sync::Wait(flag)     — Wait for cross-core signal
 // ============================================================================
 
 #include <pto/pto-inst.hpp>   // PTO (Performance Tile Operator): NPU kernel API
 #include "acl/acl.h"          // ACL (Ascend Computing Language): runtime API
-#include <runtime/rt_ffts.h>  // FFTS: cross-core synchronization primitives
+#include "gdn_sync.h"
 using namespace pto;
 
 // ── Compile-time constants (set by the JIT compiler from Python) ──────
@@ -127,16 +127,16 @@ using GmTensor2D = pto::GlobalTensor<T, GmShape2D, GmStride2D>;
 #endif
 
 // ── Main kernel function (runs on each AI core) ──────────────────────
-// Template parameters: HiddenSize, ChunkSize.
+// Template parameters: ComputeT, HiddenSize, ChunkSize.
 // GROUP = H/Hg; Cube loads K at head_g = head_idx / GROUP.
 //
 // __gm__: Marks pointers as Global Memory (HBM) — the NPU equivalent of
 // CUDA's device memory. All input/output tensors live in GM.
-template <int32_t HiddenSize, int32_t ChunkSize>
+template <typename ComputeT, int32_t HiddenSize, int32_t ChunkSize>
 AICORE void kkt_kernel(
-    __gm__ DTYPE_Q *K_handle, __gm__ DTYPE_Q *Beta_handle,
+    __gm__ ComputeT *K_handle, __gm__ ComputeT *Beta_handle,
     __gm__ float *G_handle, __gm__ float *Msk_handle,
-    __gm__ DTYPE_Q *workspace_handle, __gm__ DTYPE_Q *A_handle,
+    __gm__ ComputeT *workspace_handle, __gm__ ComputeT *A_handle,
     __gm__ int32_t *cu_seqlens,
     int64_t batch_size, int64_t seq_len,
     int64_t total_tokens,
@@ -161,7 +161,7 @@ AICORE void kkt_kernel(
   // The UB is a flat SRAM; we manually assign byte offsets for each tile.
   // This is like malloc'ing fixed regions — no dynamic allocator on NPU.
   constexpr int32_t GUbAddr      = 0;       // g_ub: cumulative gates [1×C]
-  constexpr int32_t BetaHalfUbAddr = 512;   // beta_ub_half: gate bias DTYPE_Q [1×C/2]
+  constexpr int32_t BetaHalfUbAddr = 512;   // beta_ub_half: gate bias ComputeT [1×C/2]
   constexpr int32_t BetaUbAddr   = 640;     // beta_ub: gate bias fp32 [1×C/2]
   constexpr int32_t GvUbAddr     = 896;     // g_v_ub: combined gate+bias [1×C/2]
   constexpr int32_t AUbAddr      = 1152;    // a_ub: attention sub-block fp32 [C/2×C]
@@ -177,7 +177,7 @@ AICORE void kkt_kernel(
   // set_ffts_base_addr: Tell the hardware where the cross-core flag table lives.
   // This is a one-time setup so ffts_cross_core_sync / wait_flag_dev know
   // which memory region to read/write for inter-core signaling.
-  set_ffts_base_addr(ffts_addr);
+  gdn_sync::InitAddress(ffts_addr);
   auto cid = get_block_idx();       // Which AI core am I? (like CUDA blockIdx.x)
   auto block_num = get_block_num();  // Total AI cores launched (like CUDA gridDim.x)
   // ── Vec sub-block parallelism ─────────────────────────────────────────
@@ -194,13 +194,13 @@ AICORE void kkt_kernel(
 
   // ── Cube-side tile declarations ─────────────────────────────────────
   // Cube-side tiles: K in L1 (NZ format), accumulator in L0C
-  L1Mat<DTYPE_Q, ChunkSize, HiddenSize,
+  L1Mat<ComputeT, ChunkSize, HiddenSize,
         ChunkSize, HiddenSize> k_l1;
   TASSIGN(k_l1, 0);
   // TileAcc<float, C, C>: L0C accumulator tile for GEMM results.
   // The Cube engine always accumulates in float32 for precision, even when
-  // Inputs use DTYPE_Q. Conceptually: result = torch.matmul(a, b).float().
-  // Storing through a DTYPE_Q GlobalTensor converts the FP32 accumulator to DTYPE_Q.
+  // Inputs use ComputeT. Conceptually: result = torch.matmul(a, b).float().
+  // Storing through a ComputeT GlobalTensor converts the FP32 accumulator to ComputeT.
   TileAcc<float, ChunkSize, ChunkSize, ChunkSize, ChunkSize> a_l0;
   TASSIGN(a_l0, 0);
 
@@ -210,7 +210,7 @@ AICORE void kkt_kernel(
   // Vec-side UB tiles for gating computation
   UbND<float, 1, ChunkSize, 1, ChunkSize> g_ub;
   TASSIGN(g_ub, GUbAddr);
-  UbND<DTYPE_Q, 1, HalfChunk, 1, HalfChunk> beta_ub_half;
+  UbND<ComputeT, 1, HalfChunk, 1, HalfChunk> beta_ub_half;
   TASSIGN(beta_ub_half, BetaHalfUbAddr);
   UbND<float, 1, HalfChunk, 1, HalfChunk> beta_ub;
   TASSIGN(beta_ub, BetaUbAddr);
@@ -235,7 +235,7 @@ AICORE void kkt_kernel(
   UbND<float, HalfChunk, ChunkSize,
        HalfChunk, ChunkSize> coeff_ub;
   TASSIGN(coeff_ub, CoeffUbAddr);
-  UbND<DTYPE_Q, HalfChunk, ChunkSize,
+  UbND<ComputeT, HalfChunk, ChunkSize,
        HalfChunk, ChunkSize> a_ub_half;
   TASSIGN(a_ub_half, AUbHalfAddr);
 
@@ -253,11 +253,11 @@ AICORE void kkt_kernel(
   //   Left operand: K [C×D] loaded into L1 in NZ format
   //   Right operand: K^T — same data, but we TRESHAPE to ZN format
   //     (TRESHAPE is FREE — it just reinterprets the fractal layout as transposed)
-  //   Result: KK^T [C×C] in L0C (FP32 accumulator with DTYPE_Q inputs)
+  //   Result: KK^T [C×C] in L0C (FP32 accumulator with ComputeT inputs)
   // ========================================================================
   // __DAV_C220_CUBE__: This code only compiles for the Cube core.
   // On NPU, Cube and Vec are separate compilation targets (like two different GPUs).
-#if defined(__DAV_C220_CUBE__)
+#if defined(__DAV_CUBE__)
   // Outer loop: iterate over all (sequence, head) work items assigned to this core
   for (int64_t work_idx = 0;
        work_idx < (total_work + block_num - 1) / block_num; ++work_idx) {
@@ -291,7 +291,7 @@ AICORE void kkt_kernel(
     for (int64_t ci = 0; ci < num_chunks; ++ci) {
       int32_t slot = static_cast<int32_t>(ci & 1);
       // Wait for Vec to finish reading the previous KK^T from this slot
-      wait_flag_dev(2 + slot);
+      gdn_sync::Wait<PIPE_FIX>(2 + slot);
       pipe_barrier(PIPE_ALL);
 
       int64_t chunk_start = ci * ChunkSize;
@@ -314,11 +314,11 @@ AICORE void kkt_kernel(
       // If the chunk is partial, TFILLPAD zero-fills the padding region
       // so the GEMM doesn't produce garbage from uninitialized memory.
       {
-        L1Mat<DTYPE_Q, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
+        L1Mat<ComputeT, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
         TASSIGN(_l1, 0);
         GmShape2D _gs(valid_rows, HiddenSize);
         GmStride2D _stride(bsnd_qk_stride);
-        GmTensor2D<DTYPE_Q> _gm(K_handle + k_offset, _gs, _stride);
+        GmTensor2D<ComputeT> _gm(K_handle + k_offset, _gs, _stride);
         TLOAD(_l1, _gm);
         if (valid_rows != ChunkSize) TFILLPAD(_l1, _l1);
       }
@@ -337,8 +337,8 @@ AICORE void kkt_kernel(
       // This is like ensuring a producer-consumer chain is properly ordered.
       // WAR sync: MTE2→MTE1, M→MTE1 before extract; MTE1→M before matmul.
       {
-        TileLeft<DTYPE_Q, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0a;
-        TileRight<DTYPE_Q, HiddenSize, ChunkSize, HiddenSize, ChunkSize> _l0b;
+        TileLeft<ComputeT, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0a;
+        TileRight<ComputeT, HiddenSize, ChunkSize, HiddenSize, ChunkSize> _l0b;
         TASSIGN(_l0a, 0x0);
         TASSIGN(_l0b, 0x0);
         auto _we = EVENT_ID1;
@@ -349,7 +349,7 @@ AICORE void kkt_kernel(
         // Left operand: K in NZ format, extract directly to L0A
         TEXTRACT(_l0a, k_l1, 0, 0);
         // Right operand: K^T via ZN reshape of same L1 tile, extract to L0B
-        L1MatZN<DTYPE_Q, HiddenSize, ChunkSize> _bzn;
+        L1MatZN<ComputeT, HiddenSize, ChunkSize> _bzn;
         TRESHAPE(_bzn, k_l1);
         TEXTRACT(_l0b, _bzn, 0, 0);
         set_flag(PIPE_MTE1, PIPE_M, _we);
@@ -361,13 +361,13 @@ AICORE void kkt_kernel(
         wait_flag(PIPE_M, PIPE_FIX, _we);
       }
 
-      // ── Store KK^T from L0C → workspace GM (with FP32→DTYPE_Q cast) ───
+      // ── Store KK^T from L0C → workspace GM (with FP32→ComputeT cast) ───
       {
         TileAcc<float, ChunkSize, ChunkSize, DYNAMIC, DYNAMIC> _l0(ChunkSize, ChunkSize);
         TASSIGN(_l0, 0);
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = ChunkSize; _gs.shape[4] = ChunkSize;
-        GlobalTensor<DTYPE_Q, decltype(_gs), Stride<1, 1, 1, ChunkSize, 1>> _gm(
+        GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
             workspace_handle +
                 (static_cast<int64_t>(cid) * 2 + slot) * ChunkSquare,
             _gs);
@@ -375,7 +375,7 @@ AICORE void kkt_kernel(
       }
 
       // ── Cross-core synchronization (Cube → Vec) ──────────────────────
-      // ffts_cross_core_sync(pipe, config): Signal across physical cores.
+      // gdn_sync::Signal(pipe, config): Signal across physical cores.
       // Unlike set_flag/wait_flag (which sync pipes within ONE core), this syncs
       // between the Cube core and Vec core (they are separate hardware units).
       //
@@ -383,14 +383,14 @@ AICORE void kkt_kernel(
       //   mode=2: broadcast to all cores on same block
       //   flag_id: which flag to set (0,1,2,3...)
       //
-      // The receiving side calls wait_flag_dev(flag_id) to wait for this signal.
+      // The receiving side calls gdn_sync::Wait(flag_id) to wait for this signal.
       //
       // In this kernel:
-      //   Cube sets flag 0/1 → Vec waits on wait_flag_dev(0/1) (KK^T ready)
-      //   Vec sets flag 2/3 → Cube waits on wait_flag_dev(2/3) (workspace free)
+      //   Cube sets flag 0/1 → Vec waits on gdn_sync::Wait(0/1) (KK^T ready)
+      //   Vec sets flag 2/3 → Cube waits on gdn_sync::Wait(2/3) (workspace free)
       //
       // Signal Vec that this slot's KK^T is ready
-      ffts_cross_core_sync(PIPE_FIX, 1 | (2 << 4) | (slot << 8));
+      gdn_sync::Signal<PIPE_FIX>(1 | (2 << 4) | (slot << 8));
     }
   }
 #endif
@@ -418,7 +418,7 @@ AICORE void kkt_kernel(
   // A = KK_T[my_rows] * coeff * mask[my_rows]           # TMUL × 2
   // ========================================================================
   // __DAV_C220_VEC__: This code only compiles for the Vec core.
-#if defined(__DAV_C220_VEC__)
+#if defined(__DAV_VEC__)
   // set_mask_norm / set_vector_mask: configure the SIMD mask for Vec ops.
   // (-1, -1) means "all lanes active" — process every element.
   // (Like CUDA's __activemask() returning all 1s for a full warp.)
@@ -431,7 +431,7 @@ AICORE void kkt_kernel(
   {
     Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
     _gs.shape[3] = HalfChunk; _gs.shape[4] = ChunkSize;
-    GlobalTensor<float, decltype(_gs), Stride<1, 1, 1, ChunkSize, 1>> _gm(
+    GlobalTensor<float, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
         Msk_handle +
             static_cast<int64_t>(vid) * HalfChunk * ChunkSize,
         _gs);
@@ -445,9 +445,9 @@ AICORE void kkt_kernel(
 
   // Initial cross-core sync: release both workspace slots so Cube can start.
   // Vec tells Cube "slots 0 and 1 are free" by setting flags 2 and 3.
-  // Without this, Cube would hang on wait_flag_dev(2/3) at the first iteration.
-  ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (2 << 8));
-  ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (3 << 8));
+  // Without this, Cube would hang on gdn_sync::Wait(2/3) at the first iteration.
+  gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (2 << 8));
+  gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (3 << 8));
 
   for (int64_t work_idx = 0;
        work_idx < (total_work + block_num - 1) / block_num; ++work_idx) {
@@ -493,7 +493,7 @@ AICORE void kkt_kernel(
         {
           Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
           _gs.shape[3] = 1; _gs.shape[4] = valid_rows;
-          GlobalTensor<float, decltype(_gs), Stride<1, 1, 1, 1, 1>> _gm(
+          GlobalTensor<float, decltype(_gs), pto::Stride<1, 1, 1, 1, 1>> _gm(
               G_handle + static_cast<int64_t>(head_idx) * total_tokens
                        + (bos + chunk_start),
               _gs);
@@ -507,19 +507,19 @@ AICORE void kkt_kernel(
           }
         }
 
-        // Beta is [H, total_tokens] DTYPE_Q — contiguous per head
+        // Beta is [H, total_tokens] ComputeT — contiguous per head
         {
           Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
           _gs.shape[3] = 1; _gs.shape[4] = local_valid;
-          GlobalTensor<DTYPE_Q, decltype(_gs), Stride<1, 1, 1, 1, 1>> _gm(
+          GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, 1, 1>> _gm(
               Beta_handle + static_cast<int64_t>(head_idx) * total_tokens
                           + (bos + chunk_start + row_offset),
               _gs);
-          UbND<DTYPE_Q, 1, HalfChunk, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(1, local_valid);
+          UbND<ComputeT, 1, HalfChunk, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(1, local_valid);
           TASSIGN(_ld, BetaHalfUbAddr);
           TLOAD(_ld, _gm);
           if (local_valid != HalfChunk) {
-            UbND<DTYPE_Q, 1, HalfChunk, 1, HalfChunk, PadValue::Zero> _pd;
+            UbND<ComputeT, 1, HalfChunk, 1, HalfChunk, PadValue::Zero> _pd;
             TASSIGN(_pd, BetaHalfUbAddr);
             TFILLPAD_INPLACE(_pd, _ld);
           }
@@ -527,12 +527,12 @@ AICORE void kkt_kernel(
       }
 
       // Wait for Cube to finish writing KK^T for this slot
-      wait_flag_dev(slot);
+      gdn_sync::Wait<PIPE_MTE2>(slot);
       pipe_barrier(PIPE_ALL);
 
       if (local_valid > 0) {
         // ── Compute gating coefficient ────────────────────────────────
-        // Step 1: Convert beta from DTYPE_Q→FP32 for precision
+        // Step 1: Convert beta from ComputeT→FP32 for precision
         // Step 2: g_v[i] = g[row_offset+i] + log(β[i])  — combined row gate
         // Step 3: Broadcast g_v (rows) and g (cols) to 2D matrices
         // Step 4: coeff = exp(min(g_v_2d - g_2d, 0)) — clamped exponential gating
@@ -546,15 +546,15 @@ AICORE void kkt_kernel(
                 GUbAddr + row_offset *
                               static_cast<int32_t>(sizeof(float)));
         TMOV(g_v_ub, g_ub_temp);   // g_v = g[row_offset:row_offset+C/2]
-        pipe_barrier(PIPE_V);       // Wait for TMOV to complete
+        gdn_sync::VectorBarrier();       // Wait for TMOV to complete
 
         TLOG(beta_ub, beta_ub);     // beta_ub = log(beta) in-place
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
         TADD(g_v_ub, g_v_ub, beta_ub);  // g_v = g_sub + log(beta) — the combined gate
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
         TMOV(g_r_ub, g_v_ub);      // Copy to g_r for row-broadcast
         TMOV(g_c_ub, g_ub);        // Copy full g to g_c for col-broadcast
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
 
         // Broadcast g_v to rows, g to columns → 2D gating matrix
         // coeff[i,j] = exp(min(g_v[i] - g[j], 0))
@@ -566,11 +566,11 @@ AICORE void kkt_kernel(
         TASSIGN(g_r_ub_temp, GRUbAddr);
         TROWEXPAND(g_r_2d_ub, g_r_ub_temp);  // g_r_2d[i,j] = g_v[i] for all j
         TCOLEXPAND(g_c_2d_ub, g_c_ub);       // g_c_2d[i,j] = g[j] for all i
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
         TSUB(coeff_ub, g_r_2d_ub, g_c_2d_ub);  // coeff[i,j] = g_v[i] - g[j]
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
         TMINS(coeff_ub, coeff_ub, 0.0f);        // clamp to ≤ 0 (coeff will be ≤ 1 after exp)
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
         TEXP(coeff_ub, coeff_ub);                // coeff = exp(clamped_diff) ∈ (0, 1]
 
         // V→MTE2 sync: ensure gating computation is done before we start
@@ -579,18 +579,18 @@ AICORE void kkt_kernel(
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
 
-        // ── Load KK^T sub-block from workspace (DTYPE_Q) ─────────────
+        // ── Load KK^T sub-block from workspace (ComputeT) ─────────────
         // workspace layout: [core_id * 2 + slot][C×C], we load our sub-block's
         // [C/2×C] portion (offset by vid * HalfChunk * ChunkSize elements).
         {
           Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
           _gs.shape[3] = HalfChunk; _gs.shape[4] = ChunkSize;
-          GlobalTensor<DTYPE_Q, decltype(_gs), Stride<1, 1, 1, ChunkSize, 1>> _gm(
+          GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
               workspace_handle +
                   (static_cast<int64_t>(cid) * 2 + slot) * ChunkSquare +
                   static_cast<int64_t>(vid) * HalfChunk * ChunkSize,
               _gs);
-          UbND<DTYPE_Q, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(HalfChunk, ChunkSize);
+          UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(HalfChunk, ChunkSize);
           TASSIGN(_ld, AUbHalfAddr);
           TLOAD(_ld, _gm);
         }
@@ -600,13 +600,13 @@ AICORE void kkt_kernel(
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
         // ── Apply gating and mask: A = KK^T · coeff · mask ───────────
-        // 1. Convert KK^T from DTYPE_Q → FP32 (stored compactly to save GM bandwidth)
+        // 1. Convert KK^T from ComputeT → FP32 (stored compactly to save GM bandwidth)
         TCVT(a_ub, a_ub_half, pto::RoundMode::CAST_NONE);
         // 2. Element-wise multiply by gating coefficient
         TMUL(a_ub, a_ub, coeff_ub);
         // 3. Element-wise multiply by causal mask (lower triangular, zeros above diagonal)
         TMUL(a_ub, a_ub, msk_ub);
-        // 4. Convert result back to DTYPE_Q for output
+        // 4. Convert result back to ComputeT for output
         TCVT(a_ub_half, a_ub, pto::RoundMode::CAST_NONE);
 
         // V→MTE3 sync: Vec computation done, safe for DMA store to begin
@@ -625,8 +625,8 @@ AICORE void kkt_kernel(
         {
           GmShape2D _gs(local_valid, ChunkSize);
           GmStride2D _stride(H * ChunkSize);
-          GmTensor2D<DTYPE_Q> _gm(A_handle + a_gm_offset, _gs, _stride);
-          UbND<DTYPE_Q, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC> _st(local_valid, ChunkSize);
+          GmTensor2D<ComputeT> _gm(A_handle + a_gm_offset, _gs, _stride);
+          UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC> _st(local_valid, ChunkSize);
           TASSIGN(_st, AUbHalfAddr);
           TSTORE(_gm, _st);
         }
@@ -635,8 +635,8 @@ AICORE void kkt_kernel(
       pipe_barrier(PIPE_ALL);
       // Signal Cube that this workspace slot is free for reuse.
       // Flag (2+slot): slot 0 → flag 2, slot 1 → flag 3.
-      // Cube is waiting on wait_flag_dev(2+slot) before writing the next chunk.
-      ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | ((2 + slot) << 8));
+      // Cube is waiting on gdn_sync::Wait(2+slot) before writing the next chunk.
+      gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | ((2 + slot) << 8));
     }
   }
 #endif
