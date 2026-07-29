@@ -35,9 +35,24 @@
 
 #include "acl/acl.h"
 #include "kernel_operator.h"
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+// The pinned PTO-ISA release only maps 3101 to the A5 implementation.
+// Ascend950 uses 3510, so select the same implementation explicitly.
+#define PTO_NPU_ARCH_A5
+#endif
 #include <pto/pto-inst.hpp>
 #include <type_traits>
 using namespace pto;
+
+#if defined(__DAV_C310_CUBE__) || defined(__DAV_C310_VEC__)
+#define GDN_A5_KERNEL
+#endif
+
+#if defined(__DAV_C310_CUBE__)
+#define GDN_A5_CUBE_KERNEL
+#elif defined(__DAV_C310_VEC__)
+#define GDN_A5_VECTOR_KERNEL
+#endif
 
 static_assert(std::is_same_v<DTYPE_Q, half> || std::is_same_v<DTYPE_Q, bfloat16_t>,
               "MegaChunkGdn supports FP16 or BF16 compute tensors.");
@@ -72,6 +87,16 @@ AICORE inline uint16_t GetffstMsg(uint16_t mode, uint16_t flagId)
 template <bool isAIVOnly = true>
 AICORE inline void SyncAllImpl()
 {
+#if defined(GDN_A5_KERNEL)
+    // The A5 host runtime on this platform does not expose an FFTS C2C control
+    // address, so the legacy ffts rendezvous cannot be used.  Without a real
+    // cross-block barrier here, a fast block can enter the next stage and read
+    // another block's in-flight output (observed as sporadic NaN rows in the
+    // KKT product on multi-chunk inputs).  Drain the local pipes, then use the
+    // AscendC all-core barrier, which is supported on Ascend950 MIX blocks.
+    pipe_barrier(PIPE_ALL);
+    AscendC::SyncAll<false>();
+#else
     pipe_barrier(PIPE_ALL);
     if constexpr (isAIVOnly) {
         ffts_cross_core_sync(PIPE_MTE3, GetffstMsg(0x0, SYNC_AIV_ONLY_ALL));
@@ -87,16 +112,195 @@ AICORE inline void SyncAllImpl()
     ffts_cross_core_sync(PIPE_MTE3, GetffstMsg(0x02, SYNC_AIV_FLAG));
     wait_flag_dev(SYNC_AIC_AIV_FLAG);
 #endif
+#endif
 }
+
+#if defined(GDN_A5_KERNEL)
+template <pipe_t Pipe>
+AICORE inline void GdnA5Record(uint16_t flag_id)
+{
+#if defined(GDN_A5_CUBE_KERNEL)
+    // The Cube publishes GM data (workspace tiles) through the FIX pipe.  On
+    // A5 the intra-block flag does not imply the FIX store has reached the
+    // coherence point, so drain first or the Vector consumer can read a
+    // partially landed tile.
+    dsb(DSB_ALL);
+    set_intra_block(Pipe, flag_id);
+    set_intra_block(Pipe, flag_id + 16);
+#else
+    if constexpr (Pipe == PIPE_MTE3) {
+        dsb(DSB_ALL);
+    }
+    set_intra_block(Pipe, flag_id);
+#endif
+}
+
+AICORE inline void GdnA5Wait(uint16_t flag_id)
+{
+#if defined(GDN_A5_CUBE_KERNEL)
+    // Vector releases the GM workspace before Cube overwrites it through FIX.
+    wait_intra_block(PIPE_FIX, flag_id);
+    wait_intra_block(PIPE_FIX, flag_id + 16);
+#else
+    // Cube publishes GM data that Vector subsequently loads through MTE2.
+    wait_intra_block(PIPE_MTE2, flag_id);
+#endif
+}
+
+AICORE inline void GdnA5WaitMte2(uint16_t flag_id)
+{
+#if defined(GDN_A5_CUBE_KERNEL)
+    // Both physical Vector subblocks publish a half of the GM tile that Cube
+    // will consume through MTE2.
+    wait_intra_block(PIPE_MTE2, flag_id);
+    wait_intra_block(PIPE_MTE2, flag_id + 16);
+#else
+    wait_intra_block(PIPE_MTE2, flag_id);
+#endif
+}
+
+#if defined(GDN_A5_KERNEL)
+// Scalar conversions between a 2-byte compute type and float.  The C310
+// backend has no scalar bf16<->fp32 convert instruction ("not support bf16
+// type cast"), so BF16 goes through bit manipulation; FP16 keeps the native
+// scalar cast.  bf16->fp32 is an exact 16-bit left shift; fp32->bf16 uses
+// round-to-nearest-even like the hardware vector TCVT.
+template <typename Q>
+AICORE inline float GdnA5ToF32(Q value)
+{
+    if constexpr (std::is_same_v<Q, bfloat16_t>) {
+        uint16_t bits;
+        __builtin_memcpy(&bits, &value, sizeof(bits));
+        const uint32_t fbits = static_cast<uint32_t>(bits) << 16;
+        float result;
+        __builtin_memcpy(&result, &fbits, sizeof(result));
+        return result;
+    } else {
+        return static_cast<float>(value);
+    }
+}
+
+template <typename Q>
+AICORE inline Q GdnA5FromF32(float value)
+{
+    if constexpr (std::is_same_v<Q, bfloat16_t>) {
+        uint32_t bits;
+        __builtin_memcpy(&bits, &value, sizeof(bits));
+        bits += 0x7FFFu + ((bits >> 16) & 1u);  // round-to-nearest-even
+        const uint16_t upper = static_cast<uint16_t>(bits >> 16);
+        Q result;
+        __builtin_memcpy(&result, &upper, sizeof(result));
+        return result;
+    } else {
+        return static_cast<Q>(value);
+    }
+}
+#endif
+
+
+template <pipe_t Pipe>
+AICORE inline void GdnA5PipeBarrier()
+{
+    // Preserve the scope selected by each kernel. Cross-stage and Cube/Vector
+    // handoffs already request PIPE_ALL explicitly where the full drain is needed.
+    // The public AscendC wrapper intentionally treats PIPE_V as a no-op on C310,
+    // while the raw intrinsic only accepts PIPE_MTE3..PIPE_ALL on this target.
+    if constexpr (Pipe == PIPE_V) {
+        AscendC::PipeBarrier<PIPE_V>();
+    } else {
+        static_assert(Pipe == PIPE_ALL, "unsupported GDN pipeline barrier");
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+}
+#endif
 
 template <typename T>
 AICORE inline void mega_transpose_TH_to_HT(__gm__ T *src, __gm__ T *dst, int64_t T_len, int32_t H)
 {
-#if defined(__DAV_C220_VEC__)
+#if defined(__DAV_C220_VEC__) || defined(GDN_A5_VECTOR_KERNEL)
     if (get_subblockid() != 0) return;
     set_mask_norm();
     set_vector_mask(-1, -1);
 
+#if defined(GDN_A5_VECTOR_KERNEL)
+    const int64_t cid = static_cast<int64_t>(get_block_idx());
+    const int64_t block_num = static_cast<int64_t>(get_block_num());
+    constexpr int32_t BLOCK = 128;
+    constexpr int32_t HEAD_TILE = 16;
+    constexpr int32_t ES = static_cast<int32_t>(sizeof(T));
+    constexpr int32_t SRC_UB = 0;
+    constexpr int32_t DST_UB = SRC_UB + BLOCK * HEAD_TILE * ES;
+    constexpr int32_t TMP_UB = DST_UB + HEAD_TILE * BLOCK * ES;
+
+    using UBSrc =
+        Tile<TileType::Vec, T, BLOCK, HEAD_TILE, BLayout::RowMajor, BLOCK, HEAD_TILE,
+             SLayout::NoneBox, 512, PadValue::Zero>;
+    using UBSrcDyn =
+        Tile<TileType::Vec, T, BLOCK, HEAD_TILE, BLayout::RowMajor, DYNAMIC, DYNAMIC,
+             SLayout::NoneBox, 512, PadValue::Zero>;
+    using UBDst =
+        Tile<TileType::Vec, T, HEAD_TILE, BLOCK, BLayout::RowMajor, HEAD_TILE, BLOCK,
+             SLayout::NoneBox, 512>;
+    using UBTmp =
+        Tile<TileType::Vec, T, BLOCK, HEAD_TILE, BLayout::RowMajor, BLOCK, HEAD_TILE,
+             SLayout::NoneBox, 512>;
+    using UBRowDyn =
+        Tile<TileType::Vec, T, 1, BLOCK, BLayout::RowMajor, DYNAMIC, DYNAMIC, SLayout::NoneBox, 512>;
+    using Gm2D = Shape<1, 1, 1, DYNAMIC, DYNAMIC>;
+    using Gm1D = Shape<1, 1, 1, 1, DYNAMIC>;
+    using GmSrcS = pto::Stride<1, 1, 1, DYNAMIC, 1>;
+    using GmS1 = pto::Stride<1, 1, 1, 1, 1>;
+    GmSrcS src_stride(H);
+
+    UBSrc ub_src;
+    UBDst ub_dst;
+    UBTmp ub_tmp;
+    TASSIGN(ub_src, SRC_UB);
+    TASSIGN(ub_dst, DST_UB);
+    TASSIGN(ub_tmp, TMP_UB);
+
+    // The caller performs SyncAll after both transposes, so each MIX block can
+    // own a grid-stride subset of token tiles and publish all heads for its tiles.
+    for (int64_t t0 = cid * BLOCK; t0 < T_len;
+         t0 += block_num * BLOCK) {
+        const int32_t valid =
+            (t0 + BLOCK <= T_len) ? BLOCK : static_cast<int32_t>(T_len - t0);
+        for (int32_t head_base = 0; head_base < H; head_base += HEAD_TILE) {
+            const int32_t tile_heads =
+                (head_base + HEAD_TILE <= H) ? HEAD_TILE : (H - head_base);
+            Gm2D src_shape;
+            src_shape.shape[3] = valid;
+            src_shape.shape[4] = tile_heads;
+            GlobalTensor<T, Gm2D, GmSrcS> src_gm(
+                src + t0 * H + head_base, src_shape, src_stride);
+            UBSrcDyn load(valid, tile_heads);
+            TASSIGN(load, SRC_UB);
+            TLOAD(load, src_gm);
+            if (valid != BLOCK || tile_heads != HEAD_TILE) {
+                TFILLPAD_INPLACE(ub_src, load);
+            }
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+            TTRANS(ub_dst, ub_src, ub_tmp);
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+
+            for (int32_t h = head_base; h < head_base + tile_heads; ++h) {
+                Gm1D dst_shape;
+                dst_shape.shape[4] = valid;
+                GlobalTensor<T, Gm1D, GmS1> dst_gm(
+                    dst + static_cast<int64_t>(h) * T_len + t0, dst_shape);
+                UBRowDyn store(1, valid);
+                TASSIGN(store, DST_UB + (h - head_base) * BLOCK * ES);
+                TSTORE(dst_gm, store);
+            }
+            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+        }
+    }
+    dsb(DSB_ALL);
+#else
     auto cid = get_block_idx();
     auto block_num = get_block_num();
 
@@ -122,8 +326,8 @@ AICORE inline void mega_transpose_TH_to_HT(__gm__ T *src, __gm__ T *dst, int64_t
 
     using Gm2D = Shape<1, 1, 1, DYNAMIC, DYNAMIC>;
     using Gm1D = Shape<1, 1, 1, 1, DYNAMIC>;
-    using GmSrcS = Stride<1, 1, 1, DYNAMIC, 1>;
-    using GmS1 = Stride<1, 1, 1, 1, 1>;
+    using GmSrcS = pto::Stride<1, 1, 1, DYNAMIC, 1>;
+    using GmS1 = pto::Stride<1, 1, 1, 1, 1>;
     GmSrcS src_stride(H);
 
     UBSrcFull ub_src;
@@ -135,7 +339,18 @@ AICORE inline void mega_transpose_TH_to_HT(__gm__ T *src, __gm__ T *dst, int64_t
 
     int64_t num_tok_blocks = (T_len + BLOCK - 1) / BLOCK;
 
-    for (int64_t bi = static_cast<int64_t>(cid); bi < num_tok_blocks; bi += static_cast<int64_t>(block_num)) {
+#if defined(GDN_A5_KERNEL)
+    // All blocks materialize the small transposed gate tensors. The following
+    // stages keep head h on block h % block_num, so this removes the need for
+    // a global barrier between a token-block transpose producer and a different
+    // head owner. Concurrent stores are byte-identical.
+    const int64_t block_begin = 0;
+    const int64_t block_stride = 1;
+#else
+    const int64_t block_begin = static_cast<int64_t>(cid);
+    const int64_t block_stride = static_cast<int64_t>(block_num);
+#endif
+    for (int64_t bi = block_begin; bi < num_tok_blocks; bi += block_stride) {
         int64_t t0 = bi * BLOCK;
         int32_t valid = (t0 + BLOCK <= T_len) ? BLOCK : static_cast<int32_t>(T_len - t0);
 
@@ -157,7 +372,14 @@ AICORE inline void mega_transpose_TH_to_HT(__gm__ T *src, __gm__ T *dst, int64_t
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
 
-        for (int32_t h = 0; h < H; ++h) {
+#if defined(GDN_A5_KERNEL)
+        const int32_t head_begin = static_cast<int32_t>(cid);
+        const int32_t head_stride = static_cast<int32_t>(block_num);
+#else
+        const int32_t head_begin = 0;
+        const int32_t head_stride = 1;
+#endif
+        for (int32_t h = head_begin; h < H; h += head_stride) {
             Gm1D gs;
             gs.shape[4] = valid;
             GlobalTensor<T, Gm1D, GmS1> gm(dst + h * T_len + t0, gs);
@@ -169,70 +391,6 @@ AICORE inline void mega_transpose_TH_to_HT(__gm__ T *src, __gm__ T *dst, int64_t
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     }
 #endif
-}
-
-template <int32_t H, int32_t C>
-AICORE inline void mega_cast_fp32_to_dtype_bsnd(__gm__ float *src, __gm__ DTYPE_Q *dst, uint32_t num_matrices,
-                                               int64_t total_tokens)
-{
-#if defined(__DAV_C220_VEC__)
-    if (get_subblockid() != 0) return;
-    set_mask_norm();
-    set_vector_mask(-1, -1);
-
-    auto cid = get_block_idx();
-    auto block_num = get_block_num();
-
-    constexpr int32_t F32_UB = 0;
-    constexpr int32_t F16_UB = C * static_cast<int32_t>(sizeof(float));
-
-    using SrcUB = Tile<TileType::Vec, float, 1, C, BLayout::RowMajor, 1, C, SLayout::NoneBox, 512, PadValue::Zero>;
-    using DynSrcUB =
-        Tile<TileType::Vec, float, 1, C, BLayout::RowMajor, DYNAMIC, DYNAMIC, SLayout::NoneBox, 512, PadValue::Zero>;
-    using DstUB = Tile<TileType::Vec, DTYPE_Q, 1, C, BLayout::RowMajor, 1, C, SLayout::NoneBox, 512>;
-    using DynDstUB = Tile<TileType::Vec, DTYPE_Q, 1, C, BLayout::RowMajor, DYNAMIC, DYNAMIC, SLayout::NoneBox, 512>;
-    using Gm1D = Shape<1, 1, 1, 1, DYNAMIC>;
-    using GmS1 = Stride<1, 1, 1, 1, 1>;
-
-    SrcUB src_ub;
-    TASSIGN(src_ub, F32_UB);
-    DstUB dst_ub;
-    TASSIGN(dst_ub, F16_UB);
-
-    for (uint32_t m = cid; m < num_matrices; m += block_num) {
-        uint32_t h = m % static_cast<uint32_t>(H);
-        uint32_t chunk_idx = m / static_cast<uint32_t>(H);
-
-        for (int64_t t = 0; t < total_tokens; ++t) {
-            int64_t off = t * static_cast<int64_t>(H * C) + static_cast<int64_t>(h * C);
-
-            {
-                Gm1D gs;
-                gs.shape[4] = C;
-                GlobalTensor<float, Gm1D, GmS1> gm(src + off, gs);
-                SrcUB ld;
-                TASSIGN(ld, F32_UB);
-                TLOAD(ld, gm);
-            }
-            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-
-            TCVT(dst_ub, src_ub, RoundMode::CAST_NONE);
-
-            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            {
-                Gm1D gs;
-                gs.shape[4] = C;
-                GlobalTensor<DTYPE_Q, Gm1D, GmS1> gm(dst + off, gs);
-                DstUB st;
-                TASSIGN(st, F16_UB);
-                TSTORE(gm, st);
-            }
-            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-        }
-    }
 #endif
 }
 
@@ -241,6 +399,27 @@ AICORE inline void mega_cast_fp32_to_dtype_bsnd(__gm__ float *src, __gm__ DTYPE_
 // ===================================================================
 // Include original kernel implementations in separate namespaces.
 // ===================================================================
+
+// The original GDN kernels use the C220 guards to split Cube and Vector
+// compilation. C310 keeps the same split, but uses intra-block events instead
+// of the legacy FFTS CV signals. Keep the compatibility aliases local to the
+// included GDN implementation and remove them before including CANN headers.
+#if defined(GDN_A5_CUBE_KERNEL)
+#define __DAV_C220_CUBE__ 1
+#define ffts_cross_core_sync(pipe, config) GdnA5Record<pipe>(static_cast<uint16_t>(((config) >> 8) & 0xf))
+#define wait_flag_dev(flag_id) GdnA5Wait(static_cast<uint16_t>(flag_id))
+#define pipe_barrier(pipe) GdnA5PipeBarrier<pipe>()
+#elif defined(GDN_A5_VECTOR_KERNEL)
+#define __DAV_C220_VEC__ 1
+#define ffts_cross_core_sync(pipe, config) GdnA5Record<pipe>(static_cast<uint16_t>(((config) >> 8) & 0xf))
+#define wait_flag_dev(flag_id) GdnA5Wait(static_cast<uint16_t>(flag_id))
+#define pipe_barrier(pipe) GdnA5PipeBarrier<pipe>()
+#endif
+
+#if defined(GDN_A5_VECTOR_KERNEL)
+#define GDN_A5_TILED_VECTOR_KERNEL 1
+#undef GDN_A5_VECTOR_KERNEL
+#endif
 
 namespace mk_cumsum {
 #include "chunk_cumsum.cpp"
@@ -266,6 +445,10 @@ namespace mk_o {
 #include "chunk_o.cpp"
 }
 
+#if defined(GDN_A5_TILED_VECTOR_KERNEL)
+#define GDN_A5_VECTOR_KERNEL 1
+#endif
+
 #if defined(__DAV_C220_CUBE__)
 #define GDN_WY_FAST_CALL wy_fast_kernel_aic
 #define GDN_CHUNK_O_CALL chunk_o_kernel_aic
@@ -279,8 +462,16 @@ namespace mk_o {
 
 AICORE inline void mega_solve_tril(__gm__ DTYPE_Q *out, __gm__ DTYPE_Q *in, __gm__ DTYPE_Q *minus_id, uint32_t matrix_size,
                                    uint32_t num_matrices, uint32_t num_bsnd_heads, __gm__ int32_t *cu_seqlens,
-                                   uint32_t is_lower)
+                                   uint32_t is_lower, __gm__ DTYPE_Q *packed_workspace)
 {
+#if defined(GDN_A5_KERNEL)
+    // A5 launches this fused kernel with one MIX block.  Keep a single
+    // matrix in flight so the recursive solver does not reuse L1 buffers and
+    // event IDs across the two physical vector subblocks of that MIX block.
+    mk_solve::runKernelTriInvRecUnroll<DTYPE_Q, float, GDN_C, 1, true, DTYPE_Q>(
+        out, in, minus_id, num_matrices, num_bsnd_heads, cu_seqlens,
+        is_lower, packed_workspace);
+#else
     if (num_matrices <= get_block_num())
         mk_solve::runKernelTriInvRecUnroll<DTYPE_Q, float, GDN_C, 1, true, DTYPE_Q>(out, in, minus_id, num_matrices,
                                                                               num_bsnd_heads, cu_seqlens, is_lower);
@@ -290,12 +481,13 @@ AICORE inline void mega_solve_tril(__gm__ DTYPE_Q *out, __gm__ DTYPE_Q *in, __gm
     else
         mk_solve::runKernelTriInvRecUnroll<DTYPE_Q, float, GDN_C, 4, true, DTYPE_Q>(out, in, minus_id, num_matrices,
                                                                               num_bsnd_heads, cu_seqlens, is_lower);
+#endif
 }
 
 AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr, GM_ADDR g_in_ptr, GM_ADDR beta_ptr,
                                     GM_ADDR msk_lower_ptr, GM_ADDR msk_full_ptr, GM_ADDR minus_id_ptr,
                                     GM_ADDR cu_seqlens_ptr, GM_ADDR o_ptr, GM_ADDR g_sum_ptr, GM_ADDR g_t_ptr,
-                                    GM_ADDR beta_t_ptr, GM_ADDR A_ptr, GM_ADDR A_inv_f32_ptr, GM_ADDR A_inv_ptr,
+                                    GM_ADDR beta_t_ptr, GM_ADDR A_ptr, GM_ADDR A_inv_ptr,
                                     GM_ADDR w_ptr, GM_ADDR u_ptr, GM_ADDR s_ptr, GM_ADDR v_new_ptr, GM_ADDR fs_ptr,
                                     GM_ADDR h0_ptr, int64_t has_initial_state, GM_ADDR kkt_ws_ptr,
                                     GM_ADDR wy_ws_a1_ptr, GM_ADDR wy_ws_a2_ptr, GM_ADDR h_ws_ptr,
@@ -310,31 +502,33 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
         return;
     }
 
+
     mk_cumsum::cumsum_kernel<C>(reinterpret_cast<__gm__ float *>(g_in_ptr),
                                 reinterpret_cast<__gm__ float *>(g_sum_ptr),
                                 reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len, H,
                                 ffts_addr);
 
-#ifdef MEGA_STOP_AFTER_CUMSUM
-    pipe_barrier(PIPE_ALL);
-    return;
-#endif
 
     SyncAllImpl<false>();
 
-#ifdef MEGA_STOP_AFTER_SYNC1
-    return;
-#endif
 
     mega_transpose_TH_to_HT<float>(reinterpret_cast<__gm__ float *>(g_sum_ptr),
                                    reinterpret_cast<__gm__ float *>(g_t_ptr), total_tokens, H);
     mega_transpose_TH_to_HT<DTYPE_Q>(reinterpret_cast<__gm__ DTYPE_Q *>(beta_ptr),
                                   reinterpret_cast<__gm__ DTYPE_Q *>(beta_t_ptr), total_tokens, H);
 
-#ifdef MEGA_STOP_AFTER_TRANSPOSE
-    pipe_barrier(PIPE_ALL);
-    return;
+#if defined(GDN_A5_KERNEL)
+    constexpr uint16_t transpose_ready = 6;
+#if defined(GDN_A5_CUBE_KERNEL)
+    wait_intra_block(PIPE_S, transpose_ready);
+#elif defined(GDN_A5_VECTOR_KERNEL)
+    if (get_subblockid() == 0) {
+        dsb(DSB_ALL);
+        set_intra_block(PIPE_MTE3, transpose_ready);
+    }
 #endif
+#endif
+
 
     SyncAllImpl<false>();
 
@@ -351,34 +545,20 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
     wait_flag_dev(3);
 #endif
 
-#ifdef MEGA_STOP_AFTER_KKT
-    pipe_barrier(PIPE_ALL);
-    return;
-#endif
 
     SyncAllImpl<false>();
 
     mega_solve_tril(reinterpret_cast<__gm__ DTYPE_Q *>(A_inv_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(A_ptr),
                     reinterpret_cast<__gm__ DTYPE_Q *>(minus_id_ptr), C, num_matrices, H,
-                    reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), 1);
+                    reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), 1,
+                    reinterpret_cast<__gm__ DTYPE_Q *>(kkt_ws_ptr));
 
-#ifdef MEGA_STOP_AFTER_SOLVE
-    pipe_barrier(PIPE_ALL);
-    return;
-#endif
 
     SyncAllImpl<false>();
 
-#ifdef MEGA_STOP_AFTER_CAST
-    pipe_barrier(PIPE_ALL);
-    return;
-#endif
 
     SyncAllImpl<false>();
 
-#ifdef MEGA_STOP_AFTER_SYNC_BEFORE_WY
-    return;
-#endif
 
     mk_wy::GDN_WY_FAST_CALL<D, C>(
         reinterpret_cast<__gm__ DTYPE_Q *>(k_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(v_ptr),
@@ -388,7 +568,7 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
         reinterpret_cast<__gm__ DTYPE_Q *>(u_ptr), reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len,
         total_tokens, static_cast<uint32_t>(H), num_key_heads, ffts_addr);
 
-#if defined(__DAV_C220_VEC__)
+#if defined(__DAV_C220_VEC__) && !defined(GDN_A5_KERNEL)
     if (get_block_idx() < num_matrices) {
         pipe_barrier(PIPE_ALL);
         wait_flag_dev(3);
@@ -396,33 +576,27 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
     }
 #endif
 
-#ifdef MEGA_STOP_AFTER_WY
-    pipe_barrier(PIPE_ALL);
-    return;
-#endif
-
     SyncAllImpl<false>();
+
 
     mk_h::chunk_h_kernel<D, C>(
         reinterpret_cast<__gm__ DTYPE_Q *>(k_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(w_ptr),
-        reinterpret_cast<__gm__ DTYPE_Q *>(u_ptr), reinterpret_cast<__gm__ float *>(g_t_ptr),
+        reinterpret_cast<__gm__ DTYPE_Q *>(u_ptr),
+        reinterpret_cast<__gm__ float *>(g_t_ptr),
         reinterpret_cast<__gm__ DTYPE_Q *>(s_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(v_new_ptr),
         reinterpret_cast<__gm__ DTYPE_Q *>(fs_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(h0_ptr), has_initial_state,
         1,
         reinterpret_cast<__gm__ DTYPE_Q *>(h_ws_ptr), reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size,
         seq_len, total_tokens, static_cast<uint32_t>(H), num_key_heads, ffts_addr);
 
-#ifdef MEGA_STOP_AFTER_H
-    pipe_barrier(PIPE_ALL);
-    return;
-#endif
 
     SyncAllImpl<false>();
 
     mk_o::GDN_CHUNK_O_CALL<D, C>(
         reinterpret_cast<__gm__ DTYPE_Q *>(q_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(k_ptr),
         reinterpret_cast<__gm__ DTYPE_Q *>(v_new_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(s_ptr),
-        reinterpret_cast<__gm__ float *>(g_t_ptr), reinterpret_cast<__gm__ float *>(msk_full_ptr),
+        reinterpret_cast<__gm__ float *>(g_t_ptr),
+        reinterpret_cast<__gm__ float *>(msk_full_ptr),
         reinterpret_cast<__gm__ DTYPE_Q *>(o_ws_qk_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(o_ws_qs_ptr),
         reinterpret_cast<__gm__ DTYPE_Q *>(o_ws_gated_ptr), reinterpret_cast<__gm__ DTYPE_Q *>(o_ptr),
         reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len, total_tokens,
@@ -438,6 +612,17 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
 
 #undef GDN_WY_FAST_CALL
 #undef GDN_CHUNK_O_CALL
+
+#if defined(GDN_A5_KERNEL)
+#undef ffts_cross_core_sync
+#undef wait_flag_dev
+#undef pipe_barrier
+#endif
+#if defined(GDN_A5_CUBE_KERNEL)
+#undef __DAV_C220_CUBE__
+#elif defined(GDN_A5_VECTOR_KERNEL)
+#undef __DAV_C220_VEC__
+#endif
 
 extern "C" __global__ __aicore__ void
 GDN_KERNEL_NAME(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr, GM_ADDR g_in_ptr, GM_ADDR beta_ptr, GM_ADDR msk_lower_ptr,
@@ -458,13 +643,12 @@ GDN_KERNEL_NAME(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr, GM_ADDR g_in_ptr, G
     GM_ADDR o_ws_qk_ptr = h_ws_ptr + static_cast<uint64_t>(tiling_data.block_dim) * 4 * tile_bytes;
     GM_ADDR o_ws_qs_ptr = o_ws_qk_ptr + static_cast<uint64_t>(tiling_data.block_dim) * tile_bytes;
     GM_ADDR o_ws_gated_ptr = o_ws_qs_ptr + static_cast<uint64_t>(tiling_data.block_dim) * tile_bytes;
-
     if (tiling_data.num_heads == 0 || tiling_data.num_heads > GDN_MAX_HEADS) {
         return;
     }
 
     mega_kernel_impl(q_ptr, k_ptr, v_ptr, g_in_ptr, beta_ptr, msk_lower_ptr, msk_full_ptr, minus_id_ptr,
-                     cu_seqlens_ptr, o_ptr, g_sum_ptr, g_t_ptr, beta_t_ptr, A_ptr, A_inv_f32_ptr, A_inv_ptr, w_ptr,
+                     cu_seqlens_ptr, o_ptr, g_sum_ptr, g_t_ptr, beta_t_ptr, A_ptr, A_inv_ptr, w_ptr,
                      u_ptr, s_ptr, v_new_ptr, fs_ptr, initial_state_ptr, tiling_data.has_initial_state, kkt_ws_ptr,
                      wy_ws_a1_ptr, wy_ws_a2_ptr, h_ws_ptr, o_ws_qk_ptr, o_ws_qs_ptr, o_ws_gated_ptr,
                      static_cast<int32_t>(tiling_data.num_heads), tiling_data.num_key_heads, tiling_data.batch_size,
@@ -475,3 +659,8 @@ GDN_KERNEL_NAME(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr, GM_ADDR g_in_ptr, G
 // after including this source. Keep this include after PTO code so CANN's DYNAMIC
 // enum does not collide with pto::DYNAMIC in the kernel templates above.
 #include "lib/matmul_intf.h"
+
+#undef GDN_A5_CUBE_KERNEL
+#undef GDN_A5_VECTOR_KERNEL
+#undef GDN_A5_TILED_VECTOR_KERNEL
+#undef GDN_A5_KERNEL

@@ -91,6 +91,7 @@ namespace optiling {
 static ge::graphStatus TilingFunc(gert::TilingContext *context)
 {
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    const bool isAscend950 = platformInfo.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950;
     uint32_t blockDim = platformInfo.GetCoreNumAic();
     if (blockDim == 0) {
         blockDim = platformInfo.GetCoreNumAiv();
@@ -142,6 +143,19 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context)
     }
     if (numMatrices == 0) {
         numMatrices = CeilDiv(totalTokens, kChunkSize) * numHeads;
+    }
+    if (isAscend950) {
+        // Keep every chunk/sequence of a head on the same MIX block.  The A5
+        // Cube/UB tiled stages use local intra-block events and per-block
+        // workspaces, so stable head ownership avoids a software all-core
+        // barrier between fused stages.  Since work indices advance in
+        // multiples of numHeads, any divisor of numHeads preserves ownership.
+        const uint32_t maxBlocks =
+            std::min<uint32_t>(blockDim, std::max<uint32_t>(numMatrices, 1));
+        blockDim = std::min<uint32_t>(std::max<uint32_t>(numHeads, 1), maxBlocks);
+        while (blockDim > 1 && (numHeads % blockDim) != 0) {
+            --blockDim;
+        }
     }
 
     MegaChunkGdnTilingData tiling;

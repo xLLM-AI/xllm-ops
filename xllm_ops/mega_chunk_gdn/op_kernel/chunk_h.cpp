@@ -142,17 +142,11 @@ using TileMatL1ZN = pto::Tile<pto::TileType::Mat, T, Rows, Cols,
 
 template <typename T, int32_t Rows, int32_t Cols, int32_t RowValid = Rows,
           int32_t ColValid = Cols>
-using TileMatL0A = pto::Tile<pto::TileType::Left, T, Rows, Cols,
-                             pto::BLayout::RowMajor, RowValid, ColValid,
-                             pto::SLayout::RowMajor, 512,
-                             pto::PadValue::Zero>;
+using TileMatL0A = pto::TileLeft<T, Rows, Cols, RowValid, ColValid>;
 
 template <typename T, int32_t Rows, int32_t Cols, int32_t RowValid = Rows,
           int32_t ColValid = Cols>
-using TileMatL0B = pto::Tile<pto::TileType::Right, T, Rows, Cols,
-                             pto::BLayout::RowMajor, RowValid, ColValid,
-                             pto::SLayout::ColMajor, 512,
-                             pto::PadValue::Zero>;
+using TileMatL0B = pto::TileRight<T, Rows, Cols, RowValid, ColValid>;
 
 template <typename T, int32_t Rows, int32_t Cols, int32_t RowValid = Rows,
           int32_t ColValid = Cols,
@@ -344,6 +338,13 @@ AICORE void chunk_h_kernel(
   const int32_t BSND_QKV_STRIDE = H * D;
   const int32_t BSND_K_STRIDE = Hg * D;
   constexpr int32_t DD = D * D;
+#if defined(GDN_A5_CUBE_KERNEL)
+  // C310 exposes 128 KiB of L0C; 0x20000 is the first byte past it.  The two
+  // GEMMs are separated by a Cube->Vector->Cube handshake, so reuse slot 0.
+  constexpr int32_t SecondL0CAddr = 0;
+#else
+  constexpr int32_t SecondL0CAddr = C * D * sizeof(float);
+#endif
 
   constexpr int32_t WS_WS = 0;
   constexpr int32_t WS_K  = DD;
@@ -362,7 +363,7 @@ AICORE void chunk_h_kernel(
   TileMatL1<DTYPE_Q, C, D, C, D> v_l1;
   TASSIGN(v_l1, (DD + C * D + D * C) * sizeof(DTYPE_Q));
   TileAcc<float, D, D, D, D> kv_l0;
-  TASSIGN(kv_l0, C * D * sizeof(float));
+  TASSIGN(kv_l0, SecondL0CAddr);
 
   constexpr int32_t G_BLOCK_UB = 0;
   // Leading UB scratch: legacy kernels used ``C * H * sizeof(float)``, which overflows UB when
@@ -444,12 +445,26 @@ AICORE void chunk_h_kernel(
     //   WS_KV : k_tilde^T @ v_i_new
 
     for (int32_t ci = 0; ci < num_chunks; ++ci) {
+#if defined(GDN_A5_CUBE_KERNEL)
+      GdnA5WaitMte2(3);
+#else
       wait_flag_dev(3);
+#endif
 
       int64_t chunk_start = bos + static_cast<int64_t>(ci) * C;
       int64_t valid = slen - static_cast<int64_t>(ci) * C;
       if (valid > C) valid = C;
 
+#if defined(GDN_A5_KERNEL)
+      // Consumer-side invalidate for the Vec-published state: A5 Cube MTE2
+      // loads can return clean stale lines left by a previous launch.
+      for (int32_t r = 0; r < D * D; r += 16) {
+        dcci(static_cast<__gm__ void *>(workspace_handle + ws_base + WS_S + r),
+             SINGLE_CACHE_LINE);
+      }
+#endif
+      set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
       {
         GmShape2D s_shape(D, D);
         GmStride2D s_stride(D);
@@ -462,6 +477,19 @@ AICORE void chunk_h_kernel(
       }
 
       int64_t w_offset = ((chunk_start) * H + head) * D;
+#if defined(GDN_A5_KERNEL)
+      // W is published by the WY stage Vector cores; same stale-line hazard.
+      // Rows are BSND-strided, so invalidate row by row.
+      for (int32_t row = 0; row < valid; ++row) {
+        for (int32_t r = 0; r < D; r += 16) {
+          dcci(static_cast<__gm__ void *>(
+                   W_handle + w_offset + row * BSND_QKV_STRIDE + r),
+               SINGLE_CACHE_LINE);
+        }
+      }
+#endif
+      set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
       {
         GmShape2D w_shape(static_cast<int32_t>(valid), D);
         GmStride2D w_stride(BSND_QKV_STRIDE);
@@ -492,8 +520,22 @@ AICORE void chunk_h_kernel(
       }
       ffts_cross_core_sync(PIPE_FIX, 1 | (2 << 4) | (0 << 8));
 
+#if defined(GDN_A5_CUBE_KERNEL)
+      GdnA5WaitMte2(1);
+#else
       wait_flag_dev(1);
+#endif
 
+#if defined(GDN_A5_KERNEL)
+      // Consumer-side invalidate for the Vec-published k_tilde tile before the
+      // KV GEMM; a stale line here corrupts the state update (final_state).
+      for (int32_t r = 0; r < D * C; r += 16) {
+        dcci(static_cast<__gm__ void *>(workspace_handle + ws_base + WS_K + r),
+             SINGLE_CACHE_LINE);
+      }
+#endif
+      set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
       {
         GmShape2D k_shape(D, C);
         GmStride2D k_stride(C);
@@ -505,6 +547,20 @@ AICORE void chunk_h_kernel(
       }
 
       int64_t v_offset = ((chunk_start) * H + head) * D;
+#if defined(GDN_A5_KERNEL)
+      // V_new is published by this stage's Vector cores earlier in the chunk
+      // loop; the Cube MTE2 load can still hold a stale line from a previous
+      // work item or launch, which corrupts the KV product (final_state).
+      for (int32_t row = 0; row < valid; ++row) {
+        for (int32_t r = 0; r < D; r += 16) {
+          dcci(static_cast<__gm__ void *>(
+                   V_handle + v_offset + row * BSND_QKV_STRIDE + r),
+               SINGLE_CACHE_LINE);
+        }
+      }
+#endif
+      set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
       {
         GmShape2D v_shape(static_cast<int32_t>(valid), D);
         GmStride2D v_stride(BSND_QKV_STRIDE);
@@ -530,7 +586,7 @@ AICORE void chunk_h_kernel(
         GmTensor2D<DTYPE_Q> kv_global(workspace_handle + ws_base + WS_KV,
                                    kv_shape, kv_stride);
         DynAccTile<float, D, D> kv_store(D, D);
-        TASSIGN(kv_store, C * D * static_cast<int32_t>(sizeof(float)));
+        TASSIGN(kv_store, SecondL0CAddr);
         // Save kv = k_tilde^T @ v_i_new so Vec can finish the state update.
         TSTORE(kv_global, kv_store);
       }
@@ -577,6 +633,16 @@ AICORE void chunk_h_kernel(
     wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
     if (has_initial_state != 0) {
       int64_t h0_offset = (seq_idx * H + head) * DD + vid * HalfC * D;
+#if defined(GDN_A5_KERNEL)
+      // H0 GM lines may be stale in this Vector core's cache when the address
+      // was read by a previous work item or launch.
+      for (int32_t r = 0; r < HalfC * D; r += 16) {
+        dcci(static_cast<__gm__ void *>(H0_handle + h0_offset + r),
+             SINGLE_CACHE_LINE);
+      }
+#endif
+      set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
       GmShape2D h0_shape(HalfC, D);
       GmStride2D h0_stride(D);
       GmTensor2D<DTYPE_Q> h0_global(H0_handle + h0_offset, h0_shape, h0_stride);
@@ -631,6 +697,19 @@ AICORE void chunk_h_kernel(
     int64_t k_offset_0 =
         (chunk_start_0 * Hg + head_g) * D + vid * HalfC * BSND_K_STRIDE;
     if (valid_rows_0 > 0) {
+#if defined(GDN_A5_KERNEL)
+      // K only feeds the state update (final_state); a stale line here does
+      // not show up in the main output, so it must be invalidated explicitly.
+      for (int32_t row = 0; row < valid_rows_0; ++row) {
+        for (int32_t r = 0; r < D; r += 16) {
+          dcci(static_cast<__gm__ void *>(
+                   K_handle + k_offset_0 + row * BSND_K_STRIDE + r),
+               SINGLE_CACHE_LINE);
+        }
+      }
+#endif
+      set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
       GmShape2D k_shape(valid_rows_0, D);
       GmStride2D k_stride(BSND_K_STRIDE);
       GmTensor2D<DTYPE_Q> k_global(K_handle + k_offset_0, k_shape, k_stride);
@@ -649,6 +728,18 @@ AICORE void chunk_h_kernel(
     }
 
     {
+#if defined(GDN_A5_KERNEL)
+      // g (log-sigmoid gate) only feeds the state recurrence; same
+      // consumer-side stale-line hazard as K.
+      for (int32_t r = 0; r < valid0 * 4; r += 32) {
+        dcci(static_cast<__gm__ void *>(
+                 reinterpret_cast<__gm__ char *>(
+                     G_handle + head * total_tokens + chunk_start_0) + r),
+             SINGLE_CACHE_LINE);
+      }
+#endif
+      set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
       GmShape2D g_shape(1, static_cast<int32_t>(valid0));
       GmStride2D g_stride(1);
       GmTensor2D<float> g_global(G_handle + head * total_tokens + chunk_start_0,
@@ -734,6 +825,18 @@ AICORE void chunk_h_kernel(
       pipe_barrier(PIPE_V);
 
       wait_flag_dev(0);
+#if defined(GDN_A5_KERNEL)
+      // A5 Vector MTE2 loads can return clean stale lines when the workspace
+      // addresses were read by a previous launch.  Invalidate the Cube
+      // product rows on the consumer immediately before loading them.
+      for (int32_t r = 0; r < HalfC * D; r += 16) {
+        dcci(static_cast<__gm__ void *>(
+                 workspace_handle + ws_base + WS_WS + vid * HalfC * D + r),
+             SINGLE_CACHE_LINE);
+      }
+#endif
+      set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
       {
         GmShape2D ws_shape(HalfC, D);
         GmStride2D ws_stride(D);
@@ -787,7 +890,15 @@ AICORE void chunk_h_kernel(
       wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
       float exp_g_last = g_ub.GetValue(static_cast<int32_t>(valid) - 1);
       // Carry the recurrence across chunks: S_{i+1} = exp(g_last) * S_i + K_i^T V_i.
+#if defined(GDN_A5_KERNEL)
+      for (int32_t row = 0; row < HalfC; ++row) {
+        TileUbDataND<float, 1, D> s_row;
+        TASSIGN(s_row, S_UB + row * D * static_cast<int32_t>(sizeof(float)));
+        TMULS(s_row, s_row, exp_g_last);
+      }
+#else
       TMULS(s_ub, s_ub, exp_g_last);
+#endif
 
       set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
       wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
@@ -803,6 +914,18 @@ AICORE void chunk_h_kernel(
         int64_t nk_off =
             (next_start * Hg + head_g) * D + vid * HalfC * BSND_K_STRIDE;
         if (next_valid_rows > 0) {
+#if defined(GDN_A5_KERNEL)
+          // Same stale-line invalidation for the prefetched K rows.
+          for (int32_t row = 0; row < next_valid_rows; ++row) {
+            for (int32_t r = 0; r < D; r += 16) {
+              dcci(static_cast<__gm__ void *>(
+                       K_handle + nk_off + row * BSND_K_STRIDE + r),
+                   SINGLE_CACHE_LINE);
+            }
+          }
+#endif
+          set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+          wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
           GmShape2D k_shape(next_valid_rows, D);
           GmStride2D k_stride(BSND_K_STRIDE);
           GmTensor2D<DTYPE_Q> k_global(K_handle + nk_off, k_shape, k_stride);
@@ -822,6 +945,17 @@ AICORE void chunk_h_kernel(
         }
 
         {
+#if defined(GDN_A5_KERNEL)
+          // Same stale-line invalidation for the prefetched gate row.
+          for (int32_t r = 0; r < next_valid * 4; r += 32) {
+            dcci(static_cast<__gm__ void *>(
+                     reinterpret_cast<__gm__ char *>(
+                         G_handle + head * total_tokens + next_start) + r),
+                 SINGLE_CACHE_LINE);
+          }
+#endif
+          set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+          wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
           GmShape2D g_shape(1, static_cast<int32_t>(next_valid));
           GmStride2D g_stride(1);
           GmTensor2D<float> g_global(G_handle + head * total_tokens + next_start,
@@ -837,6 +971,18 @@ AICORE void chunk_h_kernel(
       }
 
       wait_flag_dev(2);
+#if defined(GDN_A5_KERNEL)
+      // Same consumer-side invalidation for the k_tilde^T @ v_new product
+      // published by the Cube stage; without it the recurrence can fold in a
+      // stale line from a previous launch and corrupt the final state.
+      for (int32_t r = 0; r < HalfC * D; r += 16) {
+        dcci(static_cast<__gm__ void *>(
+                 workspace_handle + ws_base + WS_KV + vid * HalfC * D + r),
+             SINGLE_CACHE_LINE);
+      }
+#endif
+      set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
       {
         GmShape2D kv_shape(HalfC, D);
         GmStride2D kv_stride(D);
@@ -850,13 +996,40 @@ AICORE void chunk_h_kernel(
 
       set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+#if defined(GDN_A5_KERNEL)
+      // A5 hardware quirk (also noted in the non-tiled A5 correctness path):
+      // vector ops on 64x128 UB tiles can leave stale rows on a physical
+      // Vector subblock.  Do the kv conversion and the state update row by
+      // row so no tile row can go stale.
+      for (int32_t row = 0; row < HalfC; ++row) {
+        TileUbDataND<float, 1, D> kv_row_f;
+        TileUbDataND<DTYPE_Q, 1, D> kv_row_h;
+        TASSIGN(kv_row_f, KV_UB + row * D * static_cast<int32_t>(sizeof(float)));
+        TASSIGN(kv_row_h, S_UB_HALF + row * D * static_cast<int32_t>(sizeof(DTYPE_Q)));
+        TCVT(kv_row_f, kv_row_h, pto::RoundMode::CAST_NONE);
+      }
+#else
       TCVT(kv_ub, s_ub_half, pto::RoundMode::CAST_NONE);
+#endif
       pipe_barrier(PIPE_ALL);
       // Finish S_{i+1} = exp(g_last) * S_i + k_i_tilde^T @ v_i_new.
       // Torch-like:
       //   s_ub = s_ub + kv_ub
+#if defined(GDN_A5_KERNEL)
+      for (int32_t row = 0; row < HalfC; ++row) {
+        TileUbDataND<float, 1, D> s_row;
+        TileUbDataND<float, 1, D> kv_row;
+        TileUbDataND<DTYPE_Q, 1, D> out_row;
+        TASSIGN(s_row, S_UB + row * D * static_cast<int32_t>(sizeof(float)));
+        TASSIGN(kv_row, KV_UB + row * D * static_cast<int32_t>(sizeof(float)));
+        TASSIGN(out_row, S_UB_HALF + row * D * static_cast<int32_t>(sizeof(DTYPE_Q)));
+        TADD(s_row, s_row, kv_row);
+        TCVT(out_row, s_row, pto::RoundMode::CAST_NONE);
+      }
+#else
       TADD(s_ub, s_ub, kv_ub);
       TCVT(s_ub_half, s_ub, pto::RoundMode::CAST_NONE);
+#endif
 
       if (ci + 1 < static_cast<int32_t>(num_chunks)) {
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
@@ -910,6 +1083,30 @@ AICORE void chunk_h_kernel(
       }
       set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
       wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+#if defined(GDN_A5_KERNEL)
+      // The FS TSTORE reads S_UB_HALF asynchronously on the MTE3 pipe.  The
+      // next work item on this block immediately reuses that UB region (H0
+      // TLOAD, TCVT, TEXPANDS), which can overwrite rows the store has not
+      // read yet and corrupt final_state with the next item's input data.
+      // Order the following V-pipe writes after the store completes.
+      set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+      wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+      // A5 MIX Vector GM writes are cached per Vector core and are not
+      // snooped by the host DMA once the kernel completes.  Every other GM
+      // store in this kernel is followed by an ffts alias that issues
+      // dsb(DSB_ALL); the final-state store ends the work item, so actively
+      // clean its lines to the coherence point and drain, or the reader can
+      // observe stale data when the framework reuses GM addresses from a
+      // previous launch.
+      for (int32_t r = 0; r < HalfC * D; r += 16) {
+        dcci(static_cast<__gm__ void *>(FS_handle + fs_offset +
+                                        vid * HalfC * D + r),
+             SINGLE_CACHE_LINE);
+      }
+      dsb(DSB_ALL);
+#endif
+      set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
     }
   }
 #endif
