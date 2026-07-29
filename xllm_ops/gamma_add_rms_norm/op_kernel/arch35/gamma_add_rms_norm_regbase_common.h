@@ -49,6 +49,16 @@ using RmsNorm::is_same;
 using RmsNorm::ONCE_VECTOR_SIZE;
 
 template <typename T>
+__aicore__ inline void RoundToInputDtype(RegTensor<float>& value, MaskReg& mask)
+{
+    if constexpr (!IsSameType<T, float>::value) {
+        RegTensor<T> rounded;
+        Cast<T, float, castTraitB322B16>(rounded, value, mask);
+        Cast<float, T, castTraitB162B32>(value, rounded, mask);
+    }
+}
+
+template <typename T>
 __aicore__ inline void LoadForHandleRemainV1(
     __local_mem__ T* mainAddr, __local_mem__ T* tailAddr, uint16_t offset1, uint16_t offset2, RegTensor<float>& mainA,
     RegTensor<float>& mainB, RegTensor<float>& tailA, RegTensor<float>& tailB, MaskReg& pregLoop,
@@ -82,6 +92,10 @@ __aicore__ inline void LoadForHandleRemainV1(
         Add(mainB, mainB, mainB2, pregLoop);
         Add(tailA, tailA, tailA2, pregLoop);
         Add(tailB, tailB, tailB2, pregLoop);
+        RoundToInputDtype<T>(mainA, pregLoop);
+        RoundToInputDtype<T>(mainB, pregLoop);
+        RoundToInputDtype<T>(tailA, pregLoop);
+        RoundToInputDtype<T>(tailB, pregLoop);
         DataCopy(xFp32MainAddr + offset1, mainA, pregLoop);
         DataCopy(xFp32MainAddr + offset2, mainB, pregLoop);
         DataCopy(xFp32TailAddr + offset1, tailA, pregLoop);
@@ -118,6 +132,10 @@ __aicore__ inline void LoadForHandleRemainV1(
         Add(mainB, mainB, mainB2, pregLoop);
         Add(tailA, tailA, tailA2, pregLoop);
         Add(tailB, tailB, tailB2, pregLoop);
+        RoundToInputDtype<T>(mainA, pregLoop);
+        RoundToInputDtype<T>(mainB, pregLoop);
+        RoundToInputDtype<T>(tailA, pregLoop);
+        RoundToInputDtype<T>(tailB, pregLoop);
         DataCopy(xFp32MainAddr + offset1, mainA, pregLoop);
         DataCopy(xFp32MainAddr + offset2, mainB, pregLoop);
         DataCopy(xFp32TailAddr + offset1, tailA, pregLoop);
@@ -175,6 +193,8 @@ __aicore__ inline void LoadForHandleMasterV1(
         // add x1 + x2
         Add(mainA, mainA, mainA2, pregLoop);
         Add(mainB, mainB, mainB2, pregLoop);
+        RoundToInputDtype<T>(mainA, pregLoop);
+        RoundToInputDtype<T>(mainB, pregLoop);
         DataCopy(xFp32MasterAddr + offset1, mainA, pregLoop);
         DataCopy(xFp32MasterAddr + offset2, mainB, pregLoop);
         Mul(mainA, mainA, mainA, pregLoop);
@@ -195,6 +215,8 @@ __aicore__ inline void LoadForHandleMasterV1(
         // add x1 + x2
         Add(mainA, mainA, mainA2, pregLoop);
         Add(mainB, mainB, mainB2, pregLoop);
+        RoundToInputDtype<T>(mainA, pregLoop);
+        RoundToInputDtype<T>(mainB, pregLoop);
         DataCopy(xFp32MasterAddr + offset1, mainA, pregLoop);
         DataCopy(xFp32MasterAddr + offset2, mainB, pregLoop);
         Mul(mainA, mainA, mainA, pregLoop);
@@ -248,6 +270,10 @@ __aicore__ inline void LoadForHandleRemainV2(
         Add(mainB, mainB, mainB2, pregMask);
         Add(tailA, tailA, tailA2, pregMask);
         Add(tailB, tailB, tailB2, pregMask);
+        RoundToInputDtype<T>(mainA, pregMask);
+        RoundToInputDtype<T>(mainB, pregMask);
+        RoundToInputDtype<T>(tailA, pregMask);
+        RoundToInputDtype<T>(tailB, pregMask);
         Mul(mainA, mainA, mainA, pregMask);
         Mul(mainB, mainB, mainB, pregMask);
         Mul(tailA, tailA, tailA, pregMask);
@@ -278,6 +304,10 @@ __aicore__ inline void LoadForHandleRemainV2(
         Add(mainB, mainB, mainB2, pregMask);
         Add(tailA, tailA, tailA2, pregMask);
         Add(tailB, tailB, tailB2, pregMask);
+        RoundToInputDtype<T>(mainA, pregMask);
+        RoundToInputDtype<T>(mainB, pregMask);
+        RoundToInputDtype<T>(tailA, pregMask);
+        RoundToInputDtype<T>(tailB, pregMask);
         Mul(mainA, mainA, mainA, pregMask);
         Mul(mainB, mainB, mainB, pregMask);
         Mul(tailA, tailA, tailA, pregMask);
@@ -346,6 +376,8 @@ __aicore__ inline void LoadForHandleMasterV2(
         // add x1 + x2
         Add(mainA, mainA, mainA2, pregMask);
         Add(mainB, mainB, mainB2, pregMask);
+        RoundToInputDtype<T>(mainA, pregMask);
+        RoundToInputDtype<T>(mainB, pregMask);
         Mul(mainA, mainA, mainA, pregMask);
         Mul(mainB, mainB, mainB, pregMask);
     } else {
@@ -358,6 +390,8 @@ __aicore__ inline void LoadForHandleMasterV2(
         // add x1 + x2
         Add(mainA, mainA, mainA2, pregMask);
         Add(mainB, mainB, mainB2, pregMask);
+        RoundToInputDtype<T>(mainA, pregMask);
+        RoundToInputDtype<T>(mainB, pregMask);
         Mul(mainA, mainA, mainA, pregMask);
         Mul(mainB, mainB, mainB, pregMask);
     }
@@ -724,6 +758,8 @@ __aicore__ inline void ComputeLatterY(
                 Cast<float, T, castTraitB162B32>(gammaFp32Reg2, gammaReg2, maskReg);
                 Mul(dst1Reg, xB32Reg1, rstdReg, maskReg);
                 Mul(dst2Reg, xB32Reg2, rstdReg, maskReg);
+                RoundToInputDtype<T>(dst1Reg, maskReg);
+                RoundToInputDtype<T>(dst2Reg, maskReg);
                 Mul(yReg1, dst1Reg, gammaFp32Reg1, maskReg);
                 Mul(yReg2, dst2Reg, gammaFp32Reg2, maskReg);
                 Cast<T, float, castTraitB322B16>(yB16Reg1, yReg1, maskReg);

@@ -341,6 +341,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "moe_grouped_matmul_swiglu_quant"
         "pp_matmul_opt"
         "replace_token"
+        "reshape_and_cache_a5"
         "select_unshared_kv"
         # "x_attention_tl"  # A5 kernel not adapted
         "x_flash_attention_infer"

@@ -19,6 +19,11 @@ def x_attention_npu(query, key_cache, value_cache, unshared_key, unshared_value,
 def cache_unshared_kv_npu(x_key_block, x_value_block, curr_key, curr_value, block_table, decode_step):
     return custom_ops_lib.cache_unshared_kv(x_key_block, x_value_block, curr_key, curr_value, block_table, decode_step)
 
+
+def reshape_and_cache_a5_npu(key, value, key_cache, value_cache, slot_mapping):
+    return custom_ops_lib.reshape_and_cache_a5(
+        key, value, key_cache, value_cache, slot_mapping)
+
 # select unshared kv
 def select_unshared_kv_npu(beam_index, x_key_block, x_value_block, block_table, group_token_num, decode_step, beam_size, layer_num):
     return custom_ops_lib.select_unshared_kv(beam_index, x_key_block, x_value_block, block_table, group_token_num, decode_step, beam_size, layer_num)

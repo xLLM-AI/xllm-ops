@@ -174,6 +174,7 @@ private:
                 LoadRegForDtype<T>(x1InUb, x1, pregLoop, offset);
                 LoadRegForDtype<T>(x2InUb, x2, pregLoop, offset);
                 Add(xSum, x1, x2, pregLoop);
+                RoundToInputDtype<T>(xSum, pregLoop);
                 StoreRegForDtype<T>(xOutInUb, xSum, pregLoop, offset);
                 DataCopy<float, StoreDist::DIST_NORM_B32>(xFp32Tmp + offset, xSum, pregLoop);
             }
@@ -232,6 +233,8 @@ private:
                     LoadRegForDtype<float>(xFp32Tmp, x2Reg, regCurLoop, offset2);
                     Mul(mul1Reg, x1Reg, rstd1Reg, regCurLoop);
                     Mul(mul1UnrollReg, x2Reg, rstd2Reg, regCurLoop);
+                    RoundToInputDtype<T>(mul1Reg, regCurLoop);
+                    RoundToInputDtype<T>(mul1UnrollReg, regCurLoop);
                     LoadRegForDtype<T>(gammaInUb, gammaReg, regCurLoop, r * VL_FP32);
                     Mul(mul2Reg, mul1Reg, gammaReg, regCurLoop);
                     Mul(mul2UnrollReg, mul1UnrollReg, gammaReg, regCurLoop);
@@ -247,6 +250,7 @@ private:
                     MaskReg regCurLoop = UpdateMask<float>(sregCount);
                     LoadRegForDtype<float>(xFp32Tmp, x1Reg, regCurLoop, offset);
                     Mul(mul1Reg, x1Reg, rstd1Reg, regCurLoop);
+                    RoundToInputDtype<T>(mul1Reg, regCurLoop);
                     LoadRegForDtype<T>(gammaInUb, gammaReg, regCurLoop, r * VL_FP32);
                     Mul(mul2Reg, mul1Reg, gammaReg, regCurLoop);
                     StoreRegForDtype<T>(yInUb, mul2Reg, regCurLoop, offset);

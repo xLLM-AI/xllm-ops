@@ -241,6 +241,10 @@ private:
                 PipeBarrier<PIPE_V>();
                 AscendC::Add(xFp32, xFp32, xFp32Other, calColNum);
                 PipeBarrier<PIPE_V>();
+                Cast(xLocal1, xFp32, AscendC::RoundMode::CAST_RINT, calColNum);
+                PipeBarrier<PIPE_V>();
+                Cast(xFp32, xLocal1, AscendC::RoundMode::CAST_NONE, calColNum);
+                PipeBarrier<PIPE_V>();
             } else {
                 AscendC::Add(xLocal1, xLocal1, xLocal2, calColNum);
                 PipeBarrier<PIPE_V>();

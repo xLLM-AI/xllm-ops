@@ -750,6 +750,23 @@ at::Tensor& scatter_nd_update_v2_impl_npu(
   return var;
 }
 
+std::tuple<at::Tensor&, at::Tensor&> reshape_and_cache_a5_impl_npu(
+    const at::Tensor& key,
+    const at::Tensor& value,
+    at::Tensor& key_cache,
+    at::Tensor& value_cache,
+    const at::Tensor& slot_mapping) {
+  EXEC_NPU_CMD(aclnnReshapeAndCacheA5,
+               key,
+               value,
+               key_cache,
+               value_cache,
+               slot_mapping,
+               key_cache,
+               value_cache);
+  return {key_cache, value_cache};
+}
+
 at::Tensor hc_post_impl_npu(const at::Tensor& x,
                             const at::Tensor& residual,
                             const at::Tensor& post,
@@ -1921,6 +1938,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "mtp_prepare_next_draft");
   m.def("convert_kv_cache_format", &convert_kv_cache_format_impl_npu, "convert_kv_cache_format");
   m.def("scatter_nd_update_v2", &scatter_nd_update_v2_impl_npu, "scatter_nd_update_v2");
+  m.def("reshape_and_cache_a5",
+        &reshape_and_cache_a5_impl_npu,
+        "reshape_and_cache_a5");
   m.def("inplace_partial_rotary_mul", &inplace_partial_rotary_mul_impl_npu, "inplace_partial_rotary_mul");
   m.def("hc_post", &hc_post_impl_npu, "hc_post");
   m.def("add_rms_norm_bias", &add_rms_norm_bias_impl_npu, "add_rms_norm_bias");
