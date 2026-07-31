@@ -18,16 +18,9 @@ limitations under the License.
 #include "tiling/platform/platform_ascendc.h"
 
 namespace optiling {
-    #ifdef OP_TILING_LIB
     static ge::graphStatus TilingFunc(gert::TilingContext *context) {
         return AtbOps::MLATiling(context);
-        // return ge::GRAPH_SUCCESS;
     }
-    #else
-    static ge::graphStatus TilingFunc(gert::TilingContext *context) {
-        return ge::GRAPH_SUCCESS;
-    }
-    #endif
     IMPL_OP_OPTILING(MultiLatentAttention)
     .Tiling(TilingFunc);
 }

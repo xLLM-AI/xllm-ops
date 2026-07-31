@@ -298,6 +298,8 @@ public:
         __gm__ uint8_t *__restrict__ s_rope_out_gm,
         __gm__ uint8_t *__restrict__ p_out_gm,
         __gm__ uint8_t *__restrict__ o_temp_gm,
+        __gm__ uint8_t *__restrict__ context_lens_in_gm,
+        __gm__ uint8_t *__restrict__ q_seq_lens_in_gm,
         __gm__ uint8_t *__restrict__ tiling_para_gm)
     {
         SetPadding<uint64_t>(0);
@@ -314,6 +316,8 @@ public:
 
         p_gm = reinterpret_cast<__gm__ IN_DTYPE *>(p_out_gm);
         o_tmp_gm = reinterpret_cast<__gm__ mm2CopyType *>(o_temp_gm);
+        context_lens_gm = reinterpret_cast<__gm__ int32_t *>(context_lens_in_gm);
+        q_seq_lens_gm = reinterpret_cast<__gm__ int32_t *>(q_seq_lens_in_gm);
         tiling_gm = reinterpret_cast<__gm__ uint8_t *>(tiling_para_gm);
 
         q_gm_tensor.SetGlobalBuffer(reinterpret_cast<__gm__ IN_DTYPE *>(q_in_gm));
@@ -365,6 +369,22 @@ public:
         embed_split_loop_qk = (embedding_size + embed_split_size_qk - 1) / embed_split_size_qk;
     }
 
+    __aicore__ __attribute__((always_inline)) inline uint32_t GetRuntimeQSeqLen(uint32_t batch, uint32_t offset_tiling)
+    {
+        if (q_seq_lens_gm != nullptr) {
+            return static_cast<uint32_t>(q_seq_lens_gm[batch]);
+        }
+        return (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
+    }
+
+    __aicore__ __attribute__((always_inline)) inline uint32_t GetRuntimeKvSeqLen(uint32_t batch, uint32_t offset_tiling)
+    {
+        if (context_lens_gm != nullptr) {
+            return static_cast<uint32_t>(context_lens_gm[batch]);
+        }
+        return (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 1 + offset_tiling));
+    }
+
 
     __aicore__ __attribute__((always_inline)) inline void Run()
     {
@@ -407,8 +427,8 @@ public:
             uint32_t offset_tiling = tiling_head_size + tiling_para_size * cur_batch;
             uint32_t start_core_idx = (cur_batch * q_block_num_per_batch) % block_num;
 
-            uint32_t q_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
-            uint32_t kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 1 + offset_tiling));
+            uint32_t q_seqlen = GetRuntimeQSeqLen(cur_batch, offset_tiling);
+            uint32_t kv_seqlen = GetRuntimeKvSeqLen(cur_batch, offset_tiling);
             if (kv_seqlen == 0) {
                 continue;
             }
@@ -1621,6 +1641,8 @@ private:
     __gm__ IN_DTYPE *__restrict__ p_gm{nullptr};
     __gm__ mm2CopyType *__restrict__ o_tmp_gm{nullptr};
     __gm__ int32_t *__restrict__ block_tables_gm{nullptr};
+    __gm__ int32_t *__restrict__ context_lens_gm{nullptr};
+    __gm__ int32_t *__restrict__ q_seq_lens_gm{nullptr};
     __gm__ uint8_t *__restrict__ tiling_gm{nullptr};
 
     AscendC::GlobalTensor<OUT_DTYPE> o_gm_tensor;
@@ -1730,6 +1752,8 @@ public:
         __gm__ uint8_t *__restrict__ o_temp_gm,
         __gm__ uint8_t *__restrict__ globalo_gm,
         __gm__ uint8_t *__restrict__ tmp_gm,
+        __gm__ uint8_t *__restrict__ context_lens_in_gm,
+        __gm__ uint8_t *__restrict__ q_seq_lens_in_gm,
         __gm__ uint8_t *__restrict__ tiling_para_gm,
         __gm__ uint8_t *__restrict__ mask_input_gm)
     {
@@ -1743,6 +1767,8 @@ public:
         p_gm = reinterpret_cast<__gm__ IN_DTYPE *>(p_out_gm);
         o_tmp_gm = reinterpret_cast<__gm__ mm2CopyType *>(o_temp_gm);
         go_gm = reinterpret_cast<__gm__ float *>(globalo_gm);
+        context_lens_gm = reinterpret_cast<__gm__ int32_t *>(context_lens_in_gm);
+        q_seq_lens_gm = reinterpret_cast<__gm__ int32_t *>(q_seq_lens_in_gm);
         tiling_gm = reinterpret_cast<__gm__ uint8_t *>(tiling_para_gm);
         gm_block_tables_ = reinterpret_cast<__gm__ int32_t*>(gm_block_table);
         o_gm_tensor.SetGlobalBuffer(reinterpret_cast<__gm__ OUT_DTYPE *>(o_gm));
@@ -1783,6 +1809,22 @@ public:
         round_v = RoundUp<BLOCK_SIZE>(__v);
     }
 
+    __aicore__ __attribute__((always_inline)) inline uint32_t GetRuntimeQSeqLen(uint32_t batch, uint32_t offset_tiling)
+    {
+        if (q_seq_lens_gm != nullptr) {
+            return static_cast<uint32_t>(q_seq_lens_gm[batch]);
+        }
+        return (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
+    }
+
+    __aicore__ __attribute__((always_inline)) inline uint32_t GetRuntimeKvSeqLen(uint32_t batch, uint32_t offset_tiling)
+    {
+        if (context_lens_gm != nullptr) {
+            return static_cast<uint32_t>(context_lens_gm[batch]);
+        }
+        return (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 1 + offset_tiling));
+    }
+
     __aicore__ __attribute__((always_inline)) inline void SetArgs2(
         __gm__ uint8_t *__restrict__ lse_out_gm)
     {
@@ -1815,8 +1857,8 @@ public:
             uint32_t offset_tiling = tiling_head_size + tiling_para_size * cur_batch;
             uint32_t start_core_idx = (cur_batch * q_block_num_per_batch) % block_num;
 
-            uint32_t q_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + offset_tiling));
-            uint32_t kv_seqlen = (uint32_t)(*((__gm__ uint32_t *)tiling_gm + 1 + offset_tiling));
+            uint32_t q_seqlen = GetRuntimeQSeqLen(cur_batch, offset_tiling);
+            uint32_t kv_seqlen = GetRuntimeKvSeqLen(cur_batch, offset_tiling);
             if (kv_seqlen == 0) {
                 continue;
             }
@@ -4374,6 +4416,8 @@ private:
     __gm__ mm2CopyType *__restrict__ o_tmp_gm{nullptr};
     __gm__ float *__restrict__ go_gm{nullptr};
     __gm__ int32_t* __restrict__ gm_block_tables_{nullptr};
+    __gm__ int32_t *__restrict__ context_lens_gm{nullptr};
+    __gm__ int32_t *__restrict__ q_seq_lens_gm{nullptr};
     __gm__ OUT_DTYPE *__restrict__ lse_gm{nullptr};
     __gm__ OUT_DTYPE *__restrict__ o_gm{nullptr};
     __gm__ OUT_DTYPE *__restrict__ mask_gm{nullptr};
