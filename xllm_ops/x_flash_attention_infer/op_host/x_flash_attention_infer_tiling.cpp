@@ -8,8 +8,13 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+// Per-build arch selection is provided via x_flash_attention_infer_tiling.h,
+// which includes the CMake-generated xfa_arch_config.h before any struct def.
 #include <register/op_impl_registry.h>
 #include "x_flash_attention_infer_tiling.h"
+#if defined(CATLASS_ARCH) && (CATLASS_ARCH == 3510)
+#include "arch35/a5_x_flash_attention_infer_tiling.h"
+#endif
 #define ASCENDC_EXTERN_C
 
 namespace optiling {
@@ -184,6 +189,9 @@ ge::graphStatus XFAInferTiling::RunTiling()
   FillSplitCoreTilingDataForJD();
   SetWorkspaces();
 
+#if defined(CATLASS_ARCH) && (CATLASS_ARCH == 3510)
+  return RunTilingA5();
+#else
   // Save tilingData
   tiling_data_.SaveToBuffer(tiling_context_->GetRawTilingData()->GetData(),
                             tiling_context_->GetRawTilingData()->GetCapacity());
@@ -191,7 +199,63 @@ ge::graphStatus XFAInferTiling::RunTiling()
   tiling_context_->SetBlockDim(cubeCoreNum);
   tiling_context_->SetTilingKey(GetTilingKey());
   return ge::GRAPH_SUCCESS;
+#endif
 }
+
+#if defined(CATLASS_ARCH) && (CATLASS_ARCH == 3510)
+ge::graphStatus XFAInferTiling::RunTilingA5()
+{
+  // 复用已解析到 tiling_data_ 的基础字段构造 FAInfo
+  int64_t batch = static_cast<int64_t>(tiling_data_.get_batch());
+  int64_t qHeadNum = static_cast<int64_t>(tiling_data_.get_numHeads());
+  int64_t kvHeadNum = static_cast<int64_t>(tiling_data_.get_kvHeads());
+  int64_t embed = static_cast<int64_t>(tiling_data_.get_embeddingSize());
+  int64_t numTokens = static_cast<int64_t>(tiling_data_.get_numTokens());
+  uint32_t blockSize = tiling_data_.get_blockSize();
+  uint32_t numBlocks = tiling_data_.get_numBlocks();
+  uint32_t maxBlockNumPerBatch = tiling_data_.get_maxNumBlocksPerBatch();
+
+  // qSeqlen: 当前不支持不等长, 取平均
+  int64_t qSeqlen = (batch > 0) ? (numTokens / batch) : numTokens;
+  // kvSeqlen: host 阶段无实际值, 用 paged cache 最大容量作默认
+  int64_t kvSeqlen = static_cast<int64_t>(maxBlockNumPerBatch) * static_cast<int64_t>(blockSize);
+
+  FAInferTiling::FAInfo faInfo{};
+  faInfo.batchSize = batch;
+  faInfo.numOfHeads= qHeadNum;
+  faInfo.numOfKVHeads = kvHeadNum;
+  faInfo.seqSize = qSeqlen;
+  faInfo.seqInnerSize = kvSeqlen;
+  faInfo.headSize = embed;
+  faInfo.numBlocks = numBlocks;
+  faInfo.blockSize = blockSize;
+  faInfo.maxBlockNumPerBatch = maxBlockNumPerBatch;
+  faInfo.maskType = maskType;
+  faInfo.scaleValue = tiling_data_.get_scaleValue();
+  faInfo.actualSeqLengths = nullptr;
+  faInfo.actualSeqLengthsKV = nullptr;
+
+  FATilingData faTilingData{};
+  int32_t ret2 = FAInferTiling::GetFATilingParam(faInfo, static_cast<uint32_t>(cubeCoreNum), faTilingData);
+  if (ret2 != 0) {
+    return ge::GRAPH_FAILED;
+  }
+  int32_t coreNum = faTilingData.multiCoreParamsRegbase.coreNum;
+  if (coreNum <= 0) {
+    return ge::GRAPH_FAILED;
+  }
+
+  auto rawTiling = tiling_context_->GetRawTilingData();
+  if (rawTiling->GetCapacity() < sizeof(FATilingData)) {
+    return ge::GRAPH_FAILED;
+  }
+  std::memcpy(rawTiling->GetData(), &faTilingData, sizeof(FATilingData));
+  rawTiling->SetDataSize(sizeof(FATilingData));
+  tiling_context_->SetBlockDim(static_cast<uint32_t>(coreNum));
+  tiling_context_->SetTilingKey(GetTilingKey());
+  return ge::GRAPH_SUCCESS;
+}
+#endif
 
 
 ASCENDC_EXTERN_C ge::graphStatus TilingFunc(gert::TilingContext *context)

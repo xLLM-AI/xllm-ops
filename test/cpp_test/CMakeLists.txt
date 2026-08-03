@@ -83,21 +83,38 @@ else()
 endif()
 
 set(INCLUDE_BASE_DIR "${ASCEND_PATH}/include")
-set(OP_API_PATH "/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/xllm/op_api")
+set(OP_API_PATH "${ASCEND_PATH}/opp/vendors/custom_xllm_math/op_api")
+
+# Platform detection: A5(Ascend950) CANN provides the dedicated NZ-weight
+# grouped matmul interface header, while A3(Ascend910_93) does not.
+# Use its presence to pick the correct native reference (golden) interface.
+if(EXISTS "${INCLUDE_BASE_DIR}/aclnnop/aclnn_grouped_matmul_weight_nz.h")
+  add_compile_definitions(USE_GROUPED_MATMUL_WEIGHT_NZ)
+  message(STATUS "Detected aclnnGroupedMatmulWeightNz header: golden path uses WeightNz interface (A5)")
+else()
+  message(STATUS "aclnnGroupedMatmulWeightNz header not found: golden path uses GroupedMatmulV4 interface (A3)")
+endif()
+set(PYTHON_DIR "python$ENV{PYTHON_VERSION}")
+set(PYTHON_LIB_DIR "/usr/local/${PYTHON_DIR}/lib/python3.11/site-packages")
+set(ASCEND_CANN_INCLUDE_NAME $ENV{VCPKG_TARGET_TRIPLET})
+if("$ENV{VCPKG_TARGET_TRIPLET}" MATCHES "x64-linux")
+  set(ASCEND_CANN_INCLUDE_NAME "x86_64-linux")
+endif()
 
 # Common include directories/compile options/link options/libraries
 set(COMMON_INCLUDE_DIRS
-  "${INCLUDE_BASE_DIR}"
-  "${INCLUDE_BASE_DIR}/aclnn"
-  "${INCLUDE_BASE_DIR}/aclnn/op_dev"
-  "${INCLUDE_BASE_DIR}/platform"
-  "${ASCEND_PATH}/x86_64-linux/include/exe_graph/runtime"
-  "/usr/local/lib64/python3.11/site-packages/torch_npu/include"
-  "/usr/local/lib64/python3.11/site-packages/torch/include"
-  "/usr/local/lib64/python3.11/site-packages/torch/include/torch/csrc/api/include"
-  "/usr/local/libtorch_npu/include"
-  "${OP_API_PATH}/include"
-  "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${INCLUDE_BASE_DIR}"
+    "${INCLUDE_BASE_DIR}/aclnn"
+    "${INCLUDE_BASE_DIR}/aclnn/op_dev"
+    "${INCLUDE_BASE_DIR}/platform"
+    "${ASCEND_PATH}/${ASCEND_CANN_INCLUDE_NAME}/include/exe_graph/runtime"
+    "${PYTHON_LIB_DIR}/torch/include/torch/csrc/api/include"
+    "${PYTHON_LIB_DIR}/torch_npu/include"
+    "${PYTHON_LIB_DIR}/torch/include"
+    "${PYTHON_LIB_DIR}/torch/include/torch/csrc/api/include"
+    "/usr/local/libtorch_npu/include"
+    "${OP_API_PATH}/include/aclnnop"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
 
@@ -113,19 +130,20 @@ set(COMMON_LINK_OPTS
 )
 
 set(COMMON_LIBS
-  "${ASCEND_PATH}/lib64/libascendcl.so"
-  "${ASCEND_PATH}/lib64/libnnopbase.so"
-  "${ASCEND_PATH}/lib64/libacl_op_compiler.so"
-  "${ASCEND_PATH}/lib64/libascendalog.so"
-  "${ASCEND_PATH}/lib64/libtiling_api.a"
-  "${ASCEND_PATH}/lib64/libplatform.so"
-  "${OP_API_PATH}/lib/libcust_opapi.so"
-  "${ASCEND_PATH}/lib64/libopapi.so"
-  "/usr/local/lib64/python3.11/site-packages/torch/lib/libc10.so"
-  "/usr/local/lib64/python3.11/site-packages/torch/lib/libtorch.so"
-  "/usr/local/lib64/python3.11/site-packages/torch/lib/libtorch_cpu.so"
-  "/usr/local/libtorch_npu/lib/libtorch_npu.so"
-  stdc++
+    "${ASCEND_PATH}/lib64/libascendcl.so"
+    "${ASCEND_PATH}/lib64/libnnopbase.so"
+    "${ASCEND_PATH}/lib64/libacl_op_compiler.so"
+    "${ASCEND_PATH}/lib64/libascendalog.so"
+    "${ASCEND_PATH}/lib64/libtiling_api.a"
+    "${ASCEND_PATH}/lib64/libplatform.so"
+    "${OP_API_PATH}/lib/libcust_opapi.so"
+    "${ASCEND_PATH}/lib64/libopapi.so"
+    "${PYTHON_LIB_DIR}/torch/lib/libc10.so"
+    "${PYTHON_LIB_DIR}/torch/lib/libtorch.so"
+    "${PYTHON_LIB_DIR}/torch/lib/libtorch_cpu.so"
+    "/usr/local/libtorch_npu/lib/libtorch_npu.so"
+
+    stdc++
 )
 
 # =============================================================================
@@ -154,15 +172,6 @@ if(ENABLE_PCH)
 endif()
 
 # GTest version tests
-add_executable(pp_matmul_test
-  pp_matmul_test.cpp
-)
-target_link_libraries(pp_matmul_test PRIVATE 
-  aclnn_common
-  GTest::gtest 
-  GTest::gtest_main
-)
-
 # Group GEMM GTest version
 add_executable(group_gemm_gtest
   group_gemm_test.cpp
@@ -205,7 +214,6 @@ target_link_libraries(convert_kv_cache_format_test PRIVATE
 
 # Add tests
 # add_test(AllTestsInBeamSearch beam_search_test)
-add_test(AllTestsInPPMatmul pp_matmul_test)
 add_test(AllTestsInGroupGemm group_gemm_gtest)
 add_test(AllTestsInMultiLatentAttention multi_latent_attention_gtest)
 add_test(AllTestsInConvertKvCacheFormat convert_kv_cache_format_test)
@@ -213,7 +221,6 @@ add_test(AllTestsInConvertKvCacheFormat convert_kv_cache_format_test)
 # GoogleTest automatic discovery
 include(GoogleTest)
 # gtest_discover_tests(beam_search_test)
-gtest_discover_tests(pp_matmul_test)
 gtest_discover_tests(group_gemm_gtest)
 gtest_discover_tests(multi_latent_attention_gtest)
 gtest_discover_tests(convert_kv_cache_format_test)

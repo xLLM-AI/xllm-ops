@@ -323,13 +323,13 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "hc_post"
         "rms_norm_dynamic_quant"
         "inplace_partial_rotary_mul"
-        "dispatch_ffn_combine"
+        #"dispatch_ffn_combine"
         "dequant_swiglu_quant"  ## 已在 CANN 中内置，删除后会有精度问题，CANN内置见 aarch64-linux/include/aclnnop/aclnn_dequant_swiglu_quant.h
         "scatter_nd_update_v2"
 
         #  ### JD's in-house operators ####
         "beam_search_group"
-        "x_attention"
+        # "x_attention"  # A5 暂不参与编译, 集中解决 x_flash_attention_infer
         "cache_unshared_kv"
         "causal_conv1d"
         "causal_conv1d_qkv"

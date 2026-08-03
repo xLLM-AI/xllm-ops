@@ -93,11 +93,23 @@ int Init(int32_t deviceId, aclrtStream* stream) {
 std::vector<int64_t> get_weight_storage_shape(const std::vector<int64_t>& shape)
 {
     std::vector<int64_t> storageTensorDims (5, 0);  // ND格式下，storageShape和originalShape一致
+#ifdef USE_GROUPED_MATMUL_WEIGHT_NZ
+        // A5(Ascend950/DAV_3510): INT8 weight 的 FRACTAL_NZ 分形内轴为 16x32
+        // 校验器要求 storage shape = [g, ceil(n/32), ceil(k/16), 16, 32]
+        // 此处 trans_shape = {g, k, n}，故 shape[1]=k, shape[2]=n
+        storageTensorDims[0] = shape[0];
+        storageTensorDims[1] = 1 + ((shape[2] - 1) / 32);  // ceil(n/32)：INT8 NZ 外轴 n
+        storageTensorDims[2] = 1 + ((shape[1] - 1) / 16);  // ceil(k/16)：内轴 k
+        storageTensorDims[3] = 16;  // 3, 16：NZ格式要求
+        storageTensorDims[4] = 32;  // 4, 32：INT8 NZ格式内轴要求
+#else
+        // A2/A3: FP16/INT8 均使用 16x16 分形
         storageTensorDims[0] = shape[0];
         storageTensorDims[1] = 1 + ((shape[1] - 1) / 16);  // 1, 16：1: 维度, 16: padding大小
         storageTensorDims[2] = 1 + ((shape[2] - 1) / 16);  // 2, 16：1: 维度, 16: padding大小
         storageTensorDims[3] = 16;  // 3, 16：NZ格式要求
         storageTensorDims[4] = 16;  // 4, 16：NZ格式要求
+#endif
     return storageTensorDims;
 }
 

@@ -123,18 +123,18 @@ OpParam::MLA GetParamFromTilingContext(gert::TilingContext *context) {
     auto qSeqLen = context->GetAttrs()->GetListInt(5)->GetData();
     size_t arraySize = context->GetAttrs()->GetListInt(5)->GetSize();
     param.qSeqLen.reserve(arraySize);
-    if (arraySize >= 1 && reinterpret_cast<const int32_t *>(qSeqLen)[0] >= 0) {
+    if (arraySize >= 1 && reinterpret_cast<const int64_t *>(qSeqLen)[0] >= 0) {
         for (size_t i = 0; i < arraySize; ++i) {
-            param.qSeqLen.push_back(reinterpret_cast<const int32_t *>(qSeqLen)[i]);
+            param.qSeqLen.push_back(reinterpret_cast<const int64_t *>(qSeqLen)[i]);
         }
     }
 
     auto kvSeqLenAttr = context->GetAttrs()->GetListInt(6)->GetData();
     arraySize = context->GetAttrs()->GetListInt(6)->GetSize();
     param.kvSeqLen.reserve(arraySize);
-    if (arraySize >= 1 && reinterpret_cast<const int32_t *>(kvSeqLenAttr)[0] >= 0) {
+    if (arraySize >= 1 && reinterpret_cast<const int64_t *>(kvSeqLenAttr)[0] >= 0) {
         for (size_t i = 0; i < arraySize; ++i) {
-            param.kvSeqLen.push_back(reinterpret_cast<const int32_t *>(kvSeqLenAttr)[i]);
+            param.kvSeqLen.push_back(reinterpret_cast<const int64_t *>(kvSeqLenAttr)[i]);
         }
     }
     return param;
