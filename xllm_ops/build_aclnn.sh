@@ -28,6 +28,20 @@ find_op_dir() {
     find "${ROOT_DIR}/" -maxdepth 3 -type d -name "${op_name}" -print -quit 2>/dev/null
 }
 
+copy_hccl_headers() {
+    local target_dir=$1
+
+    if [[ ! -d "${target_dir}" ]]; then
+        log "skip missing HCCL header target directory: ${target_dir}"
+        return 0
+    fi
+
+    cp "${HCCL_STRUCT_FILE_PATH}" "${target_dir}/" || return 1
+    if [[ -n "${HCCL_COMM_CTX_FILE_PATH:-}" ]]; then
+        cp "${HCCL_COMM_CTX_FILE_PATH}" "${target_dir}/" || return 1
+    fi
+}
+
 get_cann_toolkit_version() {
     local version_file
     local version_line
@@ -184,8 +198,18 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         echo "cannot find moe_distribute_base.h file in CANN env"
         exit 1
     fi
+
+    HCCL_COMM_CTX_FILE_PATH=""
+    if grep -Fq 'moe_distribute_comm_ctx.h' "$HCCL_STRUCT_FILE_PATH"; then
+        HCCL_COMM_CTX_FILE_PATH="$(dirname "$HCCL_STRUCT_FILE_PATH")/moe_distribute_comm_ctx.h"
+        if [[ ! -f "$HCCL_COMM_CTX_FILE_PATH" ]]; then
+            echo "cannot find moe_distribute_comm_ctx.h required by $HCCL_STRUCT_FILE_PATH"
+            exit 1
+        fi
+    fi
+
     # for dispatch_gmm_combine_decode
-    yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/../utils/inc/kernel"
+    copy_hccl_headers "${ROOT_DIR}/../utils/inc/kernel" || exit 1
     # for dispatch_ffn_combine
     SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
     TARGET_DIR="$SCRIPT_DIR/mc2/dispatch_ffn_combine/op_kernel/utils/"
@@ -194,37 +218,43 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     echo "*************************************"
     echo $HCCL_STRUCT_FILE_PATH
     echo "$TARGET_DIR"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
+    copy_hccl_headers "$TARGET_DIR" || exit 1
 
-    sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
-    sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
-    # fix usages that still reference the original (un-renamed) symbols
-    sed -i 's/using HcclOpParam = HcclOpResParam;/using HcclOpParam = HcclOpResParamCustom;/g' "$TARGET_FILE"
-    sed -i 's/(HcclRankRelationResV2 \*)/(HcclRankRelationResV2Custom *)/g' "$TARGET_FILE"
+    if [[ -f "$TARGET_FILE" ]]; then
+        sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
+        sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
+        # Fix usages that still reference the original (un-renamed) symbols.
+        sed -i 's/using HcclOpParam = HcclOpResParam;/using HcclOpParam = HcclOpResParamCustom;/g' "$TARGET_FILE"
+        sed -i 's/(HcclRankRelationResV2 \*)/(HcclRankRelationResV2Custom *)/g' "$TARGET_FILE"
+    fi
 
     TARGET_DIR="$SCRIPT_DIR/mc2/dispatch_ffn_combine_bf16/op_kernel/utils/"
     TARGET_FILE="$TARGET_DIR/$(basename "$HCCL_STRUCT_FILE_PATH")"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
-    sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
-    sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
-    sed -i 's/using HcclOpParam = HcclOpResParam;/using HcclOpParam = HcclOpResParamCustom;/g' "$TARGET_FILE"
-    sed -i 's/(HcclRankRelationResV2 \*)/(HcclRankRelationResV2Custom *)/g' "$TARGET_FILE"
+    copy_hccl_headers "$TARGET_DIR" || exit 1
+    if [[ -f "$TARGET_FILE" ]]; then
+        sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
+        sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
+        sed -i 's/using HcclOpParam = HcclOpResParam;/using HcclOpParam = HcclOpResParamCustom;/g' "$TARGET_FILE"
+        sed -i 's/(HcclRankRelationResV2 \*)/(HcclRankRelationResV2Custom *)/g' "$TARGET_FILE"
+    fi
 
     TARGET_DIR="$SCRIPT_DIR/mc2/dispatch_ffn_combine_w4_a8/op_kernel/utils/"
     TARGET_FILE="$TARGET_DIR/$(basename "$HCCL_STRUCT_FILE_PATH")"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
-    sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
-    sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
-    sed -i 's/using HcclOpParam = HcclOpResParam;/using HcclOpParam = HcclOpResParamCustom;/g' "$TARGET_FILE"
-    sed -i 's/(HcclRankRelationResV2 \*)/(HcclRankRelationResV2Custom *)/g' "$TARGET_FILE"
+    copy_hccl_headers "$TARGET_DIR" || exit 1
+    if [[ -f "$TARGET_FILE" ]]; then
+        sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
+        sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
+        sed -i 's/using HcclOpParam = HcclOpResParam;/using HcclOpParam = HcclOpResParamCustom;/g' "$TARGET_FILE"
+        sed -i 's/(HcclRankRelationResV2 \*)/(HcclRankRelationResV2Custom *)/g' "$TARGET_FILE"
+    fi
 
     # for dispatch_normal and combine_normal
     TARGET_DIR="$SCRIPT_DIR/mc2/moe_dispatch_normal/op_kernel/utils/"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
+    copy_hccl_headers "$TARGET_DIR" || exit 1
 
     TARGET_DIR="$SCRIPT_DIR/mc2/moe_combine_normal/op_kernel/utils/"
     echo "$TARGET_DIR"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
+    copy_hccl_headers "$TARGET_DIR" || exit 1
     
     CUSTOM_OPS_ARRAY=(
         "sparse_flash_attention"
