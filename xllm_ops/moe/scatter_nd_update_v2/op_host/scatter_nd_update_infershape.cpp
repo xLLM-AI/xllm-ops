@@ -13,34 +13,34 @@
  * \brief
  */
 #include "register/op_impl_registry.h"
-#include "log/log.h"
+#include "log/ops_log.h"
 #include "util/shape_util.h"
 
 using namespace ge;
 namespace ops {
 static graphStatus InferDataType4ScatterNdUpdateV2(gert::InferDataTypeContext* context)
 {
-    OP_LOGD(context->GetNodeName(), "Begin to do ScatterNdUpdateV2InferDtype.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do ScatterNdUpdateV2InferDtype.");
     auto var_dtype = context->GetInputDataType(0);
     context->SetOutputDataType(0, var_dtype);
-    OP_LOGD(context->GetNodeName(), "End to do ScatterNdUpdateV2InferDtype.");
+    OPS_LOG_D(context->GetNodeName(), "End to do ScatterNdUpdateV2InferDtype.");
     return GRAPH_SUCCESS;
 }
 
 static ge::graphStatus InferShape4ScatterNdUpdateV2(gert::InferShapeContext* context)
 {
-    OP_LOGD(context->GetNodeName(), "Begin to do ScatterNdUpdateV2InferShape.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do ScatterNdUpdateV2InferShape.");
     const gert::Shape* var_in_shape = context->GetInputShape(0);
     gert::Shape* var_out_shape = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, var_in_shape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, var_out_shape);
+    OPS_LOG_E_IF_NULL(context, var_in_shape, return ge::GRAPH_FAILED);
+    OPS_LOG_E_IF_NULL(context, var_out_shape, return ge::GRAPH_FAILED);
     if (Ops::Base::IsUnknownRank(*var_in_shape)) {
-        OP_LOGD(context->GetNodeName(), "input shape is UnknownRank, set output shape to (-2, )");
+        OPS_LOG_D(context->GetNodeName(), "input shape is UnknownRank, set output shape to (-2, )");
         Ops::Base::SetUnknownRank(*var_out_shape);
         return ge::GRAPH_SUCCESS;
     }
     *var_out_shape = *var_in_shape;
-    OP_LOGD(context->GetNodeName(), "End to do ScatterNdUpdateV2InferShape.");
+    OPS_LOG_D(context->GetNodeName(), "End to do ScatterNdUpdateV2InferShape.");
     return ge::GRAPH_SUCCESS;
 }
 

@@ -20,7 +20,7 @@ static Status parseParamsFillWindowCache(const Message* op_src, ge::Operator& op
 {
   const ge::onnx::NodeProto *node = reinterpret_cast<const ge::onnx::NodeProto *>(op_src);
   if (node == nullptr) {
-    OP_LOGE(GetOpName(op_dest), "Dynamic fillwindowcache op_src to NodeProto failed.");
+    OPS_LOG_E(GetOpName(op_dest), "Dynamic fillwindowcache op_src to NodeProto failed.");
     return FAILED;
   }
   

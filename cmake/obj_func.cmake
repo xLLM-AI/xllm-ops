@@ -803,7 +803,11 @@ function(add_onnx_plugin_modules)
       CXX_EXTENSIONS OFF
     )
     target_include_directories(${ONNX_PLUGIN_NAME}_obj PRIVATE ${OP_PROTO_INCLUDE} ${Protobuf_INCLUDE} ${Protobuf_PATH} ${CMAKE_BINARY_DIR}/proto ${ONNX_PLUGIN_COMMON_INCLUDE} ${JSON_INCLUDE_DIR} ${ABSL_SOURCE_DIR})
-    target_compile_definitions(${ONNX_PLUGIN_NAME}_obj PRIVATE OPS_UTILS_LOG_SUB_MOD_NAME="ONNX_PLUGIN" LOG_CPP)
+    target_compile_definitions(${ONNX_PLUGIN_NAME}_obj PRIVATE
+      OPS_UTILS_LOG_SUB_MOD_NAME="ONNX_PLUGIN"
+      OPS_UTILS_LOG_PACKAGE_TYPE=$<IF:$<BOOL:${BUILD_OPEN_PROJECT}>,"[Custom]","">
+      LOG_CPP
+    )
 
     if(BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG)
       target_compile_options(

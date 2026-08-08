@@ -16,7 +16,7 @@
 #include <register/op_impl_registry.h>
 
 #include "err/ops_err.h"
-#include "log/log.h"
+#include "log/ops_log.h"
 
 using namespace ge;
 
@@ -33,30 +33,30 @@ constexpr uint32_t DIM_NUM_4 = 4;
 static ge::graphStatus InferShapeQuantLightningIndexer(gert::InferShapeContext *context)
 {
     if (context == nullptr) {
-        OP_LOGE("QuantLightningIndexer", "context is nullptr!");
+        OPS_LOG_E("QuantLightningIndexer", "context is nullptr!");
         return ge::GRAPH_FAILED;
     }
     const gert::Shape *queryShape = context->GetInputShape(QUERY_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
+    OPS_LOG_E_IF_NULL(context, queryShape, return ge::GRAPH_FAILED);
     const gert::Shape *keyShape = context->GetInputShape(KEY_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyShape);
+    OPS_LOG_E_IF_NULL(context, keyShape, return ge::GRAPH_FAILED);
     gert::Shape *sparseIndicesShape = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, sparseIndicesShape);
+    OPS_LOG_E_IF_NULL(context, sparseIndicesShape, return ge::GRAPH_FAILED);
     gert::Shape *sparseValuesShape = context->GetOutputShape(1);
 
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OPS_LOG_E_IF_NULL(context, attrs, return ge::GRAPH_FAILED);
     const char *inputLayoutQueryPtr = attrs->GetAttrPointer<char>(ATTR_QUERY_LAYOUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputLayoutQueryPtr);
+    OPS_LOG_E_IF_NULL(context, inputLayoutQueryPtr, return ge::GRAPH_FAILED);
     const char *inputLayoutKeyPtr = attrs->GetAttrPointer<char>(ATTR_KV_LAYOUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputLayoutKeyPtr);
+    OPS_LOG_E_IF_NULL(context, inputLayoutKeyPtr, return ge::GRAPH_FAILED);
     const int64_t *sparse_count = attrs->GetInt(ATTR_SPARSE_COUNT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, sparse_count);
+    OPS_LOG_E_IF_NULL(context, sparse_count, return ge::GRAPH_FAILED);
 
     std::string inputLayoutQueryPtrStr = std::string(inputLayoutQueryPtr);
     std::string inputLayoutKeyPtrStr = std::string(inputLayoutKeyPtr);
     if (inputLayoutQueryPtrStr != "TND" && inputLayoutQueryPtrStr != "BSND") {
-        OP_LOGE(context, "The input layout query should be TND or BSND, but got %s.", inputLayoutQueryPtrStr.c_str());
+        OPS_LOG_E(context, "The input layout query should be TND or BSND, but got %s.", inputLayoutQueryPtrStr.c_str());
         return GRAPH_FAILED;
     }
 
@@ -82,21 +82,21 @@ static ge::graphStatus InferShapeQuantLightningIndexer(gert::InferShapeContext *
         sparseValuesShape->SetDim(0, 0);
     }
 
-    OP_LOGD(context->GetNodeName(), "QuantLightningIndexer InferShape end.");
+    OPS_LOG_D(context->GetNodeName(), "QuantLightningIndexer InferShape end.");
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus InferDataTypeQuantLightningIndexer(gert::InferDataTypeContext *context)
 {
     if (context == nullptr) {
-        OP_LOGE("QuantLightningIndexer", "InferDataTypeContext context is nullptr!");
+        OPS_LOG_E("QuantLightningIndexer", "InferDataTypeContext context is nullptr!");
         return ge::GRAPH_FAILED;
     }
-    OP_LOGD(context->GetNodeName(), "Enter QuantLightningIndexer InferDataType impl.");
+    OPS_LOG_D(context->GetNodeName(), "Enter QuantLightningIndexer InferDataType impl.");
     // default index data type is int32
     ge::DataType outputType = ge::DT_INT32;
     context->SetOutputDataType(0, outputType);
-    OP_LOGD(context->GetNodeName(), "QuantLightningIndexer InferDataType end.");
+    OPS_LOG_D(context->GetNodeName(), "QuantLightningIndexer InferDataType end.");
     return GRAPH_SUCCESS;
 }
 

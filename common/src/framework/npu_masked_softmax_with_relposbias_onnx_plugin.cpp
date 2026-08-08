@@ -23,7 +23,7 @@ constexpr int OUTPUT_INDEX = 1;
 static Status ParseParamsNpuMaskedSoftmaxWithRelPosBias(const Message* op_src, ge::Operator& op_dest) {
   const NodeProto* node = dynamic_cast<const NodeProto*>(op_src);
   if (node == nullptr) {
-    OP_LOGE("MaskedSoftmaxWithRelPosBias", "Dynamic cast op_src to NodeProto failed.");
+    OPS_LOG_E("MaskedSoftmaxWithRelPosBias", "Dynamic cast op_src to NodeProto failed.");
     return FAILED;
   }
 
@@ -51,7 +51,7 @@ static Status ParseParamsNpuMaskedSoftmaxWithRelPosBias(const Message* op_src, g
 static Status ParseOpToGraphNpuMaskedSoftmaxWithRelPosBias(const ge::Operator& op, ge::Graph& graph) {
   std::string ori_name;
   if (op.GetAttr("name", ori_name) != SUCCESS) {
-    OP_LOGE(GetOpName(op).c_str(), "get name from op failed.");
+    OPS_LOG_E(GetOpName(op).c_str(), "get name from op failed.");
     return FAILED;
   }
 
@@ -61,12 +61,12 @@ static Status ParseOpToGraphNpuMaskedSoftmaxWithRelPosBias(const ge::Operator& o
 
   int inner_precision_mode = 0;
   if (op.GetAttr("inner_precision_mode", inner_precision_mode) != SUCCESS) {
-    OP_LOGE(GetOpName(op).c_str(), "get inner_precision_mode from op failed");
+    OPS_LOG_E(GetOpName(op).c_str(), "get inner_precision_mode from op failed");
     return FAILED;
   }
   float scale_value = 1.0f;
   if (op.GetAttr("scale_value", scale_value) != SUCCESS) {
-    OP_LOGE(GetOpName(op).c_str(), "get scale_value from op failed");
+    OPS_LOG_E(GetOpName(op).c_str(), "get scale_value from op failed");
     return FAILED;
   }
   auto masked_softmax_with_relposbias = ge::op::MaskedSoftmaxWithRelPosBias((ori_name + "_MaskedSoftmaxWithRelPosBias").c_str())

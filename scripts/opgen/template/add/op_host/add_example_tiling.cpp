@@ -13,7 +13,7 @@
  * \brief
  */
 
-#include "log/log.h"
+#include "log/ops_log.h"
 #include "util/math_util.h"
 #include "tiling_base/tiling_util.h"
 #include "tiling_base/tiling_templates_registry.h"
@@ -41,12 +41,12 @@ static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& u
 {
     // 获取ubsize coreNum
     fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfoPtr);
+    OPS_LOG_E_IF_NULL(context, platformInfoPtr, return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     coreNum = ascendcPlatform.GetCoreNumAiv();
-    OP_CHECK_IF(coreNum == 0, OP_LOGE(context, "coreNum is 0"), return ge::GRAPH_FAILED);
+    OPS_CHECK(coreNum == 0, OPS_LOG_E(context, "coreNum is 0"), return ge::GRAPH_FAILED);
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
-    OP_CHECK_IF(ubSize == 0, OP_LOGE(context, "ubSize is 0"), return ge::GRAPH_FAILED);
+    OPS_CHECK(ubSize == 0, OPS_LOG_E(context, "ubSize is 0"), return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -55,21 +55,21 @@ ge::graphStatus GetShapeAttrsInfo(gert::TilingContext* context, int64_t& totalId
 {
     // 获取输入shape信息
     auto inputX = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputX);
+    OPS_LOG_E_IF_NULL(context, inputX, return ge::GRAPH_FAILED);
     // 如果输入shape 是标量 转换为{1}，否则保持原 shape 不变
     auto inputShapeX = EnsureNotScalar(inputX->GetStorageShape());
     auto inputY = context->GetInputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputY);
+    OPS_LOG_E_IF_NULL(context, inputY, return ge::GRAPH_FAILED);
     auto inputShapeY = EnsureNotScalar(inputY->GetStorageShape());
     auto outZ = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outZ);
+    OPS_LOG_E_IF_NULL(context, outZ, return ge::GRAPH_FAILED);
     auto outShapeZ = EnsureNotScalar(outZ->GetStorageShape());
 
     // shape校验
-    OP_CHECK_IF(
+    OPS_CHECK(
         inputShapeX.GetDimNum() != DIMS_LIMIT || inputShapeY.GetDimNum() != DIMS_LIMIT ||
             outShapeZ.GetDimNum() != DIMS_LIMIT,
-        OP_LOGE(
+        OPS_LOG_E(
             context, "AddExample: inputx,inputy,outputz shape dim = %zu, %zu, %zu, should be equal 4",
             inputShapeX.GetDimNum(), inputShapeY.GetDimNum(), outShapeZ.GetDimNum()),
         return ge::GRAPH_FAILED);
@@ -83,10 +83,10 @@ ge::graphStatus GetShapeAttrsInfo(gert::TilingContext* context, int64_t& totalId
     // dtype校验
     const std::set<ge::DataType> supportedDtype = {ge::DT_FLOAT, ge::DT_INT32};
     auto inputDesc = context->GetInputDesc(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputDesc);
+    OPS_LOG_E_IF_NULL(context, inputDesc, return ge::GRAPH_FAILED);
     dataType = inputDesc->GetDataType();
     if (supportedDtype.count(dataType) == 0) {
-        OP_LOGE(context, "invalid dtype");
+        OPS_LOG_E(context, "invalid dtype");
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -95,7 +95,7 @@ ge::graphStatus GetShapeAttrsInfo(gert::TilingContext* context, int64_t& totalId
 ge::graphStatus GetWorkspaceSize(gert::TilingContext* context)
 {
     size_t* currentWorkspace = context->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, currentWorkspace);
+    OPS_LOG_E_IF_NULL(context, currentWorkspace, return ge::GRAPH_FAILED);
     currentWorkspace[0] = WS_SYS_SIZE;
     return ge::GRAPH_SUCCESS;
 }
@@ -106,27 +106,27 @@ static ge::graphStatus AddExampleTilingFunc(gert::TilingContext* context)
     // 1、获取平台运行信息
     uint64_t ubSize;
     int64_t coreNum;
-    OP_CHECK_IF(
-        GetPlatformInfo(context, ubSize, coreNum) != ge::GRAPH_SUCCESS, OP_LOGE(context, "GetPlatformInfo error"),
+    OPS_CHECK(
+        GetPlatformInfo(context, ubSize, coreNum) != ge::GRAPH_SUCCESS, OPS_LOG_E(context, "GetPlatformInfo error"),
         return ge::GRAPH_FAILED);
     // 2、获取shape、属性信息
     int64_t totalIdx;
     ge::DataType dataType;
 
-    OP_CHECK_IF(
+    OPS_CHECK(
         GetShapeAttrsInfo(context, totalIdx, dataType) != ge::GRAPH_SUCCESS,
-        OP_LOGE(context, "GetShapeAttrsInfo error"), return ge::GRAPH_FAILED);
+        OPS_LOG_E(context, "GetShapeAttrsInfo error"), return ge::GRAPH_FAILED);
     // 3、获取WorkspaceSize信息
-    OP_CHECK_IF(
-        GetWorkspaceSize(context) != ge::GRAPH_SUCCESS, OP_LOGE(context, "GetWorkspaceSize error"),
+    OPS_CHECK(
+        GetWorkspaceSize(context) != ge::GRAPH_SUCCESS, OPS_LOG_E(context, "GetWorkspaceSize error"),
         return ge::GRAPH_FAILED);
 
     // 4、设置tiling信息
     AddExampleTilingData* tiling = context->GetTilingData<AddExampleTilingData>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
-    OP_CHECK_IF(
+    OPS_LOG_E_IF_NULL(context, tiling, return ge::GRAPH_FAILED);
+    OPS_CHECK(
         memset_s(tiling, sizeof(AddExampleTilingData), 0, sizeof(AddExampleTilingData)) != EOK,
-        OP_LOGE(context, "set tiling data error"), return ge::GRAPH_FAILED);
+        OPS_LOG_E(context, "set tiling data error"), return ge::GRAPH_FAILED);
     tiling->totalLength = totalIdx;
     tiling->tileNum = TILE_NUM;
 
@@ -140,7 +140,7 @@ static ge::graphStatus AddExampleTilingFunc(gert::TilingContext* context)
         tilingKey = GET_TPL_TILING_KEY(ELEMENTWISE_TPL_SCH_MODE_1);
         context->SetTilingKey(tilingKey);
     } else {
-        OP_LOGE(context, "get dtype error");
+        OPS_LOG_E(context, "get dtype error");
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;

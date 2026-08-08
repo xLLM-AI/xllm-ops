@@ -21,7 +21,7 @@ static const int REQUIRED_ATTRS_NUM = 6;
 static Status ParseParamsMultiHeadAttention(const Message* op_src, ge::Operator& op_dest) {
   const NodeProto* node = dynamic_cast<const NodeProto*>(op_src);
   if (node == nullptr) {
-    OP_LOGE("MultiHeadAttention", "Dynamic cast op_src to NodeProto failed.");
+    OPS_LOG_E("MultiHeadAttention", "Dynamic cast op_src to NodeProto failed.");
     return FAILED;
   }
   int attn_head_num = 0;
@@ -54,7 +54,7 @@ static Status ParseParamsMultiHeadAttention(const Message* op_src, ge::Operator&
   }
 
   if (attr_num != REQUIRED_ATTRS_NUM) {
-    OP_LOGE(GetOpName(op_dest).c_str(), "Node must have attrs attn_head_num/attn_dim_per_head/"
+    OPS_LOG_E(GetOpName(op_dest).c_str(), "Node must have attrs attn_head_num/attn_dim_per_head/"
                                                 "src_len/tgt_len/dropout_prob/softmax_use_float");
     return FAILED;
   }

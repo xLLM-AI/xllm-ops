@@ -76,6 +76,7 @@ if (BUILD_OPEN_PROJECT)
     target_link_libraries(${COMMON_NAME}_obj
       PRIVATE
       $<BUILD_INTERFACE:intf_pub_cxx17>
+      $<BUILD_INTERFACE:ops_xllm_utils_tiling_headers>
       tiling_api
       dlog
     )

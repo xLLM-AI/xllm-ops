@@ -17,7 +17,6 @@
 #include "register/op_impl_registry.h"
 #include "gamma_add_rms_norm_tiling.h"
 #include "op_common/op_host/util/math_util.h"
-#include "op_common/op_host/util/platform_util.h"
 
 namespace optiling {
 namespace gammaAddRmsNormRegbase {
@@ -27,6 +26,8 @@ constexpr uint32_t DTYPE_KEY_FP32 = 2;
 constexpr uint32_t DTYPE_KEY_BF16 = 3;
 constexpr uint32_t FLOAT_BLOCK_ALIGN_NUM = 8;
 constexpr uint32_t FLOAT_PER_REAPEAT = 64;
+constexpr uint32_t UB_BLOCK_SIZE = 32;
+constexpr uint32_t VECTOR_REGISTER_SIZE = 256;
 constexpr uint32_t BYTE_SIZE_2_BLOCK_ALIGN_NUM = 16;
 constexpr uint32_t X_INDEX = 0;
 constexpr uint32_t GAMMA_INDEX = 2;
@@ -92,7 +93,7 @@ uint32_t ComputeTotalBufSize(uint32_t bufferNum, ge::DataType dtype, uint32_t dt
 
 ge::graphStatus TilingGammaAddRmsNormRegbase(gert::TilingContext* context)
 {
-    OP_LOGD(context, " TilingGammaAddRmsNormRegbase");
+    OPS_LOG_D(context, " TilingGammaAddRmsNormRegbase");
     auto ptrCompileInfo = reinterpret_cast<const GammaAddRmsNormCompileInfo*>(context->GetCompileInfo());
     uint32_t numCore;
     uint64_t ubSize;
@@ -109,13 +110,13 @@ ge::graphStatus TilingGammaAddRmsNormRegbase(gert::TilingContext* context)
     const gert::Shape gammaShape = context->GetInputShape(GAMMA_INDEX)->GetStorageShape();
     std::string opType(context->GetNodeType());
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OPS_LOG_E_IF_NULL(context, attrs, return ge::GRAPH_FAILED);
     const float* epsilon = attrs->GetFloat(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, epsilon);
+    OPS_LOG_E_IF_NULL(context, epsilon, return ge::GRAPH_FAILED);
     const bool* addGammaOffsetPtr = attrs->GetBool(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, addGammaOffsetPtr);
+    OPS_LOG_E_IF_NULL(context, addGammaOffsetPtr, return ge::GRAPH_FAILED);
     const uint32_t addGammaOffset = *addGammaOffsetPtr ? 1U : 0U;
-    OP_CHECK_IF(
+    OPS_CHECK(
         *epsilon < 0,
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "epsilon", std::to_string(*epsilon).c_str(),
             "epsilon should not be less than zero"),
@@ -129,10 +130,10 @@ ge::graphStatus TilingGammaAddRmsNormRegbase(gert::TilingContext* context)
         numRow *= xShape.GetDim(i);
     }
     for (size_t i = 0; i < xDimNum; i++) {
-        OP_LOGD(context, " TilingGammaAddRmsNormRegbase x shape:%ld", xShape.GetDim(i));
+        OPS_LOG_D(context, " TilingGammaAddRmsNormRegbase x shape:%ld", xShape.GetDim(i));
     }
     for (size_t i = 0; i < gammaDimNum; i++) {
-        OP_LOGD(context, " TilingGammaAddRmsNormRegbase gama shape:%ld", gammaShape.GetDim(i));
+        OPS_LOG_D(context, " TilingGammaAddRmsNormRegbase gama shape:%ld", gammaShape.GetDim(i));
     }
     auto dataType = context->GetInputDesc(0)->GetDataType();
     uint32_t dtypeKey = DTYPE_KEY_FP16;
@@ -141,9 +142,9 @@ ge::graphStatus TilingGammaAddRmsNormRegbase(gert::TilingContext* context)
     size_t* currentWorkspace = context->GetWorkspaceSizes(1);
     currentWorkspace[0] = usrSize + sysWorkspaceSize;
     uint64_t numColAlign = 0;
-    uint64_t ubBlockSize = Ops::Base::GetUbBlockSize(context);
+    uint64_t ubBlockSize = UB_BLOCK_SIZE;
     uint64_t ubfp32 = ubBlockSize / sizeof(float);
-    uint64_t vlfp32 = Ops::Base::GetVRegSize(context) / sizeof(float);
+    uint64_t vlfp32 = VECTOR_REGISTER_SIZE / sizeof(float);
     uint64_t binaryAddElemtMaxLen = vlfp32 * vlfp32 * NUM_2 * NUM_2;
     uint64_t blockFactor;
     uint64_t ubFactor;
@@ -163,8 +164,8 @@ ge::graphStatus TilingGammaAddRmsNormRegbase(gert::TilingContext* context)
     context->SetBlockDim(useCoreNum);
 
     auto dtypeByteIterator = dTypeByteMap.find(dataType);
-    OP_CHECK_IF(
-        dtypeByteIterator == dTypeByteMap.end(), OP_LOGE(context, "Fail to get dtype factor."),
+    OPS_CHECK(
+        dtypeByteIterator == dTypeByteMap.end(), OPS_LOG_E(context, "Fail to get dtype factor."),
         return ge::GRAPH_FAILED);
     uint32_t curElementByte = dtypeByteIterator->second;
     numColAlign = CeilDiv(numCol * curElementByte, ubBlockSize) * ubBlockSize / curElementByte;
@@ -195,7 +196,7 @@ ge::graphStatus TilingGammaAddRmsNormRegbase(gert::TilingContext* context)
         tiling.set_epsilon(*epsilon);
         tiling.set_avgFactor(avgFactor);
         tiling.set_addGammaOffset(addGammaOffset);
-        OP_LOGI(
+        OPS_LOG_I(
             context,
             "TilingData numCore: %u, ubSize: %lu, numRow: %u, numCol: %u, numColAlign: %u, "
             "blockFactor: %u, rowFactor: %u, binAddQuotient: %u, "
@@ -236,7 +237,7 @@ ge::graphStatus TilingGammaAddRmsNormRegbase(gert::TilingContext* context)
         tiling.set_multiNNum(multiNNum);
         tiling.set_isNddma(isNddma);
         tiling.set_addGammaOffset(addGammaOffset);
-        OP_LOGI(
+        OPS_LOG_I(
             context,
             "TilingData numCore: %u, ubSize: %lu, numRow: %u, numCol: %u, numColAlign: %u, colBuferLength: %u, "
             "blockFactor: %u, rowFactor: %u, ubFactor: %u, "

@@ -19,7 +19,6 @@
 #include "platform/platform_info.h"
 #include "inplace_partial_rotary_mul_tiling.h"
 #include <graph/utils/type_utils.h>
-// #include "log/log.h"
 
 namespace {
 constexpr int64_t X_INDEX = 0;

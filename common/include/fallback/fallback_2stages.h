@@ -23,7 +23,7 @@
 #include "fallback.h"
 #include "fallback_comm.h"
 #include "fallback_comm_2stages.h"
-#include "log/log.h"
+#include "log/ops_log.h"
 #include "mc2_log.h"
 
 namespace fallback {
@@ -34,35 +34,35 @@ using namespace ge;
 inline void Collect(aclTensor *p, std::vector<OpApiAnyValue> &params) {
   static const auto aclDestroyTensor = GET_OP_API_FUNC(aclDestroyTensor);
   OPS_ERR_IF(aclDestroyTensor == nullptr,
-            OP_LOGE("aclnnfallback", "aclDestroyTensor is null"), return);
+            OPS_LOG_E("aclnnfallback", "aclDestroyTensor is null"), return);
   params.emplace_back(OpApiAnyValue{p, [](void *param) {aclDestroyTensor(static_cast<aclTensor *>(param));}});
 }
 
 inline void Collect(aclScalar *p, std::vector<OpApiAnyValue> &params) {
   static const auto aclDestroyScalar = GET_OP_API_FUNC(aclDestroyScalar);
   OPS_ERR_IF(aclDestroyScalar == nullptr,
-            OP_LOGE("aclnnfallback", "aclDestroyScalar is null"), return);
+            OPS_LOG_E("aclnnfallback", "aclDestroyScalar is null"), return);
   params.emplace_back(OpApiAnyValue{p, [](void *param) {aclDestroyScalar(static_cast<aclScalar *>(param));}});
 }
 
 inline void Collect(aclIntArray *p, std::vector<OpApiAnyValue> &params) {
   static const auto aclDestroyIntArray = GET_OP_API_FUNC(aclDestroyIntArray);
   OPS_ERR_IF(aclDestroyIntArray == nullptr,
-            OP_LOGE("aclnnfallback", "aclDestroyIntArray is null"), return);
+            OPS_LOG_E("aclnnfallback", "aclDestroyIntArray is null"), return);
   params.emplace_back(OpApiAnyValue{p, [](void *param) {aclDestroyIntArray(static_cast<aclIntArray *>(param));}});
 }
 
 inline void Collect(aclBoolArray *p, std::vector<OpApiAnyValue> &params) {
   static const auto aclDestroyBoolArray = GET_OP_API_FUNC(aclDestroyBoolArray);
   OPS_ERR_IF(aclDestroyBoolArray == nullptr,
-            OP_LOGE("aclnnfallback", "aclDestroyBoolArray is null"), return);
+            OPS_LOG_E("aclnnfallback", "aclDestroyBoolArray is null"), return);
   params.emplace_back(OpApiAnyValue{p, [](void *param) {aclDestroyBoolArray(static_cast<aclBoolArray *>(param));}});
 }
 
 inline void Collect(aclTensorList *p, std::vector<OpApiAnyValue> &params) {
   static const auto aclDestroyTensorList = GET_OP_API_FUNC(aclDestroyTensorList);
   OPS_ERR_IF(aclDestroyTensorList == nullptr,
-            OP_LOGE("aclnnfallback", "aclDestroyTensorList is null"), return);
+            OPS_LOG_E("aclnnfallback", "aclDestroyTensorList is null"), return);
   params.emplace_back(OpApiAnyValue{p, [](void *param) {aclDestroyTensorList(static_cast<aclTensorList *>(param));}});
 }
 
@@ -91,7 +91,7 @@ void CollectConvertedTypes(Tuple &t, std::vector<OpApiAnyValue> &params) {
       static const auto getWorkspaceSizeFuncAddr = GetOpApiFuncAddr(#aclnn_api "GetWorkspaceSize");                  \
       static const auto opApiFuncAddr = GetOpApiFuncAddr(#aclnn_api);                                                \
       if (getWorkspaceSizeFuncAddr == nullptr || opApiFuncAddr == nullptr || ResetCacheThreadLocalAddr == nullptr) { \
-        OP_LOGE("aclnnfallback", "%s or %s not in  %s or %s  or ResetCacheThreadLocal not found.",                   \
+        OPS_LOG_E("aclnnfallback", "%s or %s not in  %s or %s  or ResetCacheThreadLocal not found.",                   \
                 #aclnn_api "GetWorkspaceSize", #aclnn_api, GetOpApiLibName(), GetOpApiLibName());                    \
         ret = GRAPH_FAILED;                                                                                          \
         break;                                                                                                       \
@@ -112,7 +112,7 @@ void CollectConvertedTypes(Tuple &t, std::vector<OpApiAnyValue> &params) {
       static auto getWorkspaceSizeFunc = ConvertToOpApiFunc(converted_params, getWorkspaceSizeFuncAddr);             \
       auto workspace_status = call(getWorkspaceSizeFunc, converted_params);                                          \
       if (workspace_status != 0) {                                                                                   \
-        OP_LOGE("aclnnfallback", "call %s failed:", #aclnn_api);                                                     \
+        OPS_LOG_E("aclnnfallback", "call %s failed:", #aclnn_api);                                                     \
         ret = GRAPH_FAILED;                                                                                          \
         break;                                                                                                       \
       }                                                                                                              \

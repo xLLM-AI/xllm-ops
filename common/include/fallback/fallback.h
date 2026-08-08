@@ -27,7 +27,7 @@
 #include "fallback/fallback_comm.h"
 #include "mc2_log.h"
 #include "runtime/base.h"
-#include "log/log.h"
+#include "log/ops_log.h"
 
 namespace fallback {
 using namespace std;
@@ -89,7 +89,7 @@ inline const char* GetCustOpApiLibName(void) {
 inline void* GetOpApiFuncAddrInLib(void* handler, const char* libName, const char* apiName) {
   auto funcAddr = dlsym(handler, apiName);
   if (funcAddr == nullptr) {
-    OP_LOGW("aclnnfallback", "dlsym %s from %s failed, error:%s.", apiName, libName, dlerror());
+    OPS_LOG_W("aclnnfallback", "dlsym %s from %s failed, error:%s.", apiName, libName, dlerror());
   }
   return funcAddr;
 }
@@ -97,7 +97,7 @@ inline void* GetOpApiFuncAddrInLib(void* handler, const char* libName, const cha
 inline void* GetOpApiLibHandler(const char* libName) {
   auto handler = dlopen(libName, RTLD_LAZY);
   if (handler == nullptr) {
-    OP_LOGW("aclnnfallback", "dlopen %s failed, error:%s.", libName, dlerror());
+    OPS_LOG_W("aclnnfallback", "dlopen %s failed, error:%s.", libName, dlerror());
   }
   return handler;
 }
@@ -114,7 +114,7 @@ inline void* GetAclnnArrdByApiName(const char *apiName) {
             }
         }
     }
-    OP_LOGE("aclnnfallback", "api %s can't find in any aclnn lib.", apiName);
+    OPS_LOG_E("aclnnfallback", "api %s can't find in any aclnn lib.", apiName);
     return nullptr;
 }
 
@@ -134,7 +134,7 @@ inline void* GetOpApiFuncAddr(const char* apiName) {
           return funcAddr;
       }
   }
-  OP_LOGD("aclnnfallback", "opapi lib is not exist,will use aclnn lib.");
+  OPS_LOG_D("aclnnfallback", "opapi lib is not exist,will use aclnn lib.");
   return GetAclnnArrdByApiName(apiName);
 }
 
@@ -190,14 +190,14 @@ inline aclTensor* ConvertType(const gert::Tensor* ge_tensor) {
   }
 
   static const auto aclCreateTensor = GET_OP_API_FUNC(aclCreateTensor);
-  OP_CHECK_IF(aclCreateTensor == nullptr, OP_LOGE("aclnnfallback", "aclCreateTensor nullptr"), return nullptr);
+  OPS_CHECK(aclCreateTensor == nullptr, OPS_LOG_E("aclnnfallback", "aclCreateTensor nullptr"), return nullptr);
 
   void* device_addr = nullptr;
   device_addr = const_cast<void*>(ge_tensor->GetAddr());
 
   auto dataType = GetConvertType(ge_tensor);
 
-  OP_LOGD("aclnnfallback", "aclCreateTensor: tensor type is %d", dataType);
+  OPS_LOG_D("aclnnfallback", "aclCreateTensor: tensor type is %d", dataType);
 
   // convert shape
   auto gert_shape = ge_tensor->GetStorageShape();
@@ -216,19 +216,19 @@ inline aclTensor* ConvertType(const gert::Tensor* ge_tensor) {
                                    0, aclFormat::ACL_FORMAT_ND,
                                    shape.data(), shape.size(), device_addr);
 
-  OP_CHECK_IF(out == nullptr,
-    OP_LOGE("aclnnfallback", "out nullptr"), return nullptr);
+  OPS_CHECK(out == nullptr,
+    OPS_LOG_E("aclnnfallback", "out nullptr"), return nullptr);
 
   return out;
 }
 
 inline aclTensorList* ConvertType(std::vector<const gert::Tensor*>& ge_tenserList) {
-  OP_CHECK_IF(ge_tenserList.size() == 0,
-    OP_LOGE("aclnnfallback", "ge_tenserList size 0"), return nullptr);
+  OPS_CHECK(ge_tenserList.size() == 0,
+    OPS_LOG_E("aclnnfallback", "ge_tenserList size 0"), return nullptr);
 
   static const auto aclCreateTensorList = GET_OP_API_FUNC(aclCreateTensorList);
-  OP_CHECK_IF(aclCreateTensorList == nullptr,
-    OP_LOGE("aclnnfallback", "ge_tenserList size 0"), return nullptr);
+  OPS_CHECK(aclCreateTensorList == nullptr,
+    OPS_LOG_E("aclnnfallback", "ge_tenserList size 0"), return nullptr);
 
   std::vector<aclTensor*> tmp;
   for (size_t i = 0; i < ge_tenserList.size(); i++) {
@@ -243,8 +243,8 @@ inline aclTensorList* ConvertType(std::vector<const gert::Tensor*>& ge_tenserLis
 template <typename T>
 inline aclScalar* ConvertScalarType(T value) {
   static const auto aclCreateScalar = GET_OP_API_FUNC(aclCreateScalar);
-  OP_CHECK_IF(aclCreateScalar == nullptr,
-    OP_LOGE("aclnnfallback", "aclCreateScalar nullptr"), return nullptr);
+  OPS_CHECK(aclCreateScalar == nullptr,
+    OPS_LOG_E("aclnnfallback", "aclCreateScalar nullptr"), return nullptr);
   if (typeid(value) == typeid(float)) {
     return aclCreateScalar(&value, aclDataType::ACL_FLOAT);
   }
@@ -266,7 +266,7 @@ inline aclTensor* ConvertMmType(const gert::Tensor* ge_tensor, bool transpose, b
   }
 
   static const auto aclCreateTensor = GET_OP_API_FUNC(aclCreateTensor);
-  OP_CHECK_IF(aclCreateTensor == nullptr, OP_LOGE("aclnnfallback", "aclCreateTensor nullptr"), return nullptr);
+  OPS_CHECK(aclCreateTensor == nullptr, OPS_LOG_E("aclnnfallback", "aclCreateTensor nullptr"), return nullptr);
 
   void* device_addr = const_cast<void*>(ge_tensor->GetAddr());
   // convert data type
@@ -302,43 +302,43 @@ inline aclTensor* ConvertMmType(const gert::Tensor* ge_tensor, bool transpose, b
   }
   aclTensor* out = aclCreateTensor(viewShape.data(), shape.size(), dataType, strides.data(),
                                    0, acl_format, shape.data(), shape.size(), device_addr);
-  OP_CHECK_IF(out == nullptr, OP_LOGE("aclnnfallback", "out nullptr"), return nullptr);
+  OPS_CHECK(out == nullptr, OPS_LOG_E("aclnnfallback", "out nullptr"), return nullptr);
 
   return out;
 }
 
 inline void Release(aclTensor* p) {
   static const auto aclDestroyTensor = GET_OP_API_FUNC(aclDestroyTensor);
-  OP_CHECK_IF(aclDestroyTensor == nullptr,
-    OP_LOGE("aclnnfallback", "aclDestroyTensor is null"), return);
+  OPS_CHECK(aclDestroyTensor == nullptr,
+    OPS_LOG_E("aclnnfallback", "aclDestroyTensor is null"), return);
   aclDestroyTensor(p);
 }
 
 inline void Release(aclScalar* p) {
   static const auto aclDestroyScalar = GET_OP_API_FUNC(aclDestroyScalar);
-  OP_CHECK_IF(aclDestroyScalar == nullptr,
-    OP_LOGE("aclnnfallback", "aclDestroyScalar is null"), return);
+  OPS_CHECK(aclDestroyScalar == nullptr,
+    OPS_LOG_E("aclnnfallback", "aclDestroyScalar is null"), return);
   aclDestroyScalar(p);
 }
 
 inline void Release(aclIntArray* p) {
   static const auto aclDestroyIntArray = GET_OP_API_FUNC(aclDestroyIntArray);
-  OP_CHECK_IF(aclDestroyIntArray == nullptr,
-    OP_LOGE("aclnnfallback", "aclDestroyIntArray is null"), return);
+  OPS_CHECK(aclDestroyIntArray == nullptr,
+    OPS_LOG_E("aclnnfallback", "aclDestroyIntArray is null"), return);
   aclDestroyIntArray(p);
 }
 
 inline void Release(aclBoolArray* p) {
   static const auto aclDestroyBoolArray = GET_OP_API_FUNC(aclDestroyBoolArray);
-  OP_CHECK_IF(aclDestroyBoolArray == nullptr,
-    OP_LOGE("aclnnfallback", "aclDestroyBoolArray is null"), return);
+  OPS_CHECK(aclDestroyBoolArray == nullptr,
+    OPS_LOG_E("aclnnfallback", "aclDestroyBoolArray is null"), return);
   aclDestroyBoolArray(p);
 }
 
 inline void Release(aclTensorList* p) {
   static const auto aclDestroyTensorList = GET_OP_API_FUNC(aclDestroyTensorList);
-  OP_CHECK_IF(aclDestroyTensorList == nullptr,
-    OP_LOGE("aclnnfallback", "aclDestroyTensorList is null"), return);
+  OPS_CHECK(aclDestroyTensorList == nullptr,
+    OPS_LOG_E("aclnnfallback", "aclDestroyTensorList is null"), return);
   aclDestroyTensorList(p);
 }
 
@@ -446,7 +446,7 @@ using ResetCacheThreadLocal = void (*)();
       static const auto getWorkspaceSizeFuncAddr = GetOpApiFuncAddr(#aclnn_api "GetWorkspaceSize");                  \
       static const auto opApiFuncAddr = GetOpApiFuncAddr(#aclnn_api);                                                \
       if (getWorkspaceSizeFuncAddr == nullptr || opApiFuncAddr == nullptr || ResetCacheThreadLocalAddr == nullptr) { \
-        OP_LOGE("aclnnfallback", "%s or %s not in  %s or %s  or ResetCacheThreadLocal not found.",                   \
+        OPS_LOG_E("aclnnfallback", "%s or %s not in  %s or %s  or ResetCacheThreadLocal not found.",                   \
                 #aclnn_api "GetWorkspaceSize", #aclnn_api, GetOpApiLibName(), GetOpApiLibName());                    \
         ret = GRAPH_FAILED;                                                                                          \
         break;                                                                                                       \
@@ -461,7 +461,7 @@ using ResetCacheThreadLocal = void (*)();
       static auto getWorkspaceSizeFunc = ConvertToOpApiFunc(converted_params, getWorkspaceSizeFuncAddr);             \
       auto workspace_status = call(getWorkspaceSizeFunc, converted_params);                                          \
       if (workspace_status != 0) {                                                                                   \
-        OP_LOGE("aclnnfallback", "call %s failed:", #aclnn_api);                                                     \
+        OPS_LOG_E("aclnnfallback", "call %s failed:", #aclnn_api);                                                     \
         ret = GRAPH_FAILED;                                                                                          \
         break;                                                                                                       \
       }                                                                                                              \
@@ -469,7 +469,7 @@ using ResetCacheThreadLocal = void (*)();
       if (workspace_size > 0) {                                                                                      \
         workspace_addr = host_api_ctx->MallocWorkspace(workspace_size);                                              \
         if (workspace_addr == nullptr) {                                                                             \
-          OP_LOGE("aclnnfallback", "call %s allocate workspace failed", #aclnn_api);                                 \
+          OPS_LOG_E("aclnnfallback", "call %s allocate workspace failed", #aclnn_api);                                 \
           ret = GRAPH_FAILED;                                                                                        \
           break;                                                                                                     \
         }                                                                                                            \
@@ -483,7 +483,7 @@ using ResetCacheThreadLocal = void (*)();
         ReleaseConvertTypes(converted_params);                                                                       \
         host_api_ctx->FreeWorkspace();                                                                               \
         if (api_ret_inner != 0) {                                                                                          \
-          OP_LOGE("aclnnfallback", "call %s allocate workspace failed api_ret_inner: %d", #aclnn_api, api_ret_inner);           \
+          OPS_LOG_E("aclnnfallback", "call %s allocate workspace failed api_ret_inner: %d", #aclnn_api, api_ret_inner);           \
           return GRAPH_FAILED;                                                                                       \
         }                                                                                                            \
         return api_ret_inner;                                                                                              \

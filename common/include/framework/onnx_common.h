@@ -25,7 +25,7 @@
 #include "graph/operator.h"
 #include "graph/graph.h"
 #include "base/err_msg.h"
-#include "log/log.h"
+#include "log/ops_log.h"
 #include "onnx/proto/ge_onnx.pb.h"
 
 namespace domi {
@@ -65,7 +65,7 @@ inline Status ChangeFormatFromOnnx(ge::Operator& op, const int idx, ge::Format f
     org_tensor.SetFormat(format);
     auto ret = op.UpdateInputDesc(idx, org_tensor);
     if (ret != ge::GRAPH_SUCCESS) {
-      OP_LOGE(GetOpName(op).c_str(), "change input format failed.");
+      OPS_LOG_E(GetOpName(op).c_str(), "change input format failed.");
       return FAILED;
     }
   } else {
@@ -74,7 +74,7 @@ inline Status ChangeFormatFromOnnx(ge::Operator& op, const int idx, ge::Format f
     org_tensor_y.SetFormat(format);
     auto ret_y = op.UpdateOutputDesc(idx, org_tensor_y);
     if (ret_y != ge::GRAPH_SUCCESS) {
-      OP_LOGE(GetOpName(op).c_str(), "change output format failed.");
+      OPS_LOG_E(GetOpName(op).c_str(), "change output format failed.");
       return FAILED;
     }
   }

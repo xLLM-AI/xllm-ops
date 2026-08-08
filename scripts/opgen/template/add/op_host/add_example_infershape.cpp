@@ -13,7 +13,7 @@
  * \brief
  */
 #include "register/op_impl_registry.h"
-#include "log/log.h"
+#include "log/ops_log.h"
 
 using namespace ge;
 
@@ -22,15 +22,15 @@ static constexpr int64_t IDX_0 = 0;
 
 static ge::graphStatus InferShapeAddExample(gert::InferShapeContext* context)
 {
-    OP_LOGD(context->GetNodeName(), "Begin to do InferShapeAddExample");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do InferShapeAddExample");
 
     // get input shapes
     const gert::Shape* xShape = context->GetInputShape(IDX_0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OPS_LOG_E_IF_NULL(context, xShape, return ge::GRAPH_FAILED);
 
     // get output shapes
     gert::Shape* yShape = context->GetOutputShape(IDX_0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, yShape);
+    OPS_LOG_E_IF_NULL(context, yShape, return ge::GRAPH_FAILED);
 
     // 填充输出shape大小
     auto xShapeSize = xShape->GetDimNum();
@@ -40,7 +40,7 @@ static ge::graphStatus InferShapeAddExample(gert::InferShapeContext* context)
         yShape->SetDim(i, dim);
     }
 
-    OP_LOGD(context->GetNodeName(), "End to do InferShapeAddExample");
+    OPS_LOG_D(context->GetNodeName(), "End to do InferShapeAddExample");
     return GRAPH_SUCCESS;
 }
 

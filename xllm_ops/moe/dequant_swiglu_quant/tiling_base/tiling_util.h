@@ -18,7 +18,7 @@
 #include "register/op_impl_registry.h"
 #include "platform/platform_ascendc.h"
 #include "platform/soc_spec.h"
-#include "log/log.h"
+#include "log/ops_log.h"
 
 namespace Ops {
 namespace NN {
@@ -37,7 +37,7 @@ static inline bool IsRegbaseSocVersion(const gert::TilingParseContext* context)
 {
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     auto npuArch = ascendcPlatform.GetCurNpuArch();
-    OP_LOGI(context, "Current NpuArch is %u", static_cast<uint32_t>(npuArch));
+    OPS_LOG_I(context, "Current NpuArch is %u", static_cast<uint32_t>(npuArch));
     return IsRegbaseNpuArch(npuArch);
 }
 
@@ -45,7 +45,7 @@ static inline bool IsRegbaseSocVersion(const gert::TilingContext* context)
 {
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     auto npuArch = ascendcPlatform.GetCurNpuArch();
-    OP_LOGI(context, "Current NpuArch is %u", static_cast<uint32_t>(npuArch));
+    OPS_LOG_I(context, "Current NpuArch is %u", static_cast<uint32_t>(npuArch));
     return IsRegbaseNpuArch(npuArch);
 }
 

@@ -12,7 +12,7 @@
  * \file add_rms_norm_bias_infershape.cpp
  * \brief
  */
-#include "log/log.h"
+#include "log/ops_log.h"
 #include "util/shape_util.h"
 #include "register/op_impl_registry.h"
 
@@ -27,20 +27,20 @@ namespace ops {
 
 static ge::graphStatus InferShape4AddRmsNormBias(gert::InferShapeContext* context)
 {
-    OP_LOGD(context, "Begin to do InferShape4AddRmsNormBias");
+    OPS_LOG_D(context, "Begin to do InferShape4AddRmsNormBias");
 
     // get input shapes
     const gert::Shape* x1Shape = context->GetInputShape(IDX_0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, x1Shape);
+    OPS_LOG_E_IF_NULL(context, x1Shape, return ge::GRAPH_FAILED);
     const gert::Shape* gammaShape = context->GetInputShape(IDX_2);
-    OP_CHECK_NULL_WITH_CONTEXT(context, gammaShape);
+    OPS_LOG_E_IF_NULL(context, gammaShape, return ge::GRAPH_FAILED);
     // get output shapes
     gert::Shape* yShape = context->GetOutputShape(IDX_0);
     gert::Shape* rstdShape = context->GetOutputShape(IDX_1);
     gert::Shape* xShape = context->GetOutputShape(IDX_2);
-    OP_CHECK_NULL_WITH_CONTEXT(context, yShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, rstdShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OPS_LOG_E_IF_NULL(context, yShape, return ge::GRAPH_FAILED);
+    OPS_LOG_E_IF_NULL(context, rstdShape, return ge::GRAPH_FAILED);
+    OPS_LOG_E_IF_NULL(context, xShape, return ge::GRAPH_FAILED);
     *yShape = *x1Shape;
     *xShape = *x1Shape;
 
@@ -49,12 +49,12 @@ static ge::graphStatus InferShape4AddRmsNormBias(gert::InferShapeContext* contex
 
     if (IsUnknownRank(*x1Shape) || IsUnknownRank(*gammaShape)) {
         SetUnknownRank(*rstdShape);
-        OP_LOGD(context, "End to do InferShape4AddRmsNormBias with unknown rank.");
+        OPS_LOG_D(context, "End to do InferShape4AddRmsNormBias with unknown rank.");
         return GRAPH_SUCCESS;
     }
 
-    OP_CHECK_IF(
-        xDimNum < gammaDimNum, OP_LOGE(context, "x dim num should not be smaller than gamma dim num."),
+    OPS_CHECK(
+        xDimNum < gammaDimNum, OPS_LOG_E(context, "x dim num should not be smaller than gamma dim num."),
         return GRAPH_FAILED);
 
     rstdShape->SetDimNum(xDimNum);
@@ -66,17 +66,17 @@ static ge::graphStatus InferShape4AddRmsNormBias(gert::InferShapeContext* contex
         }
     }
 
-    OP_LOGD(context, "End to do InferShape4AddRmsNormBias");
+    OPS_LOG_D(context, "End to do InferShape4AddRmsNormBias");
     return GRAPH_SUCCESS;
 }
 
 static graphStatus InferDataType4AddRmsNormBias(gert::InferDataTypeContext* context)
 {
-    OP_LOGD(context, "Begin to do InferDataType4AddRmsNormBias");
+    OPS_LOG_D(context, "Begin to do InferDataType4AddRmsNormBias");
     context->SetOutputDataType(IDX_0, context->GetInputDataType(IDX_0));
     context->SetOutputDataType(IDX_1, DT_FLOAT);
     context->SetOutputDataType(IDX_2, context->GetInputDataType(IDX_0));
-    OP_LOGD(context, "End to do InferDataType4AddRmsNormBias");
+    OPS_LOG_D(context, "End to do InferDataType4AddRmsNormBias");
     return GRAPH_SUCCESS;
 }
 

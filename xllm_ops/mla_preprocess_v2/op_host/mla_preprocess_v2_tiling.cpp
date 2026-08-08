@@ -16,7 +16,6 @@
 #include "../../mla_preprocess/op_host/mla_preprocess_tiling.h"
 #include "../../mla_preprocess/op_host/mla_preprocess_tilingdata.h"
 #include "register/op_impl_registry.h"
-//#include "log/log.h"
 #include "../../../common/tiling/tiling_base.h"
 #include <cmath>
 #include <string>

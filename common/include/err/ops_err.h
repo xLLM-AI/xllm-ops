@@ -16,14 +16,7 @@
 #ifndef Xllm_COMMON_OPS_ERR_H
 #define Xllm_COMMON_OPS_ERR_H
 
-#include "log/log.h"
-
-#define OPS_INNER_ERR_STUB(ERR_CODE_STR, OPS_DESC, FMT, ...)                                                           \
-    do {                                                                                                               \
-        OpLogSub(OP, DLOG_ERROR, OPS_DESC, FMT, ##__VA_ARGS__);                                                    \
-        REPORT_INNER_ERR_MSG(ERR_CODE_STR, FMT, ##__VA_ARGS__);                                                        \
-    } while (0)
-
+#include "log/ops_log.h"
 
 /* 基础报错 */
 #define OPS_REPORT_VECTOR_INNER_ERR(OPS_DESC, ...) OPS_INNER_ERR_STUB("E89999", OPS_DESC, __VA_ARGS__)

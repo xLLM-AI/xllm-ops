@@ -22,7 +22,7 @@ constexpr int ACL_FLOAT16 = 1;
 static Status ParseParamsNpuFusedAttentionScore(const Message *op_src, ge::Operator &op_dest) {
   const NodeProto *node = dynamic_cast<const NodeProto *>(op_src);
   if (node == nullptr) {
-    OP_LOGE(GetOpName(op_dest).c_str(), "Dynamic cast op_src to NodeProto failed.");
+    OPS_LOG_E(GetOpName(op_dest).c_str(), "Dynamic cast op_src to NodeProto failed.");
     return FAILED;
   }
 
@@ -57,7 +57,7 @@ static Status ParseParamsNpuFusedAttentionScore(const Message *op_src, ge::Opera
   }
 
   if (required_attr_num != REQUIRED_ATTR) {
-    OP_LOGE(GetOpName(op_dest).c_str(), "attr scale is required.");
+    OPS_LOG_E(GetOpName(op_dest).c_str(), "attr scale is required.");
     return FAILED;
   }
 
@@ -75,15 +75,15 @@ static Status ParseParamsNpuFusedAttentionScore(const Message *op_src, ge::Opera
 namespace {
 static Status GetAttrFromPre3(const ge::Operator& op, float& scale, float& keep_prob, bool& query_transpose) {
   if (op.GetAttr("scale", scale) != SUCCESS) {
-    OP_LOGE(GetOpName(op).c_str(), "get scale from op failed");
+    OPS_LOG_E(GetOpName(op).c_str(), "get scale from op failed");
     return FAILED;
   }
   if (op.GetAttr("keep_prob", keep_prob) != SUCCESS) {
-    OP_LOGE(GetOpName(op).c_str(), "get keep_prob from op failed");
+    OPS_LOG_E(GetOpName(op).c_str(), "get keep_prob from op failed");
     return FAILED;
   }
   if (op.GetAttr("query_transpose", query_transpose) != SUCCESS) {
-    OP_LOGE(GetOpName(op).c_str(), "get query_transpose from op failed");
+    OPS_LOG_E(GetOpName(op).c_str(), "get query_transpose from op failed");
     return FAILED;
   }
   return SUCCESS;
@@ -92,15 +92,15 @@ static Status GetAttrFromPre3(const ge::Operator& op, float& scale, float& keep_
 static Status GetAttrFromLast3(
   const ge::Operator& op, bool& key_transpose, bool& bmm_score_transpose_a, bool& bmm_score_transpose_b) {
   if (op.GetAttr("key_transpose", key_transpose) != SUCCESS) {
-    OP_LOGE(GetOpName(op).c_str(), "get key_transpose from op failed");
+    OPS_LOG_E(GetOpName(op).c_str(), "get key_transpose from op failed");
     return FAILED;
   }
   if (op.GetAttr("bmm_score_transpose_a", bmm_score_transpose_a) != SUCCESS) {
-    OP_LOGE(GetOpName(op).c_str(), "get bmm_score_transpose_a from op failed");
+    OPS_LOG_E(GetOpName(op).c_str(), "get bmm_score_transpose_a from op failed");
     return FAILED;
   }
   if (op.GetAttr("bmm_score_transpose_b", bmm_score_transpose_b) != SUCCESS) {
-    OP_LOGE(GetOpName(op).c_str(), "get bmm_score_transpose_b from op failed");
+    OPS_LOG_E(GetOpName(op).c_str(), "get bmm_score_transpose_b from op failed");
     return FAILED;
   }
   return SUCCESS;
@@ -110,7 +110,7 @@ static Status GetAttrFromLast3(
 static Status ParseOpToGraphNpuFusedAttentionScore(const ge::Operator& op, ge::Graph& graph) {
   std::string ori_name;
   if (op.GetAttr("name", ori_name) != SUCCESS) {
-    OP_LOGE(GetOpName(op).c_str(), "get name from op failed.");
+    OPS_LOG_E(GetOpName(op).c_str(), "get name from op failed.");
     return FAILED;
   }
 

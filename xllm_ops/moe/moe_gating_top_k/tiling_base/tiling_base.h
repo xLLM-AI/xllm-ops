@@ -20,6 +20,7 @@
 #include <graph/utils/type_utils.h>
 #include "tiling/platform/platform_ascendc.h"
 #include "error_log.h"
+#include "log/ops_log.h"
 
 #ifdef ASCENDC_OP_TEST
 #define ASCENDC_EXTERN_C extern "C"
@@ -152,7 +153,7 @@ protected:
     // 8. Dump Tiling data
     virtual void DumpTilingInfo()
     {
-        int32_t enable = CheckLogLevel(static_cast<int32_t>(OP), DLOG_DEBUG);
+        int32_t enable = AlogCheckDebugLevel(static_cast<int32_t>(OP), DLOG_DEBUG);
         if (enable != 1) {
             return;
         }
@@ -164,11 +165,11 @@ protected:
         for (size_t i = 0; i < bufLen / sizeof(uint32_t); i++) {
             oss << *(buf + i) << ",";
             if (oss.str().length() > 640) { // Split according to 640 to avoid truncation
-                OP_LOGD(context_, "%s", oss.str().c_str());
+                OPS_LOG_D(context_, "%s", oss.str().c_str());
                 oss.str("");
             }
         }
-        OP_LOGD(context_, "%s", oss.str().c_str());
+        OPS_LOG_D(context_, "%s", oss.str().c_str());
     }
 
     static uint32_t CalcTschBlockDim(uint32_t sliceNum, uint32_t aicCoreNum, uint32_t aivCoreNum)

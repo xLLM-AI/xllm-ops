@@ -10,54 +10,54 @@
 
 #pragma once
 
-#include "log/log.h"
+#include "log/ops_log.h"
 
 #ifndef OP_LOGE_FOR_INVALID_DTYPE
 #define OP_LOGE_FOR_INVALID_DTYPE(opname, param, actual, expected) \
-    OP_LOGE(opname, "Invalid dtype for %s, actual: %s, expected: %s", param, actual, expected)
+    OPS_LOG_E(opname, "Invalid dtype for %s, actual: %s, expected: %s", param, actual, expected)
 #endif
 
 #ifndef OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON
 #define OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(opname, param, actual, reason) \
-    OP_LOGE(opname, "Invalid dtype for %s, actual: %s, reason: %s", param, actual, reason)
+    OPS_LOG_E(opname, "Invalid dtype for %s, actual: %s, reason: %s", param, actual, reason)
 #endif
 
 #ifndef OP_LOGE_FOR_INVALID_SHAPE
 #define OP_LOGE_FOR_INVALID_SHAPE(opname, param, actual, expected) \
-    OP_LOGE(opname, "Invalid shape for %s, actual: %s, expected: %s", param, actual, expected)
+    OPS_LOG_E(opname, "Invalid shape for %s, actual: %s, expected: %s", param, actual, expected)
 #endif
 
 #ifndef OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON
 #define OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opname, param, actual, reason) \
-    OP_LOGE(opname, "Invalid shape for %s, actual: %s, reason: %s", param, actual, reason)
+    OPS_LOG_E(opname, "Invalid shape for %s, actual: %s, reason: %s", param, actual, reason)
 #endif
 
 #ifndef OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON
 #define OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(opname, param, actual, reason) \
-    OP_LOGE(opname, "Invalid shapes for %s, actual: %s, reason: %s", param, actual, reason)
+    OPS_LOG_E(opname, "Invalid shapes for %s, actual: %s, reason: %s", param, actual, reason)
 #endif
 
 #ifndef OP_LOGE_FOR_INVALID_SHAPEDIM
 #define OP_LOGE_FOR_INVALID_SHAPEDIM(opname, param, actual, expected) \
-    OP_LOGE(opname, "Invalid shape dim for %s, actual: %s, expected: %s", param, actual, expected)
+    OPS_LOG_E(opname, "Invalid shape dim for %s, actual: %s, expected: %s", param, actual, expected)
 #endif
 
 #ifndef OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON
 #define OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(opname, param, actual, reason) \
-    OP_LOGE(opname, "Invalid shape dims for %s, actual: %s, reason: %s", param, actual, reason)
+    OPS_LOG_E(opname, "Invalid shape dims for %s, actual: %s, reason: %s", param, actual, reason)
 #endif
 
 #ifndef OP_LOGE_FOR_INVALID_SHAPESIZE
 #define OP_LOGE_FOR_INVALID_SHAPESIZE(opname, param, actual, expected) \
-    OP_LOGE(opname, "Invalid shape size for %s, actual: %s, expected: %s", param, actual, expected)
+    OPS_LOG_E(opname, "Invalid shape size for %s, actual: %s, expected: %s", param, actual, expected)
 #endif
 
 #ifndef OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON
 #define OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(opname, param, actual, reason) \
-    OP_LOGE(opname, "Invalid shape size for %s, actual: %s, reason: %s", param, actual, reason)
+    OPS_LOG_E(opname, "Invalid shape size for %s, actual: %s, reason: %s", param, actual, reason)
 #endif
 
 #ifndef OP_LOGE_FOR_INVALID_VALUE_WITH_REASON
 #define OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opname, param, actual, reason) \
-    OP_LOGE(opname, "Invalid value for %s, actual: %s, reason: %s", param, actual, reason)
+    OPS_LOG_E(opname, "Invalid value for %s, actual: %s, reason: %s", param, actual, reason)
 #endif

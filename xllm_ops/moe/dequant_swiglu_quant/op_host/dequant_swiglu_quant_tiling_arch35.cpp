@@ -100,7 +100,7 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetPlatformInfo()
   auto platformInfo = context_->GetPlatformInfo();
   if (platformInfo == nullptr) {
     auto compileInfoPtr = context_->GetCompileInfo<DequantSwigluQuantCompileInfo>();
-    OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context_, "compile info is null"),
+    OPS_CHECK(compileInfoPtr == nullptr, OPS_LOG_E(context_, "compile info is null"),
                     return ge::GRAPH_FAILED);
     coreNum_ = compileInfoPtr->coreNum;
     ubSize_ = compileInfoPtr->ubSize;
@@ -120,30 +120,30 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetPlatformInfo()
 ge::graphStatus DequantSwigluQuantV35DskTiling::GetInputX()
 {
     auto xDesc = context_->GetInputDesc(X_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, xDesc);
+    OPS_LOG_E_IF_NULL(context_, xDesc, return ge::GRAPH_FAILED);
     ge::DataType xDType = xDesc->GetDataType();
     // 校验x的数据类型是否合法
-    OP_CHECK_IF((SUPPORT_DTYPE.find(xDType) == SUPPORT_DTYPE.end()),
+    OPS_CHECK((SUPPORT_DTYPE.find(xDType) == SUPPORT_DTYPE.end()),
         OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "x",
             ge::TypeUtils::DataTypeToSerialString(xDType).c_str(), "int32, float16 or bf16"),
         return ge::GRAPH_FAILED);
 
     auto xStorageShape = context_->GetInputShape(X_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, xStorageShape);
+    OPS_LOG_E_IF_NULL(context_, xStorageShape, return ge::GRAPH_FAILED);
     xShape_ = EnsureNotScalar(xStorageShape->GetStorageShape());
     xDimNum_ = xShape_.GetDimNum();
-    OP_CHECK_IF(xDimNum_ < 2,
+    OPS_CHECK(xDimNum_ < 2,
         OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "x",
             std::to_string(xDimNum_).c_str(), "greater than or equal to 2"),
         return ge::GRAPH_FAILED);
-    OP_CHECK_IF(xDimNum_ > 8,
+    OPS_CHECK(xDimNum_ > 8,
         OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "x",
             std::to_string(xDimNum_).c_str(), "less than or equal to 8"),
         return ge::GRAPH_FAILED);
     for (size_t i = 0; i < xDimNum_; i++) {
-        OP_CHECK_IF(xShape_.GetDim(i) <= 0,
+        OPS_CHECK(xShape_.GetDim(i) <= 0,
             OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->GetNodeName(), "x",
-                Ops::Base::ToString(xShape_).c_str(),
+                ops::Shape2String(xShape_).c_str(),
                 ("the dim[" + std::to_string(i) + "] of x must be positive").c_str()),
             return ge::GRAPH_FAILED);
     }
@@ -155,22 +155,22 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetInputGroupIndex()
     auto groupIndexDesc = context_->GetOptionalInputDesc(INPUT_GROUP_INDEX);
     if (groupIndexDesc != nullptr) {
         ge::DataType groupIndexDType = groupIndexDesc->GetDataType();
-        OP_CHECK_IF(groupIndexDType != ge::DT_INT64 && groupIndexDType != ge::DT_INT32,
+        OPS_CHECK(groupIndexDType != ge::DT_INT64 && groupIndexDType != ge::DT_INT32,
             OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "group_index",
                 ge::TypeUtils::DataTypeToSerialString(groupIndexDType).c_str(), "int32 or int64"),
             return ge::GRAPH_FAILED);
 
         auto groupIndexStorageShape = context_->GetOptionalInputShape(INPUT_GROUP_INDEX);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, groupIndexStorageShape);
+        OPS_LOG_E_IF_NULL(context_, groupIndexStorageShape, return ge::GRAPH_FAILED);
         groupIndexShape_ = EnsureNotScalar(groupIndexStorageShape->GetStorageShape());
         auto groupIndexDimNum = groupIndexShape_.GetDimNum();
-        OP_CHECK_IF((groupIndexDimNum != 1) && (groupIndexDimNum != 2),
+        OPS_CHECK((groupIndexDimNum != 1) && (groupIndexDimNum != 2),
             OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "group_index",
                 std::to_string(groupIndexDimNum).c_str(), "1 or 2"),
             return ge::GRAPH_FAILED);
 
         groupNum_ = groupIndexShape_.GetDim(0);
-        OP_CHECK_IF(groupNum_ < 1,
+        OPS_CHECK(groupNum_ < 1,
             OP_LOGE_FOR_INVALID_SHAPESIZE(context_->GetNodeName(), "group_index",
                 std::to_string(groupNum_).c_str(), "group_index[0] must be greater than or equal to 1"),
             return ge::GRAPH_FAILED);
@@ -187,7 +187,7 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetInputGroupIndex()
 ge::graphStatus DequantSwigluQuantV35DskTiling::GetAttrActivateDim()
 {
   auto* attrs = context_->GetAttrs();
-  OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+  OPS_LOG_E_IF_NULL(context_, attrs, return ge::GRAPH_FAILED);
   // 校验activate_dim
   auto* attrActivateDim = attrs->GetAttrPointer<int>(ATTR_ACTIVATE_DIM_INDEX);
   // 类型校验
@@ -196,7 +196,7 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetAttrActivateDim()
   activateDim_ = activateDim_ < 0 ? activateDim_ + static_cast<int64_t>(xDimNum_) : activateDim_;
 
   // 判断切分轴维度合法性
-  OP_CHECK_IF(activateDim_ < 0 || activateDim_ >= static_cast<int64_t>(xDimNum_),
+  OPS_CHECK(activateDim_ < 0 || activateDim_ >= static_cast<int64_t>(xDimNum_),
                   OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                     context_->GetNodeName(), "activate_dim",
                     std::to_string(activateDim_).c_str(),
@@ -204,24 +204,24 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetAttrActivateDim()
                      std::to_string(xDimNum_ - 1) + "]").c_str()),
                   return ge::GRAPH_FAILED);
   // 校验切分轴对应的shape是不是偶数
-  OP_CHECK_IF(xShape_.GetDim(activateDim_) % 2 != 0,
+  OPS_CHECK(xShape_.GetDim(activateDim_) % 2 != 0,
                   OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->GetNodeName(), "x",
-                      Ops::Base::ToString(xShape_).c_str(),
+                      ops::Shape2String(xShape_).c_str(),
                       ("the split dim(" + std::to_string(activateDim_)+ "dimension) must be even").c_str()),
                   return ge::GRAPH_FAILED);
 
   //如果activateDim不是尾轴，则不允许输入group
   if (activateDim_ != static_cast<int64_t>(xDimNum_ - 1)) {
-    OP_CHECK_IF(hasGroupIndex_ == true,
+    OPS_CHECK(hasGroupIndex_ == true,
                   OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "group_index and activate_dim",
                       ("group_index is not None, and activate_dim is " + std::to_string(activateDim_)).c_str(), "group_index must be None when activate_dim is not the last dim of x"),
                   return ge::GRAPH_FAILED);
   }
 
   // activate_dim对应在x的轴需要是偶数
-  OP_CHECK_IF((xShape_.GetDim(activateDim_) % 2) != 0,
+  OPS_CHECK((xShape_.GetDim(activateDim_) % 2) != 0,
       OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->GetNodeName(), "x",
-          Ops::Base::ToString(xShape_).c_str(),
+          ops::Shape2String(xShape_).c_str(),
           "the x dimension of activateDim must be even"),
       return ge::GRAPH_FAILED);
   return ge::GRAPH_SUCCESS;
@@ -230,41 +230,41 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetAttrActivateDim()
 ge::graphStatus DequantSwigluQuantV35DskTiling::CheckOutputY()
 {
     auto yDesc = context_->GetOutputDesc(Y_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, yDesc);
+    OPS_LOG_E_IF_NULL(context_, yDesc, return ge::GRAPH_FAILED);
     ge::DataType yDType = yDesc->GetDataType();
-    OP_CHECK_IF(OUTPUT_SUPPORT_DTYPE.find(yDType) == OUTPUT_SUPPORT_DTYPE.end(),
+    OPS_CHECK(OUTPUT_SUPPORT_DTYPE.find(yDType) == OUTPUT_SUPPORT_DTYPE.end(),
         OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "y",
             ge::TypeUtils::DataTypeToSerialString(yDType).c_str(),
             "int8, hifloat8, float8e4m3, float8e5m2, float4e2m1 or floate1m2"),
         return ge::GRAPH_FAILED);
     auto yStorageShape = context_->GetOutputShape(Y_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, yStorageShape);
+    OPS_LOG_E_IF_NULL(context_, yStorageShape, return ge::GRAPH_FAILED);
     auto& yShape = EnsureNotScalar(yStorageShape->GetStorageShape());
     const size_t yDimNum = yShape.GetDimNum();
     // 输出y是fp4类型时，y的尾轴对应的shape需要是偶数
     if (yDType == ge::DT_FLOAT4_E2M1 || yDType == ge::DT_FLOAT4_E1M2) {
-      OP_CHECK_IF((yShape.GetDim(xDimNum_ - 1) % 2) != 0,
+      OPS_CHECK((yShape.GetDim(xDimNum_ - 1) % 2) != 0,
         OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->GetNodeName(), "y",
-            Ops::Base::ToString(yShape).c_str(),
+            ops::Shape2String(yShape).c_str(),
             "The last dim of y must be even when the type of y is FP4X2_E2M1 or FP4X2_E1M2"),
         return ge::GRAPH_FAILED);
     }
-    OP_CHECK_IF(yDimNum != xDimNum_,
+    OPS_CHECK(yDimNum != xDimNum_,
         OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "y",
             std::to_string(yDimNum).c_str(),
             ("equal to x dimension " + std::to_string(xDimNum_)).c_str()),
         return ge::GRAPH_FAILED);
     for (size_t i = 0; i < yDimNum; i++) {
       if (static_cast<int>(i) != activateDim_){
-        OP_CHECK_IF(yShape.GetDim(i) != xShape_.GetDim(i),
+        OPS_CHECK(yShape.GetDim(i) != xShape_.GetDim(i),
             OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context_->GetNodeName(), "x and y",
-                (Ops::Base::ToString(xShape_) + "and" + Ops::Base::ToString(yShape)).c_str(),
+                (ops::Shape2String(xShape_) + "and" + ops::Shape2String(yShape)).c_str(),
                 ("dim[" + std::to_string(i) + "] of y must be equal to dim[" + std::to_string(i) + "] of x").c_str()),
             return ge::GRAPH_FAILED);
       } else {
-        OP_CHECK_IF(yShape.GetDim(i) != xShape_.GetDim(i) / SWI_FACTOR,
+        OPS_CHECK(yShape.GetDim(i) != xShape_.GetDim(i) / SWI_FACTOR,
             OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context_->GetNodeName(), "x and y",
-                Ops::Base::ToString(yShape).c_str(),
+                ops::Shape2String(yShape).c_str(),
                 ("dim[" + std::to_string(i) + "] of y must be equal to half of dim[" + std::to_string(i) + "] of x").c_str()),
             return ge::GRAPH_FAILED);
       }
@@ -276,62 +276,62 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckInputWeightScale()
 {
     auto wScaleDesc = context_->GetOptionalInputDesc(WEIGHT_SCALE_INDEX);
     auto xDesc = context_->GetInputDesc(X_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, xDesc);
+    OPS_LOG_E_IF_NULL(context_, xDesc, return ge::GRAPH_FAILED);
     ge::DataType xDType = xDesc->GetDataType();
     // 如果输入x是bf16 or float16，则weight_scale需要为空，非法性校验
     if (wScaleDesc != nullptr) {
-      OP_CHECK_IF(xDType == ge::DT_FLOAT16 || xDType == ge::DT_BF16,
+      OPS_CHECK(xDType == ge::DT_FLOAT16 || xDType == ge::DT_BF16,
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "weight_scale",
             "not None", "weight_scale must be None when x's datatype is in [bfloat16, float16]"),
         return ge::GRAPH_FAILED);
     }
 
     // 如果输入x是int32，则weight_scale必须有值，合法性校验
-    OP_CHECK_IF((xDType == ge::DT_INT32) && (wScaleDesc == nullptr),
+    OPS_CHECK((xDType == ge::DT_INT32) && (wScaleDesc == nullptr),
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "weight_scale",
             "None", "weight_scale must be not None when x's datatype is int32"),
         return ge::GRAPH_FAILED);
 
     // weight_scale不为空，进行判断
     if (wScaleDesc != nullptr) {
-      OP_CHECK_NULL_WITH_CONTEXT(context_, wScaleDesc);
+      OPS_LOG_E_IF_NULL(context_, wScaleDesc, return ge::GRAPH_FAILED);
       ge::DataType wScaleDType = wScaleDesc->GetDataType();
-      OP_CHECK_IF(wScaleDType != ge::DT_FLOAT,
+      OPS_CHECK(wScaleDType != ge::DT_FLOAT,
           OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "weight_scale",
               ge::TypeUtils::DataTypeToSerialString(wScaleDType).c_str(), "float32"),
           return ge::GRAPH_FAILED);
 
       auto wScaleStorageShape = context_->GetOptionalInputShape(WEIGHT_SCALE_INDEX);
-      OP_CHECK_NULL_WITH_CONTEXT(context_, wScaleStorageShape);
+      OPS_LOG_E_IF_NULL(context_, wScaleStorageShape, return ge::GRAPH_FAILED);
       auto& wScaleShape = EnsureNotScalar(wScaleStorageShape->GetStorageShape());
       const size_t wScaleDimNum = wScaleShape.GetDimNum();
-      OP_CHECK_IF(wScaleDimNum > 2,
+      OPS_CHECK(wScaleDimNum > 2,
           OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "weight_scale",
               std::to_string(wScaleDimNum).c_str(), "less than or equal to 2"),
           return ge::GRAPH_FAILED);
 
       if (wScaleDimNum == static_cast<size_t>(1)) {
-        OP_CHECK_IF(hasGroupIndex_ == true,
+        OPS_CHECK(hasGroupIndex_ == true,
           OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "group_index",
               "not None", "group_index should be none when weight_scale dimension is 1"),
           return ge::GRAPH_FAILED);
-        OP_CHECK_IF(wScaleShape.GetDim(0) != xShape_.GetDim(xDimNum_ - 1),
+        OPS_CHECK(wScaleShape.GetDim(0) != xShape_.GetDim(xDimNum_ - 1),
           OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->GetNodeName(), "weight_scale",
-              Ops::Base::ToString(wScaleShape).c_str(),
+              ops::Shape2String(wScaleShape).c_str(),
               ("The first dim of weight_scale must be the same as the last dim of x: " + std::to_string(xShape_.GetDim(xDimNum_ - 1))).c_str()),
           return ge::GRAPH_FAILED);
       }
       if (wScaleDimNum > static_cast<size_t>(1)) {
         if (hasGroupIndex_) {
-          OP_CHECK_IF(!(wScaleShape.GetDim(0) == groupIndexShape_.GetDim(0) && wScaleShape[wScaleDimNum - 1] == xShape_.GetDim(xDimNum_ - 1)),
-            OP_LOGE(context_->GetNodeName(),
+          OPS_CHECK(!(wScaleShape.GetDim(0) == groupIndexShape_.GetDim(0) && wScaleShape[wScaleDimNum - 1] == xShape_.GetDim(xDimNum_ - 1)),
+            OPS_LOG_E(context_->GetNodeName(),
                                             "weight_scale shape[0] must be equal to group_index shape[0], and shape[-1] must be equal to x shape[-1] "
                                             "when group_index exists, please check."),
             return ge::GRAPH_FAILED);
         } else {
-          OP_CHECK_IF(!(wScaleShape.GetDim(0) == 1 && wScaleShape.GetDim(wScaleDimNum - 1) == xShape_.GetDim(xDimNum_ - 1)) &&
+          OPS_CHECK(!(wScaleShape.GetDim(0) == 1 && wScaleShape.GetDim(wScaleDimNum - 1) == xShape_.GetDim(xDimNum_ - 1)) &&
                       !(wScaleShape.GetDim(0) == xShape_.GetDim(xDimNum_ - 1) && wScaleShape.GetDim(wScaleDimNum - 1) == 1),
-                      OP_LOGE(context_->GetNodeName(), "weight_scale shape must be in {[1, %ld], [%ld, 1]} when weight_scale dimension == 2 and group_index not exists,"
+                      OPS_LOG_E(context_->GetNodeName(), "weight_scale shape must be in {[1, %ld], [%ld, 1]} when weight_scale dimension == 2 and group_index not exists,"
                       "please check.", xShape_.GetDim(xDimNum_ - 1), xShape_.GetDim(xDimNum_ - 1)),
                       return ge::GRAPH_FAILED);
         }
@@ -345,27 +345,27 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckInputActScale()
 {
     auto aScaleDesc = context_->GetOptionalInputDesc(ACTIVATION_SCALE_INDEX);
     auto xDesc = context_->GetInputDesc(X_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, xDesc);
+    OPS_LOG_E_IF_NULL(context_, xDesc, return ge::GRAPH_FAILED);
     ge::DataType xDType = xDesc->GetDataType();
     // 当x：bfloat16 or float16时，activate_scale需要为空
     if (aScaleDesc != nullptr) {
-        OP_CHECK_IF(xDType == ge::DT_FLOAT16 || xDType == ge::DT_BF16,
+        OPS_CHECK(xDType == ge::DT_FLOAT16 || xDType == ge::DT_BF16,
           OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "activation_scale",
               "not None", "activate_scale must be None when x's datatype is in [bfloat16, float16]"),
           return ge::GRAPH_FAILED);
 
         ge::DataType aScaleDType = aScaleDesc->GetDataType();
-        OP_CHECK_IF(aScaleDType != ge::DT_FLOAT,
+        OPS_CHECK(aScaleDType != ge::DT_FLOAT,
             OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "activation_scale",
                 ge::TypeUtils::DataTypeToSerialString(aScaleDType).c_str(), "float32"),
             return ge::GRAPH_FAILED);
 
         auto aScaleStorageShape = context_->GetOptionalInputShape(ACTIVATION_SCALE_INDEX);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, aScaleStorageShape);
+        OPS_LOG_E_IF_NULL(context_, aScaleStorageShape, return ge::GRAPH_FAILED);
         auto& aScaleShape = EnsureNotScalar(aScaleStorageShape->GetStorageShape());
         const size_t aScaleDimNum = aScaleShape.GetDimNum();
 
-        OP_CHECK_IF(aScaleDimNum <= 0,
+        OPS_CHECK(aScaleDimNum <= 0,
             OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "activation_scale",
                 std::to_string(aScaleDimNum).c_str(), "greater than 0"),
             return ge::GRAPH_FAILED);
@@ -374,7 +374,7 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckInputActScale()
         // activation_scale的shape size与x除尾轴外的shape size一致
         int64_t aScaleSize = aScaleStorageShape->GetStorageShape().GetShapeSize();
         int64_t xSizeWithoutLastDim = xShape_.GetShapeSize() / xShape_.GetDim(xDimNum_ - 1);
-        OP_CHECK_IF(aScaleSize != xSizeWithoutLastDim,
+        OPS_CHECK(aScaleSize != xSizeWithoutLastDim,
                     OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(context_->GetNodeName(), "activation_scale",
                         std::to_string(aScaleSize).c_str(),
                         ("The shape size of activation_scale should be the same as x's shape size without last dim " + std::to_string(xSizeWithoutLastDim)).c_str()),
@@ -388,13 +388,13 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckInputBias()
 {
     auto biasDesc = context_->GetOptionalInputDesc(BIAS_INDEX);
     auto xDesc = context_->GetInputDesc(X_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, xDesc);
+    OPS_LOG_E_IF_NULL(context_, xDesc, return ge::GRAPH_FAILED);
     ge::DataType xDType = xDesc->GetDataType();
     // 首先判断bias不为空时，其数据类型是不是满足计算要求
     if (biasDesc != nullptr) {
       ge::DataType biasDtype = biasDesc->GetDataType();
       auto it = SUPPORT_BIAS_MODE.find(biasDtype);
-      OP_CHECK_IF(it == SUPPORT_BIAS_MODE.end(),
+      OPS_CHECK(it == SUPPORT_BIAS_MODE.end(),
             OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "bias",
                 ge::TypeUtils::DataTypeToSerialString(biasDtype).c_str(), "float16, float, bf16 or int32"),
             return ge::GRAPH_FAILED);
@@ -402,7 +402,7 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckInputBias()
       // 当前bias支持四种数据类型，但是有些bias类型仅支持x的特定类型
       // x：bf16, float16，bias不支持输入
       if (xDType == ge::DT_BF16 or xDType == ge::DT_FLOAT16) {
-        OP_CHECK_IF(BIAS_SUPPORT_DTYPE.find(biasDtype) != BIAS_SUPPORT_DTYPE.end(),
+        OPS_CHECK(BIAS_SUPPORT_DTYPE.find(biasDtype) != BIAS_SUPPORT_DTYPE.end(),
             OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "bias",
                 ge::TypeUtils::DataTypeToSerialString(biasDtype).c_str(),
                 "bias not support when the type of x is bf16 or float16"),
@@ -411,22 +411,22 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckInputBias()
 
       // 然后判断bias的维度是不是满足要求
       auto biasStorageShape = context_->GetOptionalInputShape(BIAS_INDEX);
-      OP_CHECK_NULL_WITH_CONTEXT(context_, biasStorageShape);
+      OPS_LOG_E_IF_NULL(context_, biasStorageShape, return ge::GRAPH_FAILED);
       auto& biasShape = EnsureNotScalar(biasStorageShape->GetStorageShape());
       const size_t biasDimNum = biasShape.GetDimNum();
-      OP_CHECK_IF(biasDimNum > static_cast<size_t>(2) || biasDimNum == static_cast<size_t>(0),
+      OPS_CHECK(biasDimNum > static_cast<size_t>(2) || biasDimNum == static_cast<size_t>(0),
             OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "bias",
                 std::to_string(biasDimNum).c_str(), "1D or 2D"),
             return ge::GRAPH_FAILED);
       // 当biasDimNum=1时
       if (biasDimNum == static_cast<size_t>(1)) {
-        OP_CHECK_IF(hasGroupIndex_ == true,
+        OPS_CHECK(hasGroupIndex_ == true,
                     OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->GetNodeName(), "group_index",
                         "not None", "group_index should be none when bias dimension is 1"),
                     return ge::GRAPH_FAILED);
-        OP_CHECK_IF(biasShape.GetDim(0) != xShape_.GetDim(xDimNum_ - 1),
+        OPS_CHECK(biasShape.GetDim(0) != xShape_.GetDim(xDimNum_ - 1),
             OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->GetNodeName(), "bias",
-                Ops::Base::ToString(biasShape).c_str(),
+                ops::Shape2String(biasShape).c_str(),
                 ("The last dimension of bias should be the same as the last dimension of x " +
                  std::to_string(xShape_.GetDim(xDimNum_ - 1))).c_str()),
             return ge::GRAPH_FAILED);
@@ -434,9 +434,9 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckInputBias()
 
       // 当biasDimNum=2时
       if (biasDimNum == static_cast<size_t>(2)) {
-        OP_CHECK_IF(biasShape.GetDim(1) != xShape_.GetDim(xDimNum_ - 1),
+        OPS_CHECK(biasShape.GetDim(1) != xShape_.GetDim(xDimNum_ - 1),
             OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->GetNodeName(), "bias",
-                Ops::Base::ToString(biasShape).c_str(),
+                ops::Shape2String(biasShape).c_str(),
                 ("The last dimension of bias should be the same as the last dimension of x " +
                  std::to_string(xShape_.GetDim(xDimNum_ - 1))).c_str()),
             return ge::GRAPH_FAILED);
@@ -448,11 +448,11 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckInputBias()
                       ") should be equal to the first dimension of group_index (" + std::to_string(groupNum_) +
                       "), please check";
                   OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                      context_->GetNodeName(), "bias", Ops::Base::ToString(biasShape).c_str(), reason.c_str());
+                      context_->GetNodeName(), "bias", ops::Shape2String(biasShape).c_str(), reason.c_str());
                   return ge::GRAPH_FAILED;
               }
           } else {
-            OP_CHECK_IF(biasShape.GetDim(0) != 1,
+            OPS_CHECK(biasShape.GetDim(0) != 1,
                 OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->GetNodeName(), "bias",
                 std::to_string(biasShape.GetDim(0)).c_str(),
                 "The first dimension of bias should be 1 when the dimension of bias is 2 and group_index does not exist"),
@@ -469,58 +469,58 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckInputQuantScale()
     auto qScaleDesc = context_->GetOptionalInputDesc(QUANT_SCALE_INDEX);
     if (qScaleDesc != nullptr) {
         ge::DataType qScaleDType = qScaleDesc->GetDataType();
-        OP_CHECK_IF(QUANT_SCALE_SUPPORT_DTYPE.find(qScaleDType) == QUANT_SCALE_SUPPORT_DTYPE.end(),
+        OPS_CHECK(QUANT_SCALE_SUPPORT_DTYPE.find(qScaleDType) == QUANT_SCALE_SUPPORT_DTYPE.end(),
             OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "quant_scale",
                 ge::TypeUtils::DataTypeToSerialString(qScaleDType).c_str(), "float32"),
             return ge::GRAPH_FAILED);
 
         auto qScaleStorageShape = context_->GetOptionalInputShape(QUANT_SCALE_INDEX);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, qScaleStorageShape);
+        OPS_LOG_E_IF_NULL(context_, qScaleStorageShape, return ge::GRAPH_FAILED);
         auto& qScaleShape = EnsureNotScalar(qScaleStorageShape->GetStorageShape());
         const size_t qScaleDimNum = qScaleShape.GetDimNum();
-        OP_CHECK_IF(qScaleDimNum > 2,
+        OPS_CHECK(qScaleDimNum > 2,
             OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "quant_scale",
                 std::to_string(qScaleDimNum).c_str(), "less than or equal to 2"),
             return ge::GRAPH_FAILED);
 
         // 获取y的shape
         auto yStorageShape = context_->GetOutputShape(Y_INDEX);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, yStorageShape);
+        OPS_LOG_E_IF_NULL(context_, yStorageShape, return ge::GRAPH_FAILED);
         auto& yShape = EnsureNotScalar(yStorageShape->GetStorageShape());
         if (hasGroupIndex_) {
           if (quantMode_ == 0) {
-            OP_CHECK_IF(qScaleShape.GetDim(0) != (groupIndexShape_.GetDim(0)),
-                        OP_LOGE(context_->GetNodeName(),
+            OPS_CHECK(qScaleShape.GetDim(0) != (groupIndexShape_.GetDim(0)),
+                        OPS_LOG_E(context_->GetNodeName(),
                         "quant_scale shape[0] must be equal to group_index shape[0] when static_quant and group_index exists, please check."),
                         return ge::GRAPH_FAILED);
             if (qScaleDimNum == DIM_TWO) {
-              OP_CHECK_IF(!((qScaleShape.GetDim(qScaleDimNum - 1) == yShape.GetDim(xDimNum_ - 1)) || (qScaleShape.GetDim(qScaleDimNum - 1) == 1)),
-                          OP_LOGE(context_->GetNodeName(),
+              OPS_CHECK(!((qScaleShape.GetDim(qScaleDimNum - 1) == yShape.GetDim(xDimNum_ - 1)) || (qScaleShape.GetDim(qScaleDimNum - 1) == 1)),
+                          OPS_LOG_E(context_->GetNodeName(),
                           "quant_scale shape[-1] must be equal to or can be broadcast to y shape[-1] when static_quant and group_index exists, please check."),
                           return ge::GRAPH_FAILED);
             }
           } else if (quantMode_ == 1) {
-            OP_CHECK_IF(qScaleShape.GetDim(0) != groupIndexShape_.GetDim(0) || qScaleShape.GetDim(qScaleDimNum - 1) != yShape.GetDim(xDimNum_ - 1),
-                        OP_LOGE(context_->GetNodeName(),
+            OPS_CHECK(qScaleShape.GetDim(0) != groupIndexShape_.GetDim(0) || qScaleShape.GetDim(qScaleDimNum - 1) != yShape.GetDim(xDimNum_ - 1),
+                        OPS_LOG_E(context_->GetNodeName(),
                         "quant_scale shape must be [ group_index_shape[0], y_shape[-1] ] when dynamic quant and group_index exists, please check."),
                         return ge::GRAPH_FAILED);
           }
           quantIsOne_ = (qScaleDimNum == DIM_TWO && qScaleShape.GetDim(qScaleDimNum - 1) == yShape.GetDim(xDimNum_ - 1)) ? 0 : 1;
         } else {
           if (qScaleDimNum == DIM_TWO) {
-            OP_CHECK_IF(qScaleShape.GetDim(0) != 1,
-                        OP_LOGE(context_->GetNodeName(),
+            OPS_CHECK(qScaleShape.GetDim(0) != 1,
+                        OPS_LOG_E(context_->GetNodeName(),
                         "if dim of quant_scale is 2, shape[0] must be [1] when group_index not exists, please check."),
                         return ge::GRAPH_FAILED);
           }
           if (quantMode_ == 0) {
-            OP_CHECK_IF(qScaleShape.GetDim(0) != 1 && qScaleShape.GetDim(0) != yShape.GetDim(xDimNum_ - 1),
-                        OP_LOGE(context_->GetNodeName(),
+            OPS_CHECK(qScaleShape.GetDim(0) != 1 && qScaleShape.GetDim(0) != yShape.GetDim(xDimNum_ - 1),
+                        OPS_LOG_E(context_->GetNodeName(),
                         "quant_scale shape[0] must be or can be broadcast to y shape[-1] when static_quant and group_index not exists, please check."),
                         return ge::GRAPH_FAILED);
           } else if (quantMode_ == 1) {
-            OP_CHECK_IF(qScaleShape.GetDim(qScaleDimNum - 1) != yShape.GetDim(xDimNum_ - 1),
-                        OP_LOGE(context_->GetNodeName(),
+            OPS_CHECK(qScaleShape.GetDim(qScaleDimNum - 1) != yShape.GetDim(xDimNum_ - 1),
+                        OPS_LOG_E(context_->GetNodeName(),
                         "quant_scale shape[-1] must be equal to y shape[-1] when dynamic_quant and group_index not exists, please check."),
                         return ge::GRAPH_FAILED);
           }
@@ -529,8 +529,8 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckInputQuantScale()
         hasQuantScale_ = true;
     }
     if (quantMode_ == 0) {
-      OP_CHECK_IF(!hasQuantScale_,
-                  OP_LOGE(context_->GetNodeName(), "quant_scale must exist when static_quant, please check."),
+      OPS_CHECK(!hasQuantScale_,
+                  OPS_LOG_E(context_->GetNodeName(), "quant_scale must exist when static_quant, please check."),
                   return ge::GRAPH_FAILED);
     }
     return ge::GRAPH_SUCCESS;
@@ -550,45 +550,45 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckInputQuantOffset()
     */
     if (qOffsetDesc != nullptr) {
       ge::DataType qOffsetDType = qOffsetDesc->GetDataType();
-      OP_CHECK_IF(QUANT_OFFSET_SUPPORT_DTYPE.find(qOffsetDType) == QUANT_OFFSET_SUPPORT_DTYPE.end(),
+      OPS_CHECK(QUANT_OFFSET_SUPPORT_DTYPE.find(qOffsetDType) == QUANT_OFFSET_SUPPORT_DTYPE.end(),
                   OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "quant_offset",
                       ge::TypeUtils::DataTypeToSerialString(qOffsetDType).c_str(), "float32"),
             return ge::GRAPH_FAILED);
-      OP_CHECK_IF(quantMode_ != 0,
+      OPS_CHECK(quantMode_ != 0,
                   OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "quant_offset",
                       "not None", "quant_offset only be supported when static quant, but current quant mode is dynamic quant, quant_offset should be None."),
                   return ge::GRAPH_FAILED);
       auto qOffsetStorageShape = context_->GetOptionalInputShape(QUANT_OFFSET_INDEX);
-      OP_CHECK_NULL_WITH_CONTEXT(context_, qOffsetStorageShape);
+      OPS_LOG_E_IF_NULL(context_, qOffsetStorageShape, return ge::GRAPH_FAILED);
       auto& qOffsetShape = EnsureNotScalar(qOffsetStorageShape->GetStorageShape());
       const size_t qOffsetDimNum = qOffsetShape.GetDimNum();
-      OP_CHECK_IF(qOffsetDimNum > 2,
+      OPS_CHECK(qOffsetDimNum > 2,
                   OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "quant_offset",
                       std::to_string(qOffsetDimNum).c_str(), "less than or equal to 2"),
                   return ge::GRAPH_FAILED);
       auto yStorageShape = context_->GetOutputShape(Y_INDEX);
-      OP_CHECK_NULL_WITH_CONTEXT(context_, yStorageShape);
+      OPS_LOG_E_IF_NULL(context_, yStorageShape, return ge::GRAPH_FAILED);
       auto& yShape = EnsureNotScalar(yStorageShape->GetStorageShape());
       if (hasGroupIndex_) {
-        OP_CHECK_IF(qOffsetShape.GetDim(0) != (groupIndexShape_.GetDim(0)),
-                    OP_LOGE(context_->GetNodeName(),
+        OPS_CHECK(qOffsetShape.GetDim(0) != (groupIndexShape_.GetDim(0)),
+                    OPS_LOG_E(context_->GetNodeName(),
                     "quant_offset shape[0] must be equal to group_index shape[0] when group_index exists, please check."),
                     return ge::GRAPH_FAILED);
         if (qOffsetDimNum == DIM_TWO) {
-              OP_CHECK_IF(qOffsetShape.GetDim(qOffsetDimNum - 1) != 1 && qOffsetShape.GetDim(qOffsetDimNum - 1) != yShape.GetDim(xDimNum_ - 1),
-                          OP_LOGE(context_->GetNodeName(),
+              OPS_CHECK(qOffsetShape.GetDim(qOffsetDimNum - 1) != 1 && qOffsetShape.GetDim(qOffsetDimNum - 1) != yShape.GetDim(xDimNum_ - 1),
+                          OPS_LOG_E(context_->GetNodeName(),
                           "quant_offset shape[-1] must be equal to or can be broadcast to y shape[-1] when group_index exists, please check."),
                           return ge::GRAPH_FAILED);
         }
       } else {
         if (qOffsetDimNum == DIM_TWO) {
-            OP_CHECK_IF(qOffsetShape.GetDim(0) != 1,
-                        OP_LOGE(context_->GetNodeName(),
+            OPS_CHECK(qOffsetShape.GetDim(0) != 1,
+                        OPS_LOG_E(context_->GetNodeName(),
                         "if dim of quant_offset is 2, shape[0] must be [1] when group_index not exists, please check."),
                         return ge::GRAPH_FAILED);
           }
-          OP_CHECK_IF(qOffsetShape.GetDim(0) != 1 && qOffsetShape.GetDim(0) != yShape.GetDim(xDimNum_ - 1),
-                      OP_LOGE(context_->GetNodeName(),
+          OPS_CHECK(qOffsetShape.GetDim(0) != 1 && qOffsetShape.GetDim(0) != yShape.GetDim(xDimNum_ - 1),
+                      OPS_LOG_E(context_->GetNodeName(),
                       "quant_offset shape[0] must be or can be broadcast to y shape[-1] when static_quant and group_index not exists, please check."),
                       return ge::GRAPH_FAILED);
       }
@@ -603,13 +603,13 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckForStaticQuant() // 静态�
       return ge::GRAPH_SUCCESS;
     }
     auto qScaleStorageShape = context_->GetOptionalInputShape(QUANT_SCALE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, qScaleStorageShape);
+    OPS_LOG_E_IF_NULL(context_, qScaleStorageShape, return ge::GRAPH_FAILED);
     int64_t qScaleSize = qScaleStorageShape->GetStorageShape().GetShapeSize();
     auto qOffsetStorageShape = context_->GetOptionalInputShape(QUANT_OFFSET_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, qOffsetStorageShape);
+    OPS_LOG_E_IF_NULL(context_, qOffsetStorageShape, return ge::GRAPH_FAILED);
     int64_t qOffsetSize = qOffsetStorageShape->GetStorageShape().GetShapeSize();
-    OP_CHECK_IF(qScaleSize != qOffsetSize,
-                OP_LOGE(context_->GetNodeName(), "quant_scale size should be equal to quant_offset size, please check."),
+    OPS_CHECK(qScaleSize != qOffsetSize,
+                OPS_LOG_E(context_->GetNodeName(), "quant_scale size should be equal to quant_offset size, please check."),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -617,30 +617,30 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckForStaticQuant() // 静态�
 ge::graphStatus DequantSwigluQuantV35DskTiling::CheckOutputScale()
 {
     auto scaleDesc = context_->GetOutputDesc(SCALE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, scaleDesc);
+    OPS_LOG_E_IF_NULL(context_, scaleDesc, return ge::GRAPH_FAILED);
     ge::DataType scaleDType = scaleDesc->GetDataType();
-    OP_CHECK_IF(scaleDType != ge::DT_FLOAT,
+    OPS_CHECK(scaleDType != ge::DT_FLOAT,
         OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "scale",
             ge::TypeUtils::DataTypeToSerialString(scaleDType).c_str(), "float32"),
         return ge::GRAPH_FAILED);
     auto scaleStorageShape = context_->GetOutputShape(SCALE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, scaleStorageShape);
+    OPS_LOG_E_IF_NULL(context_, scaleStorageShape, return ge::GRAPH_FAILED);
     auto& scaleShape = EnsureNotScalar(scaleStorageShape->GetStorageShape());
     const size_t scaleDimNum = scaleShape.GetDimNum();
 
     auto yStorageShape = context_->GetOutputShape(Y_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, yStorageShape);
+    OPS_LOG_E_IF_NULL(context_, yStorageShape, return ge::GRAPH_FAILED);
     auto& yShape = EnsureNotScalar(yStorageShape->GetStorageShape());
     const size_t yDimNum = yShape.GetDimNum();
 
-    OP_CHECK_IF(scaleDimNum != (yDimNum - 1),
-        OP_LOGE(context_->GetNodeName(),
+    OPS_CHECK(scaleDimNum != (yDimNum - 1),
+        OPS_LOG_E(context_->GetNodeName(),
                                         "scale dimension should be only 1 less than y dimension, please check."),
         return ge::GRAPH_FAILED);
 
     for (size_t i = 0; i < scaleDimNum; i++) {
-        OP_CHECK_IF(scaleShape[i] != yShape[i],
-            OP_LOGE(context_->GetNodeName(),
+        OPS_CHECK(scaleShape[i] != yShape[i],
+            OPS_LOG_E(context_->GetNodeName(),
                                             "scale shape[%zu] must be equal to y shape[%zu], please check.", i, i),
             return ge::GRAPH_FAILED);
     }
@@ -650,14 +650,14 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::CheckOutputScale()
 ge::graphStatus DequantSwigluQuantV35DskTiling::GetAttr()
 {
   auto* attrs = context_->GetAttrs();
-  OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+  OPS_LOG_E_IF_NULL(context_, attrs, return ge::GRAPH_FAILED);
 
   auto* attrActivateLeft = attrs->GetAttrPointer<bool>(ATTR_ACTIVATE_LEFT_INDEX);
   actRight_ = (attrActivateLeft == nullptr || *attrActivateLeft == false) ? 1 : 0;
   const char* attrQuantMode = attrs->GetAttrPointer<char>(ATTR_QUANT_MODE_INDEX);
   std::string quantMode = attrQuantMode == nullptr ? "static" : attrQuantMode;
   auto it = SUPPORT_QUANT_MODE.find(quantMode);
-  OP_CHECK_IF(it == SUPPORT_QUANT_MODE.end(),
+  OPS_CHECK(it == SUPPORT_QUANT_MODE.end(),
                   OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                       context_->GetNodeName(), "quant_mode",
                       quantMode.c_str(), "quant_mode only support [dynamic] or [static]"),
@@ -667,7 +667,7 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetAttr()
   auto* attrDstType = attrs->GetAttrPointer<int>(ATTR_DST_TYPE_INDEX);
   // 类型校验,防止空指针
   dstType_ = (attrDstType != nullptr) ? *attrDstType : 2; // 默认是2，也即对应输出类型为int8
-  OP_CHECK_IF(dstType_ != 2 && dstType_ != 34 && dstType_ != 35 && dstType_ != 36 && dstType_ != 40 && dstType_ != 41,
+  OPS_CHECK(dstType_ != 2 && dstType_ != 34 && dstType_ != 35 && dstType_ != 36 && dstType_ != 40 && dstType_ != 41,
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                     context_->GetNodeName(), "dst_type",
                     std::to_string(dstType_).c_str(), "dst_type only support [2, 34, 35, 36, 40, 41]"),
@@ -676,7 +676,7 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetAttr()
   const char* attrRoundMode = attrs->GetAttrPointer<char>(ATTR_ROUND_MODE_INDEX);
   std::string roundMode = attrRoundMode == nullptr ? "rint" : attrRoundMode;
   auto roundModeIt = SUPPORT_ROUND_MODE.find(roundMode);
-  OP_CHECK_IF(roundModeIt == SUPPORT_ROUND_MODE.end(),
+  OPS_CHECK(roundModeIt == SUPPORT_ROUND_MODE.end(),
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                     context_->GetNodeName(), "round_mode",
                     roundMode.c_str(), "round_mode only support [rint, round, floor, ceil, trunc]"),
@@ -684,18 +684,18 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetAttr()
   roundMode_ = roundModeIt->second;
   // y:[int8, float8]，仅支持rint，y:[float4]，五种类型都支持
   auto yDesc = context_->GetOutputDesc(Y_INDEX);
-  OP_CHECK_NULL_WITH_CONTEXT(context_, yDesc);
+  OPS_LOG_E_IF_NULL(context_, yDesc, return ge::GRAPH_FAILED);
   ge::DataType yDType = yDesc->GetDataType();
   // 校验y属于int8和float8时，roundMode是不是rint
   if (yDType != ge::DT_HIFLOAT8) {
-    OP_CHECK_IF((yDType == ge::DT_INT8 || yDType == ge::DT_FLOAT8_E5M2 || yDType == ge::DT_FLOAT8_E4M3FN) && roundMode_ != 0,
+    OPS_CHECK((yDType == ge::DT_INT8 || yDType == ge::DT_FLOAT8_E5M2 || yDType == ge::DT_FLOAT8_E4M3FN) && roundMode_ != 0,
                  OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                      context_->GetNodeName(), "round_mode",
                      roundMode.c_str(), "round_mode only support [rint] when the type of y in [int8, float8]"),
                  return ge::GRAPH_FAILED);
   } else {
     // 校验y属于hifloat8时，roundMode是不是round
-    OP_CHECK_IF(roundMode_ != 1,
+    OPS_CHECK(roundMode_ != 1,
                  OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                      context_->GetNodeName(), "round_mode",
                      roundMode.c_str(), "round_mode only support [round] when the type of y in [hifloat8]"),
@@ -703,14 +703,14 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetAttr()
   }
   auto* attrSwigluMode = attrs->GetAttrPointer<int>(ATTR_SWIGLU_MODE_INDEX);
   swigluMode_ = (attrSwigluMode == nullptr) ? 0 : *attrSwigluMode;
-  OP_CHECK_IF(swigluMode_ != 0 && swigluMode_ != 1,
+  OPS_CHECK(swigluMode_ != 0 && swigluMode_ != 1,
               OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                   context_->GetNodeName(), "swigluMode",
                   std::to_string(swigluMode_).c_str(), "swigluMode only support [0, 1]"),
               return ge::GRAPH_FAILED);
   auto* attrClampLimit = attrs->GetAttrPointer<float>(ATTR_CLAMP_LIMIT_INDEX);
   clampLimit_ = (attrClampLimit == nullptr) ? CLAMP_LIMIT_DEFAULT : *attrClampLimit;
-  OP_CHECK_IF(!(clampLimit_ >= 0.0),
+  OPS_CHECK(!(clampLimit_ >= 0.0),
               OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                   context_->GetNodeName(), "clamp_limit",
                   std::to_string(clampLimit_).c_str(), "clamp_limit should be non-negative"),
@@ -723,34 +723,34 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetAttr()
 }
 
 ge::graphStatus DequantSwigluQuantV35DskTiling::GetShapeAttrsInfo() {
-    OP_CHECK_IF(context_ == nullptr, OP_LOGE("DequantSwigluQuant", "context is null."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(GetInputX() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "get input x failed."),
+    OPS_CHECK(context_ == nullptr, OPS_LOG_E("DequantSwigluQuant", "context is null."), return ge::GRAPH_FAILED);
+    OPS_CHECK(GetInputX() != ge::GRAPH_SUCCESS, OPS_LOG_E(context_->GetNodeName(), "get input x failed."),
                     return ge::GRAPH_FAILED);
-    OP_CHECK_IF(GetInputGroupIndex() != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "get input group_index failed."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(GetAttrActivateDim() != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "get attr activate_dim failed."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(GetAttr() != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "get attr failed."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(CheckOutputY() != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "check output y failed."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(CheckInputWeightScale() != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "check input weight_scale failed."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(CheckInputActScale() != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "check input activation_scale failed."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(CheckInputBias() != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "check input bias failed."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(CheckInputQuantScale() != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "check input quant_scale failed."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(CheckInputQuantOffset() != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "check input quant_offset failed."), return ge::GRAPH_FAILED);
+    OPS_CHECK(GetInputGroupIndex() != ge::GRAPH_SUCCESS,
+                    OPS_LOG_E(context_->GetNodeName(), "get input group_index failed."), return ge::GRAPH_FAILED);
+    OPS_CHECK(GetAttrActivateDim() != ge::GRAPH_SUCCESS,
+                    OPS_LOG_E(context_->GetNodeName(), "get attr activate_dim failed."), return ge::GRAPH_FAILED);
+    OPS_CHECK(GetAttr() != ge::GRAPH_SUCCESS,
+                    OPS_LOG_E(context_->GetNodeName(), "get attr failed."), return ge::GRAPH_FAILED);
+    OPS_CHECK(CheckOutputY() != ge::GRAPH_SUCCESS,
+                    OPS_LOG_E(context_->GetNodeName(), "check output y failed."), return ge::GRAPH_FAILED);
+    OPS_CHECK(CheckInputWeightScale() != ge::GRAPH_SUCCESS,
+                    OPS_LOG_E(context_->GetNodeName(), "check input weight_scale failed."), return ge::GRAPH_FAILED);
+    OPS_CHECK(CheckInputActScale() != ge::GRAPH_SUCCESS,
+                    OPS_LOG_E(context_->GetNodeName(), "check input activation_scale failed."), return ge::GRAPH_FAILED);
+    OPS_CHECK(CheckInputBias() != ge::GRAPH_SUCCESS,
+                    OPS_LOG_E(context_->GetNodeName(), "check input bias failed."), return ge::GRAPH_FAILED);
+    OPS_CHECK(CheckInputQuantScale() != ge::GRAPH_SUCCESS,
+                    OPS_LOG_E(context_->GetNodeName(), "check input quant_scale failed."), return ge::GRAPH_FAILED);
+    OPS_CHECK(CheckInputQuantOffset() != ge::GRAPH_SUCCESS,
+                    OPS_LOG_E(context_->GetNodeName(), "check input quant_offset failed."), return ge::GRAPH_FAILED);
     if (quantMode_ == 0) {
-        OP_CHECK_IF(CheckForStaticQuant() != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "check input quant_scale and quant_offset size failed."),
+        OPS_CHECK(CheckForStaticQuant() != ge::GRAPH_SUCCESS,
+                    OPS_LOG_E(context_->GetNodeName(), "check input quant_scale and quant_offset size failed."),
                     return ge::GRAPH_FAILED);
     }
-    OP_CHECK_IF(CheckOutputScale() != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "check output scale failed."), return ge::GRAPH_FAILED);
+    OPS_CHECK(CheckOutputScale() != ge::GRAPH_SUCCESS,
+                    OPS_LOG_E(context_->GetNodeName(), "check output scale failed."), return ge::GRAPH_FAILED);
 
     int64_t xTotalNum = xShape_.GetShapeSize();
     inDimy_ = xShape_.GetDim(xDimNum_ - 1);
@@ -766,7 +766,7 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetShapeAttrsInfo() {
       isSpecialCoreCut_ = 1;
     }
     auto shapeY = context_->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, shapeY);
+    OPS_LOG_E_IF_NULL(context_, shapeY, return ge::GRAPH_FAILED);
     const gert::Shape& outputShapeY = shapeY->GetStorageShape();
     outDimy_ = outputShapeY.GetDim(xDimNum_ - 1); // 输出y的-1轴对应的shape
     return ge::GRAPH_SUCCESS;
@@ -774,7 +774,7 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetShapeAttrsInfo() {
 
 bool DequantSwigluQuantV35DskTiling::IsCapable() {
   if (static_cast<size_t>(activateDim_) != xDimNum_ - static_cast<size_t>(1)) {
-    OP_LOGI(context_->GetNodeName(), "transform tiling template 2!");
+    OPS_LOG_I(context_->GetNodeName(), "transform tiling template 2!");
     return false;
   }
   return true;
@@ -915,14 +915,14 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::DoOpTilingNotFull() {
   tilingData_.set_gluAlpha(gluAlpha_);
   tilingData_.set_gluBias(gluBias_);
 
-  OP_LOGI(context_->GetNodeName(), "inDimx is %ld, inDimy is %ld, outDimy is %ld, UbFactorDimx is %ld, UbFactorDimy is %ld, usedCoreNum is %ld, maxCoreNum is %ld, \
+  OPS_LOG_I(context_->GetNodeName(), "inDimx is %ld, inDimy is %ld, outDimy is %ld, UbFactorDimx is %ld, UbFactorDimy is %ld, usedCoreNum is %ld, maxCoreNum is %ld, \
 	     inGroupNum is %ld, quantMode is %ld, actRight is %ld, dstType is %ld, roundMode is %ld, activateDim is %ld, loopTimesPerRow is %ld, \
 	     tailPerRow is %ld, swiGluMode is %ld, biasMode is %ld, groupIndexMode is %ld, quantIsOne is %ld, clampLimit is %f, gluAlpha is %f, gluBias is %f", \
        tilingData_.get_inDimx(), tilingData_.get_inDimy(), tilingData_.get_outDimy(), tilingData_.get_UbFactorDimx(), tilingData_.get_UbFactorDimy(), \
 	     tilingData_.get_usedCoreNum(), tilingData_.get_maxCoreNum(), tilingData_.get_inGroupNum(), tilingData_.get_quantMode(), tilingData_.get_actRight(), tilingData_.get_dstType(), \
 	     tilingData_.get_roundMode(), tilingData_.get_activateDim(), tilingData_.get_loopTimesPerRow(), tilingData_.get_tailPerRow(), tilingData_.get_swiGluMode(), \
        tilingData_.get_biasMode(), tilingData_.get_groupIndexMode(), tilingData_.get_quantIsOne(), tilingData_.get_clampLimit(), tilingData_.get_gluAlpha(), tilingData_.get_gluBias());
-  OP_LOGI(context_->GetNodeName(), "tilingKey_ is %ld, speGroupType is %ld, isSpecialCoreCut is %ld", tilingKey_, speGroupType_, isSpecialCoreCut_);
+  OPS_LOG_I(context_->GetNodeName(), "tilingKey_ is %ld, speGroupType is %ld, isSpecialCoreCut is %ld", tilingKey_, speGroupType_, isSpecialCoreCut_);
 
   return ge::GRAPH_SUCCESS;
 }
@@ -1004,14 +1004,14 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::DoOpTiling() {
   // ubFactorDimX: ub最多可以处理多少行数据
   int64_t ubFactorDimx = ubAvailable / denominator;
   ubFactorDimx = std::min(ubFactorDimx, inDimx_);
-  OP_CHECK_IF(ubFactorDimx < 1,
-        OP_LOGE(context_->GetNodeName(), "x last dim:%ld is too large to full load", inDimy_),
+  OPS_CHECK(ubFactorDimx < 1,
+        OPS_LOG_E(context_->GetNodeName(), "x last dim:%ld is too large to full load", inDimy_),
         return ge::GRAPH_FAILED);
   maxPreCore_ = std::min(maxPreCore_, (inDimx_ + ubFactorDimx - 1) / ubFactorDimx);
-  OP_LOGI(context_->GetNodeName(), "start maxPreCore_ is %ld ", maxPreCore_);
+  OPS_LOG_I(context_->GetNodeName(), "start maxPreCore_ is %ld ", maxPreCore_);
   if (isSpecialCoreCut_ == static_cast<int64_t>(1)) {
       maxPreCore_ = std::min(static_cast<int64_t>(coreNum_), static_cast<int64_t>(inDimx_));
-      OP_LOGI(context_->GetNodeName(), "after maxPreCore_ is %ld ", maxPreCore_);
+      OPS_LOG_I(context_->GetNodeName(), "after maxPreCore_ is %ld ", maxPreCore_);
   }
 
   auto quantScaleDesc = context_->GetOptionalInputDesc(QUANT_SCALE_INDEX);
@@ -1051,14 +1051,14 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::DoOpTiling() {
   tilingData_.set_gluBias(gluBias_);
   tilingData_.set_speGroupType(speGroupType_);
   tilingData_.set_isSpecialCoreCut(isSpecialCoreCut_);
-  OP_LOGI(context_->GetNodeName(), "inDimx is %ld, inDimy is %ld, outDimy is %ld, UbFactorDimx is %ld, UbFactorDimy is %ld, usedCoreNum is %ld, maxCoreNum is %ld, \
+  OPS_LOG_I(context_->GetNodeName(), "inDimx is %ld, inDimy is %ld, outDimy is %ld, UbFactorDimx is %ld, UbFactorDimy is %ld, usedCoreNum is %ld, maxCoreNum is %ld, \
 	     inGroupNum is %ld, quantMode is %ld, actRight is %ld, dstType is %ld, roundMode is %ld, activateDim is %ld, swiGluMode is %ld, \
 	     biasMode is %ld, groupIndexMode is %ld, biasMode is %ld, groupIndexMode is %ld, quantIsOne is %ld, clampLimit is %f, gluAlpha is %f, gluBias is %f", \
        tilingData_.get_inDimx(), tilingData_.get_inDimy(), tilingData_.get_outDimy(), tilingData_.get_UbFactorDimx(), tilingData_.get_UbFactorDimy(), \
 	     tilingData_.get_usedCoreNum(), tilingData_.get_maxCoreNum(), tilingData_.get_inGroupNum(), tilingData_.get_quantMode(), tilingData_.get_actRight(), tilingData_.get_dstType(), \
 	     tilingData_.get_roundMode(), tilingData_.get_activateDim(), tilingData_.get_swiGluMode(), tilingData_.get_biasMode(), tilingData_.get_groupIndexMode(), \
        tilingData_.get_biasMode(), tilingData_.get_groupIndexMode(), tilingData_.get_quantIsOne(), tilingData_.get_clampLimit(), tilingData_.get_gluAlpha(), tilingData_.get_gluBias());
-  OP_LOGI(context_->GetNodeName(), "tilingKey_ is %ld, speGroupType is %ld, isSpecialCoreCut is %ld", tilingKey_, speGroupType_, isSpecialCoreCut_);
+  OPS_LOG_I(context_->GetNodeName(), "tilingKey_ is %ld, speGroupType is %ld, isSpecialCoreCut is %ld", tilingKey_, speGroupType_, isSpecialCoreCut_);
 
   return ge::GRAPH_SUCCESS;
 }
@@ -1077,7 +1077,7 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetWorkspaceSize() {
   if (outDimy_ > Y_LAST_DIM_FULL_LOAD_MAX_VALUE && quantMode_ == 1) {
     usrSize = maxPreCore_ * outDimy_ * sizeof(float);
   }
-  OP_LOGI(context_->GetNodeName(), "usrSize is %u", usrSize);
+  OPS_LOG_I(context_->GetNodeName(), "usrSize is %u", usrSize);
   workspaceSize_ = SYS_WORK_SPACE_SIZE + usrSize;
   return ge::GRAPH_SUCCESS;
 }
@@ -1086,9 +1086,9 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::PostTiling() {
   context_->SetTilingKey(GetTilingKey());
   context_->SetBlockDim(maxPreCore_);
   size_t* workspaces = context_->GetWorkspaceSizes(1);
-  OP_CHECK_NULL_WITH_CONTEXT(context_, workspaces);
+  OPS_LOG_E_IF_NULL(context_, workspaces, return ge::GRAPH_FAILED);
   workspaces[0] = workspaceSize_;
-  OP_LOGI(context_->GetNodeName(), "workspace is %lu, SetBlockDim is %ld", workspaceSize_, maxPreCore_);
+  OPS_LOG_I(context_->GetNodeName(), "workspace is %lu, SetBlockDim is %ld", workspaceSize_, maxPreCore_);
   tilingData_.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
   context_->GetRawTilingData()->SetDataSize(tilingData_.GetDataSize());
   return ge::GRAPH_SUCCESS;
@@ -1099,7 +1099,7 @@ ge::graphStatus DequantSwigluQuantV35NlastTiling::GetPlatformInfo()
   auto platformInfo = context_->GetPlatformInfo();
   if (platformInfo == nullptr) {
     auto compileInfoPtr = static_cast<const DequantSwigluQuantCompileInfo*>(context_->GetCompileInfo());
-    OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context_, "compile info is null"),
+    OPS_CHECK(compileInfoPtr == nullptr, OPS_LOG_E(context_, "compile info is null"),
                     return ge::GRAPH_FAILED);
     coreNum_ = compileInfoPtr->coreNum;
     ubSize_ = compileInfoPtr->ubSize;
@@ -1135,11 +1135,11 @@ void DequantSwigluQuantV35NlastTiling::FusedShape()
 ge::graphStatus DequantSwigluQuantV35NlastTiling::GetShapeAttrsInfo()
 {
   auto xStorageShape = context_->GetInputShape(X_INDEX);
-  OP_CHECK_NULL_WITH_CONTEXT(context_, xStorageShape);
+  OPS_LOG_E_IF_NULL(context_, xStorageShape, return ge::GRAPH_FAILED);
   xShape_ = EnsureNotScalar(xStorageShape->GetStorageShape());
 
   auto* attrs = context_->GetAttrs();
-  OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+  OPS_LOG_E_IF_NULL(context_, attrs, return ge::GRAPH_FAILED);
   auto* attrActivateLeft = attrs->GetAttrPointer<bool>(ATTR_ACTIVATE_LEFT_INDEX);
   actRight_ = (attrActivateLeft == nullptr || *attrActivateLeft == false) ? 1 : 0;
 
@@ -1238,7 +1238,7 @@ ge::graphStatus DequantSwigluQuantV35NlastTiling::DoOpTiling()
 {
   DoBlockSplit();
   if (!DoUbSplit()) {
-    OP_LOGE(context_->GetNodeName(), "UB size cannot load last dim of input x, return failed.");
+    OPS_LOG_E(context_->GetNodeName(), "UB size cannot load last dim of input x, return failed.");
     return ge::GRAPH_FAILED;
   }
   int64_t ubLoopOfFormerBlock0 = (blockFormer0_ + ubFormer0_ - 1) / ubFormer0_;
@@ -1304,9 +1304,9 @@ ge::graphStatus DequantSwigluQuantV35NlastTiling::PostTiling() {
   context_->SetTilingKey(GetTilingKey());
   context_->SetBlockDim(blockNum_);
   size_t* workspaces = context_->GetWorkspaceSizes(1);
-  OP_CHECK_NULL_WITH_CONTEXT(context_, workspaces);
+  OPS_LOG_E_IF_NULL(context_, workspaces, return ge::GRAPH_FAILED);
   workspaces[0] = workspaceSize_;
-  OP_LOGI(context_->GetNodeName(), "SetBlockDim is %ld", blockNum_);
+  OPS_LOG_I(context_->GetNodeName(), "SetBlockDim is %ld", blockNum_);
   tilingData_.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
   context_->GetRawTilingData()->SetDataSize(tilingData_.GetDataSize());
   return ge::GRAPH_SUCCESS;

@@ -16,7 +16,7 @@
 #include "register/op_impl_registry.h"
 #include "util/math_util.h"
 #include "platform/platform_infos_def.h"
-#include "log/log.h"
+#include "log/ops_log.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "tiling_base/tiling_util.h"
 #include "tiling_base/tiling_key.h"
@@ -105,7 +105,7 @@ inline void ScatterNdUpdateV2Tiling::SetTilingKeyMode()
     tilingKey_ = indexType * 10 + sortFlag;
 
     tilingContext_->SetTilingKey(tilingKey_);
-    OP_LOGD(tilingContext_, "isLinearIndex=%lu, isSort=%lu, isInt64Indices=%lu, needLargeIndexKernel=%lu, tilingKey=%lu (indexType=%lu, sortFlag=%lu)",
+    OPS_LOG_D(tilingContext_, "isLinearIndex=%lu, isSort=%lu, isInt64Indices=%lu, needLargeIndexKernel=%lu, tilingKey=%lu (indexType=%lu, sortFlag=%lu)",
             isLinearIndex_, isSort_, isInt64Indices_, needLargeIndexKernel_, tilingKey_, indexType, sortFlag);
 }
 
@@ -121,7 +121,7 @@ inline bool ScatterNdUpdateV2Tiling::IsSort(uint64_t totalLength, uint64_t index
 
 inline void ScatterNdUpdateV2Tiling::Tiling4LinearIndex(uint64_t indexRow, uint64_t indexDim)
 {
-    OP_LOGD(tilingContext_, "linearIndexTiling start");
+    OPS_LOG_D(tilingContext_, "linearIndexTiling start");
     auto attrs = tilingContext_->GetAttrs();
     auto stridesPtr = attrs->GetListInt(ATTR_STRIDE);
     for (uint64_t i = 0; i < indexDim; ++i) {
@@ -145,12 +145,12 @@ inline void ScatterNdUpdateV2Tiling::Tiling4LinearIndex(uint64_t indexRow, uint6
         frontCoreNum_ = blockNum_ % coreNum_;
         tailCoreNum_ =  tailBlockNum_ == 0 ? 0 : coreNum_ - frontCoreNum_;
     }
-    OP_LOGD(tilingContext_, "linearIndexTiling finish");
+    OPS_LOG_D(tilingContext_, "linearIndexTiling finish");
 }
 
 inline void ScatterNdUpdateV2Tiling::Tiling4Scatter(uint64_t totalLength, uint64_t indexRow)
 {
-    OP_LOGD(tilingContext_, "scatterTiling start new");
+    OPS_LOG_D(tilingContext_, "scatterTiling start new");
     uint64_t scatterAlignNum = ALIGNED_SIZE / dataTypeSize_;
     tailRow_ = totalLength / coreNum_;
     frontRow_ = tailRow_ + 1;
@@ -173,7 +173,7 @@ inline void ScatterNdUpdateV2Tiling::Tiling4Scatter(uint64_t totalLength, uint64
     } else {
         copyRow_ = formDim_ == 0 ? ubLengthForUpdates_ / scatterAlignLength_ : 1;
     }
-    OP_LOGD(tilingContext_, "scatterTiling finish");
+    OPS_LOG_D(tilingContext_, "scatterTiling finish");
 }
 
 inline void ScatterNdUpdateV2Tiling::GetDtypeSize()
@@ -265,43 +265,43 @@ inline size_t ScatterNdUpdateV2Tiling::CalcWorkSpaceSize(uint64_t indexRow)
 
 void ScatterNdUpdateV2Tiling::TilingDataPrint() const
 {
-    OP_LOGD(tilingContext_, "coreNum:                   %lu", coreNum_);
-    OP_LOGD(tilingContext_, "tilingKey:                 %lu", tilingKey_);
-    OP_LOGD(tilingContext_, "isInt64Indices:            %lu", isInt64Indices_);
-    OP_LOGD(tilingContext_, "needLargeIndexKernel:      %lu", needLargeIndexKernel_);
-    OP_LOGD(tilingContext_, "tiling for LinearIndex--------");
-    OP_LOGD(tilingContext_, "indexDim:                  %lu", indexDim_);
-    OP_LOGD(tilingContext_, "ubSize:                    %lu", ubSize_);
-    OP_LOGD(tilingContext_, "blockLength:               %lu", blockLength_);
-    OP_LOGD(tilingContext_, "blockNum:                  %lu", blockNum_);
-    OP_LOGD(tilingContext_, "blockRemainLength:         %lu", blockRemainLength_);
-    OP_LOGD(tilingContext_, "tailBlockNum:              %lu", tailBlockNum_);
-    OP_LOGD(tilingContext_, "frontBlockNum:             %lu", frontBlockNum_);
-    OP_LOGD(tilingContext_, "frontCoreNum:              %lu", frontCoreNum_);
-    OP_LOGD(tilingContext_, "tailCoreNum:               %lu", tailCoreNum_);
-    OP_LOGD(tilingContext_, "sortWorkspace:             %lu", sortWorkspace_);
+    OPS_LOG_D(tilingContext_, "coreNum:                   %lu", coreNum_);
+    OPS_LOG_D(tilingContext_, "tilingKey:                 %lu", tilingKey_);
+    OPS_LOG_D(tilingContext_, "isInt64Indices:            %lu", isInt64Indices_);
+    OPS_LOG_D(tilingContext_, "needLargeIndexKernel:      %lu", needLargeIndexKernel_);
+    OPS_LOG_D(tilingContext_, "tiling for LinearIndex--------");
+    OPS_LOG_D(tilingContext_, "indexDim:                  %lu", indexDim_);
+    OPS_LOG_D(tilingContext_, "ubSize:                    %lu", ubSize_);
+    OPS_LOG_D(tilingContext_, "blockLength:               %lu", blockLength_);
+    OPS_LOG_D(tilingContext_, "blockNum:                  %lu", blockNum_);
+    OPS_LOG_D(tilingContext_, "blockRemainLength:         %lu", blockRemainLength_);
+    OPS_LOG_D(tilingContext_, "tailBlockNum:              %lu", tailBlockNum_);
+    OPS_LOG_D(tilingContext_, "frontBlockNum:             %lu", frontBlockNum_);
+    OPS_LOG_D(tilingContext_, "frontCoreNum:              %lu", frontCoreNum_);
+    OPS_LOG_D(tilingContext_, "tailCoreNum:               %lu", tailCoreNum_);
+    OPS_LOG_D(tilingContext_, "sortWorkspace:             %lu", sortWorkspace_);
     for (size_t i = 0; i < indexDim_; i++) {
-        OP_LOGD(tilingContext_, "indicesMask[%lu]:            %lu", i, indicesMask_[i]);
+        OPS_LOG_D(tilingContext_, "indicesMask[%lu]:            %lu", i, indicesMask_[i]);
     }
-    OP_LOGD(tilingContext_, "tiling for Scatter------------");
-    OP_LOGD(tilingContext_, "scatterLength:             %lu", scatterLength_);
-    OP_LOGD(tilingContext_, "tailRow:                   %lu", tailRow_);
-    OP_LOGD(tilingContext_, "frontRow:                  %lu", frontRow_);
-    OP_LOGD(tilingContext_, "frontNum:                  %lu", frontNum_);
-    OP_LOGD(tilingContext_, "tailNum:                   %lu", tailNum_);
-    OP_LOGD(tilingContext_, "ubLengthForUpdates:        %lu", ubLengthForUpdates_);
-    OP_LOGD(tilingContext_, "scatterAlignLength:        %lu", scatterAlignLength_);
-    OP_LOGD(tilingContext_, "formDim:                   %lu", formDim_);
-    OP_LOGD(tilingContext_, "copyRow:                   %lu", copyRow_);
-    OP_LOGD(tilingContext_, "scatterTileNum:            %lu", scatterTileNum_);
-    OP_LOGD(tilingContext_, "scatterTileLength:         %lu", scatterTileLength_);
-    OP_LOGD(tilingContext_, "scatterTileTail:           %lu", scatterTileTail_);
-    OP_LOGD(tilingContext_, "scatterTileAlignLength:    %lu", scatterTileAlignLength_);
+    OPS_LOG_D(tilingContext_, "tiling for Scatter------------");
+    OPS_LOG_D(tilingContext_, "scatterLength:             %lu", scatterLength_);
+    OPS_LOG_D(tilingContext_, "tailRow:                   %lu", tailRow_);
+    OPS_LOG_D(tilingContext_, "frontRow:                  %lu", frontRow_);
+    OPS_LOG_D(tilingContext_, "frontNum:                  %lu", frontNum_);
+    OPS_LOG_D(tilingContext_, "tailNum:                   %lu", tailNum_);
+    OPS_LOG_D(tilingContext_, "ubLengthForUpdates:        %lu", ubLengthForUpdates_);
+    OPS_LOG_D(tilingContext_, "scatterAlignLength:        %lu", scatterAlignLength_);
+    OPS_LOG_D(tilingContext_, "formDim:                   %lu", formDim_);
+    OPS_LOG_D(tilingContext_, "copyRow:                   %lu", copyRow_);
+    OPS_LOG_D(tilingContext_, "scatterTileNum:            %lu", scatterTileNum_);
+    OPS_LOG_D(tilingContext_, "scatterTileLength:         %lu", scatterTileLength_);
+    OPS_LOG_D(tilingContext_, "scatterTileTail:           %lu", scatterTileTail_);
+    OPS_LOG_D(tilingContext_, "scatterTileAlignLength:    %lu", scatterTileAlignLength_);
 }
 
 ge::graphStatus ScatterNdUpdateV2Tiling::Init()
 {
-    OP_LOGD(tilingContext_, "Tiling initing");
+    OPS_LOG_D(tilingContext_, "Tiling initing");
     auto compileInfo = static_cast<const ScatterNdUpdateV2CompileInfo*>(tilingContext_->GetCompileInfo());
     auto varRefShape = tilingContext_->GetInputShape(0)->GetStorageShape();
     auto indicesShape = tilingContext_->GetInputShape(1)->GetStorageShape();
@@ -311,7 +311,7 @@ ge::graphStatus ScatterNdUpdateV2Tiling::Init()
 
     auto indicesDtype = tilingContext_->GetInputDesc(1)->GetDataType();
     isInt64Indices_ = (indicesDtype == ge::DT_INT64);
-    OP_LOGD(tilingContext_, "indicesDtype=%d, isInt64Indices=%lu", indicesDtype, isInt64Indices_);
+    OPS_LOG_D(tilingContext_, "indicesDtype=%d, isInt64Indices=%lu", indicesDtype, isInt64Indices_);
 
     uint64_t totalLength = 1;
     for (uint64_t i = 0; i < indexDim_; ++i) {
@@ -355,44 +355,44 @@ ge::graphStatus ScatterNdUpdateV2Tiling::Init()
     Tiling4Scatter(totalPhysicalRange, indexRow);
     size_t* currentWorkSpace = tilingContext_->GetWorkspaceSizes(1);
     currentWorkSpace[0] = CalcWorkSpaceSize(indexRow);
-    OP_LOGD(tilingContext_, "Tiling inited");
+    OPS_LOG_D(tilingContext_, "Tiling inited");
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus Tiling4ScatterNdUpdateV2(gert::TilingContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("ScatterNdUpdateV2", "The context is nullptr.");
+        OPS_LOG_E("ScatterNdUpdateV2", "The context is nullptr.");
         return ge::GRAPH_FAILED;
     }
-    OP_LOGD(context, "Tiling for ScatterNdUpdateV2 start.");
+    OPS_LOG_D(context, "Tiling for ScatterNdUpdateV2 start.");
     ScatterNdUpdateV2Tiling tilingOp(context);
     if (tilingOp.Init() != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context, "Tiling init fail");
+        OPS_LOG_E(context, "Tiling init fail");
         return ge::GRAPH_FAILED;
     }
-    OP_LOGD(context, "Tiling for ScatterNdUpdateV2 end.");
+    OPS_LOG_D(context, "Tiling for ScatterNdUpdateV2 end.");
     return tilingOp.SetKernelTiling();
 }
 
 ge::graphStatus TilingPrepare4ScatterNdUpdateV2(gert::TilingParseContext* context)
 {
-    OP_LOGD(context, "Tiling Prepare For ScatterNdUpdateV2 start.");
+    OPS_LOG_D(context, "Tiling Prepare For ScatterNdUpdateV2 start.");
     auto compileInfo = context->GetCompiledInfo<ScatterNdUpdateV2CompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OPS_LOG_E_IF_NULL(context, compileInfo, return ge::GRAPH_FAILED);
     auto platformInfo = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    OPS_LOG_E_IF_NULL(context, platformInfo, return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     compileInfo->totalCoreNum = ascendcPlatform.GetCoreNumAiv();
     if (compileInfo->totalCoreNum == 0) {
-        OP_LOGE(context, "coreNum %lu", compileInfo->totalCoreNum);
+        OPS_LOG_E(context, "coreNum %lu", compileInfo->totalCoreNum);
         return ge::GRAPH_FAILED;
     }
     uint64_t ubSizePlatForm;
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSizePlatForm);
     compileInfo->ubSizePlatForm = ubSizePlatForm;
-    OP_LOGD(context, "ubSizePlatForm is %lu.", compileInfo->ubSizePlatForm);
-    OP_LOGD(context, "Tiling Prepare For ScatterNdUpdateV2 end.");
+    OPS_LOG_D(context, "ubSizePlatForm is %lu.", compileInfo->ubSizePlatForm);
+    OPS_LOG_D(context, "Tiling Prepare For ScatterNdUpdateV2 end.");
     return ge::GRAPH_SUCCESS;
 }
 
