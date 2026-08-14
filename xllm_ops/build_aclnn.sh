@@ -150,6 +150,7 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
         "moe_init_routing_v3"
         "multi_latent_attention"
         "pp_matmul_opt"
+        "quant_matmul_nz_decode"
         "recurrent_gated_delta_rule"
         "replace_token"
         "mtp_prepare_next_draft"
@@ -266,6 +267,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "moe_grouped_matmul_swiglu_quant"
         "multi_latent_attention"
         "pp_matmul_opt"
+        "quant_matmul_nz_decode"
         "recurrent_gated_delta_rule"
         "replace_token"
         "mtp_prepare_next_draft"
@@ -397,10 +399,39 @@ dump_selected_ops
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
+  if [[ -n "${BUILD_DIR_ARG}" &&
+        ";${CUSTOM_OPS};" == *";quant_matmul_nz_decode;"* ]]; then
+    # The generated kernel targets do not depend on op_kernel sources. Force
+    # OPC to refresh this operator when reusing an incremental build tree.
+    quant_matmul_binary_dir="${BUILD_DIR_ARG}/binary/${SOC_ARG}"
+    rm -f -- \
+      "${quant_matmul_binary_dir}/src/quant_matmul_nz_decode/quant_matmul_nz_decode_${SOC_ARG}_src_copy.done" \
+      "${quant_matmul_binary_dir}/gen/quant_matmul_nz_decode_${SOC_ARG}_0.done" \
+      "${quant_matmul_binary_dir}/gen/quant_matmul_nz_decode_${SOC_ARG}_1.done" \
+      "${quant_matmul_binary_dir}/gen/quant_matmul_nz_decode_${SOC_ARG}_2.done" \
+      "${quant_matmul_binary_dir}/gen/quant_matmul_nz_decode_${SOC_ARG}_3.done"
+
+    quant_matmul_gen_dir="${quant_matmul_binary_dir}/gen"
+    if [[ -d "${quant_matmul_gen_dir}" ]]; then
+      while IFS= read -r -d '' kernel_meta_dir; do
+        find "${kernel_meta_dir}" -depth -delete
+      done < <(find "${quant_matmul_gen_dir}" -mindepth 1 -maxdepth 1 \
+        -type d -name 'kernel_meta_QuantMatmulNzDecode_*' -print0)
+    fi
+
+    quant_matmul_output_dir="${quant_matmul_binary_dir}/bin/quant_matmul_nz_decode"
+    if [[ -d "${quant_matmul_output_dir}" ]]; then
+      find "${quant_matmul_output_dir}" -mindepth 1 -maxdepth 1 \
+        -type f \( -name 'QuantMatmulNzDecode_*.o' \
+                    -o -name 'QuantMatmulNzDecode_*.json' \) -delete
+    fi
+  fi
+
   log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
   if [ -n "$BUILD_DIR_ARG" ]; then
-    bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}" --build-dir="${BUILD_DIR_ARG}"
+    bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}" \
+      --build-dir="${BUILD_DIR_ARG}"
   else
     bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
   fi
