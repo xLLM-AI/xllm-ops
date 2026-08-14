@@ -137,6 +137,8 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
       GetTypeSize(context->GetInputDesc(kInputWeight)->GetDataType());
 
   auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+  const bool use_a2_scalar_store_fix =
+      platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND910B;
   const int64_t core_num = platform.GetCoreNumAiv();
   uint64_t ub_size = 0;
   platform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ub_size);
@@ -257,9 +259,12 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
   tiling.set_has_z(has_z ? 1U : 0U);
   tiling.set_norm_before_gate(norm_before_gate ? 1U : 0U);
   tiling.set_is_rms_norm(is_rms_norm ? 1U : 0U);
+  tiling.set_use_a2_scalar_store_fix(use_a2_scalar_store_fix ? 1U : 0U);
   tiling.set_kernel_mode(kernel_mode);
 
-  context->SetBlockDim(static_cast<uint32_t>(used_cores));
+  const int64_t block_dim =
+      use_a2_scalar_store_fix && !is_rms_norm ? 1 : used_cores;
+  context->SetBlockDim(static_cast<uint32_t>(block_dim));
   tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
                       context->GetRawTilingData()->GetCapacity());
   context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
