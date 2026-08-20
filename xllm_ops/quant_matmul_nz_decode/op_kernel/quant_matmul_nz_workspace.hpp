@@ -273,25 +273,26 @@ class QuantMatmulNzWorkspace {
                            GemmCoord const& blockCoord,
                            GemmCoord const& actualBlockShape,
                            AscendC::GlobalTensor<ElementC> const& gmBlockC) {
-    constexpr uint32_t EPILOGUE_TILE_N = 256;
+    constexpr uint32_t kEpilogueTileN =
+        L1TileShape::N == 320 ? 320 : 256;
     uint32_t subblockIdx = AscendC::GetSubBlockIdx();
-    uint32_t tileNOffset = subblockIdx * EPILOGUE_TILE_N;
+    uint32_t tileNOffset = subblockIdx * kEpilogueTileN;
     if (tileNOffset >= actualBlockShape.n()) {
       return;
     }
     uint32_t tileN = actualBlockShape.n() - tileNOffset;
-    tileN = tileN < EPILOGUE_TILE_N ? tileN : EPILOGUE_TILE_N;
+    tileN = tileN < kEpilogueTileN ? tileN : kEpilogueTileN;
     uint32_t blockNOffset = blockCoord.n() * L1TileShape::N;
 
     size_t ubOffset = 0;
     auto ubC = resource.ubBuf.template GetBufferByByte<int32_t>(ubOffset);
-    ubOffset += EPILOGUE_TILE_N * sizeof(int32_t);
+    ubOffset += kEpilogueTileN * sizeof(int32_t);
     auto ubBias = resource.ubBuf.template GetBufferByByte<int32_t>(ubOffset);
-    ubOffset += EPILOGUE_TILE_N * sizeof(int32_t);
+    ubOffset += kEpilogueTileN * sizeof(int32_t);
     auto ubScale = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-    ubOffset += EPILOGUE_TILE_N * sizeof(float);
+    ubOffset += kEpilogueTileN * sizeof(float);
     auto ubFloat = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-    ubOffset += EPILOGUE_TILE_N * sizeof(float);
+    ubOffset += kEpilogueTileN * sizeof(float);
     auto ubD = resource.ubBuf.template GetBufferByByte<ElementD>(ubOffset);
 
     AscendC::GlobalTensor<int32_t> gmBias;

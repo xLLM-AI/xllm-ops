@@ -123,7 +123,7 @@ extern "C" __global__ __aicore__ void quant_matmul_nz_decode(GM_ADDR x,
                                                              GM_ADDR y,
                                                              GM_ADDR workspace,
                                                              GM_ADDR tiling) {
-  KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+  KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
   GET_TILING_DATA(tiling_data, tiling);
 
   const uint32_t m = tiling_data.m;
