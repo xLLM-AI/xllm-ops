@@ -33,7 +33,10 @@ template <uint32_t kL1TileN,
           uint32_t kL1TileK,
           uint32_t kL0TileN = 128,
           uint32_t kL0TileK = 256,
-          bool kEnableShuffleK = false>
+          bool kEnableShuffleK = false,
+          uint32_t kProblemM = 0,
+          uint32_t kProblemK = 0,
+          uint32_t kProblemN = 0>
 __aicore__ inline void RunQuantMatmulNzDecode(GM_ADDR x,
                                               GM_ADDR weight,
                                               GM_ADDR scale,
@@ -93,12 +96,16 @@ __aicore__ inline void RunQuantMatmulNzDecode(GM_ADDR x,
   using MatmulKernel = Gemm::Kernel::
       QuantMatmulNzWorkspace<BlockMmad, BlockEpilogue, BlockScheduler, 2>;
 
-  GemmCoord problem_shape{m, n, k};
-  layout::RowMajor layout_x{m, k};
-  auto layout_weight = layout::zN::MakeLayout<int8_t>(k, n);
-  layout::VectorLayout layout_scale{n};
-  layout::VectorLayout unused_layout{m};
-  layout::RowMajor layout_y{m, n};
+  const uint32_t problem_m = kProblemM == 0 ? m : kProblemM;
+  const uint32_t problem_k = kProblemK == 0 ? k : kProblemK;
+  const uint32_t problem_n = kProblemN == 0 ? n : kProblemN;
+  GemmCoord problem_shape{problem_m, problem_n, problem_k};
+  layout::RowMajor layout_x{problem_m, problem_k};
+  auto layout_weight =
+      layout::zN::MakeLayout<int8_t>(problem_k, problem_n);
+  layout::VectorLayout layout_scale{problem_n};
+  layout::VectorLayout unused_layout{problem_m};
+  layout::RowMajor layout_y{problem_m, problem_n};
   typename MatmulKernel::Params params{problem_shape,
                                        x,
                                        layout_x,
@@ -129,7 +136,37 @@ extern "C" __global__ __aicore__ void quant_matmul_nz_decode(GM_ADDR x,
   const uint32_t m = tiling_data.m;
   const uint32_t k = tiling_data.k;
   const uint32_t n = tiling_data.n;
-  if (TILING_KEY_IS(0)) {
+  if (TILING_KEY_IS(6)) {
+    RunQuantMatmulNzDecode<320, 512, 128, 256, false, 1, 5120, 6400>(
+        x, weight, scale, bias, y, workspace, m, k, n);
+  } else if (TILING_KEY_IS(7)) {
+    RunQuantMatmulNzDecode<320, 512, 128, 256, false, 2, 5120, 6400>(
+        x, weight, scale, bias, y, workspace, m, k, n);
+  } else if (TILING_KEY_IS(8)) {
+    RunQuantMatmulNzDecode<160, 512, 128, 256, false, 4, 5120, 6400>(
+        x, weight, scale, bias, y, workspace, m, k, n);
+  } else if (TILING_KEY_IS(9)) {
+    RunQuantMatmulNzDecode<160, 512, 128, 256, false, 8, 5120, 6400>(
+        x, weight, scale, bias, y, workspace, m, k, n);
+  } else if (TILING_KEY_IS(10)) {
+    RunQuantMatmulNzDecode<160, 512, 128, 256, false, 16, 5120, 6400>(
+        x, weight, scale, bias, y, workspace, m, k, n);
+  } else if (TILING_KEY_IS(11)) {
+    RunQuantMatmulNzDecode<128, 1536, 128, 256, true, 1, 5120, 1280>(
+        x, weight, scale, bias, y, workspace, m, k, n);
+  } else if (TILING_KEY_IS(12)) {
+    RunQuantMatmulNzDecode<128, 1536, 128, 256, true, 2, 5120, 1280>(
+        x, weight, scale, bias, y, workspace, m, k, n);
+  } else if (TILING_KEY_IS(13)) {
+    RunQuantMatmulNzDecode<128, 1536, 128, 256, true, 4, 5120, 1280>(
+        x, weight, scale, bias, y, workspace, m, k, n);
+  } else if (TILING_KEY_IS(14)) {
+    RunQuantMatmulNzDecode<128, 1536, 128, 256, true, 8, 5120, 1280>(
+        x, weight, scale, bias, y, workspace, m, k, n);
+  } else if (TILING_KEY_IS(15)) {
+    RunQuantMatmulNzDecode<128, 1536, 128, 256, true, 16, 5120, 1280>(
+        x, weight, scale, bias, y, workspace, m, k, n);
+  } else if (TILING_KEY_IS(0)) {
     RunQuantMatmulNzDecode<320, 512>(
         x, weight, scale, bias, y, workspace, m, k, n);
   } else if (TILING_KEY_IS(5)) {

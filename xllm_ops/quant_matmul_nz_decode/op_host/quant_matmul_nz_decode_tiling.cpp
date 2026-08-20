@@ -27,6 +27,16 @@ constexpr uint32_t kTileM = 16;
 constexpr uint32_t kMaxOptimizedM = 16;
 constexpr uint32_t kTileN = 320;
 constexpr uint32_t kWorkspaceStages = 2;
+constexpr uint64_t kGateUpM1TilingKey = 6;
+constexpr uint64_t kGateUpM2TilingKey = 7;
+constexpr uint64_t kGateUpM4TilingKey = 8;
+constexpr uint64_t kGateUpM8TilingKey = 9;
+constexpr uint64_t kGateUpM16TilingKey = 10;
+constexpr uint64_t kQkvM1TilingKey = 11;
+constexpr uint64_t kQkvM2TilingKey = 12;
+constexpr uint64_t kQkvM4TilingKey = 13;
+constexpr uint64_t kQkvM8TilingKey = 14;
+constexpr uint64_t kQkvM16TilingKey = 15;
 
 ge::graphStatus TilingFunc(gert::TilingContext* context) {
   const auto x_shape = context->GetInputShape(0)->GetOriginShape();
@@ -70,7 +80,29 @@ ge::graphStatus TilingFunc(gert::TilingContext* context) {
   if (is_down_shape) {
     context->SetTilingKey(m == 1 ? 1 : (m <= 4 ? 3 : 2));
   } else if (is_qkv_shape) {
-    context->SetTilingKey(4);
+    if (m == 1) {
+      context->SetTilingKey(kQkvM1TilingKey);
+    } else if (m == 2) {
+      context->SetTilingKey(kQkvM2TilingKey);
+    } else if (m == 4) {
+      context->SetTilingKey(kQkvM4TilingKey);
+    } else if (m == 8) {
+      context->SetTilingKey(kQkvM8TilingKey);
+    } else if (m == 16) {
+      context->SetTilingKey(kQkvM16TilingKey);
+    } else {
+      context->SetTilingKey(4);
+    }
+  } else if (m == 1) {
+    context->SetTilingKey(kGateUpM1TilingKey);
+  } else if (m == 2) {
+    context->SetTilingKey(kGateUpM2TilingKey);
+  } else if (m == 4) {
+    context->SetTilingKey(kGateUpM4TilingKey);
+  } else if (m == 8) {
+    context->SetTilingKey(kGateUpM8TilingKey);
+  } else if (m == 16) {
+    context->SetTilingKey(kGateUpM16TilingKey);
   } else if (m > 2) {
     context->SetTilingKey(5);
   } else {
