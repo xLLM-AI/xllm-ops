@@ -59,11 +59,16 @@ uint32_t CeilDiv(uint32_t value, uint32_t divisor)
     return divisor == 0 ? 0 : (value + divisor - 1) / divisor;
 }
 
-uint64_t CalcUserWorkspaceBytes(uint32_t blockDim)
+uint64_t CalcUserWorkspaceBytes(uint32_t blockDim, int64_t batchSize, uint32_t numHeads, bool needsInitialStateCast)
 {
     const uint64_t tileBytes = static_cast<uint64_t>(kChunkSize) * kChunkSize * kHalfBytes;
     constexpr uint64_t kWorkspaceTileCount = 11;
-    return static_cast<uint64_t>(blockDim) * kWorkspaceTileCount * tileBytes;
+    const uint64_t kernelWorkspaceBytes = static_cast<uint64_t>(blockDim) * kWorkspaceTileCount * tileBytes;
+    const uint64_t initialStateBytes =
+        needsInitialStateCast
+            ? static_cast<uint64_t>(batchSize) * numHeads * kHeadDim * kHeadDim * kHalfBytes
+            : 0;
+    return kernelWorkspaceBytes + initialStateBytes;
 }
 
 std::string ShapeToString(const gert::Shape &shape)
@@ -179,7 +184,12 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context)
                           std::to_string(numKeyHeads) + " T=" + std::to_string(totalTokens) +
                           " num_matrices=" + std::to_string(numMatrices));
     }
-    workspaceSizes[0] = CalcUserWorkspaceBytes(blockDim) + platformInfo.GetLibApiWorkSpaceSize();
+    const gert::CompileTimeTensorDesc *qDesc = context->GetInputDesc(Q_INDEX);
+    const bool needsInitialStateCast =
+        isAscend950 && hasInitialState != 0 && qDesc != nullptr && qDesc->GetDataType() == ge::DT_BF16;
+    workspaceSizes[0] =
+        CalcUserWorkspaceBytes(blockDim, batchSize, numHeads, needsInitialStateCast) +
+        platformInfo.GetLibApiWorkSpaceSize();
     return ge::GRAPH_SUCCESS;
 }
 

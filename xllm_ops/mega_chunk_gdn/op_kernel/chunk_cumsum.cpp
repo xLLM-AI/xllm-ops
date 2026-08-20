@@ -50,7 +50,7 @@
 
 #include <pto/pto-inst.hpp>
 #include "acl/acl.h"
-#include <runtime/rt_ffts.h>
+#include "gdn_sync.h"
 using namespace pto;
 
 // GDN_C: Compile-time chunk size injected by the build system.
@@ -78,7 +78,7 @@ using namespace pto;
 // next TADD/TMOV before the previous vec write to acc_ub has committed → a RAW race
 // on acc_ub.
 //
-// pipe_barrier(PIPE_V) only fences Vec-vs-Vec and never enforces this V↔S edge, so
+// gdn_sync::VectorBarrier() only fences Vec-vs-Vec and never enforces this V↔S edge, so
 // it is insufficient under the fused kernel — the recurrence races and corrupts the
 // last rows of each chunk non-deterministically (surfaced at H=64, whose wider tile
 // lengthens the race window). It happens to be harmless standalone because the
@@ -92,10 +92,9 @@ using namespace pto;
 // MINIMAL placement (per-site bisection, H=64, 50-run determinism + e2e + partial
 // chunks): the V↔S sync is needed at EXACTLY ONE site — immediately after the
 // per-row TADD(acc,acc,g_i) write inside the main loop (in both the fixed-length
-// and varlen paths). On A5's tiled path that site uses PIPE_ALL because C310 has
-// no raw PIPE_V barrier; the non-tiled path uses the targeted V_S event. Every
-// other site (the row-0 prologue, the per-row TMOV(s_i,acc) read, and the
-// partial-chunk tail zero-fill) remains pipe_barrier(PIPE_V). Verified: bit2-only is
+// and varlen paths). That single sync serializes the whole recurrence; every other
+// site (the row-0 prologue, the per-row TMOV(s_i,acc) read, and the partial-chunk
+// tail zero-fill) is fine as a plain gdn_sync::VectorBarrier(). Verified: bit2-only is
 // correct AND deterministic for full and partial chunks; all-PIPE_V or
 // prologue-only-V↔S races. (The post-read TMOV site is an equally-valid single
 // choice; we sync after the write because it orders acc before every consumer.)
@@ -125,51 +124,6 @@ template <typename T, int R, int C, int RV = R, int CV = C,
           pto::PadValue P = pto::PadValue::Null>
 using UbND = pto::Tile<pto::TileType::Vec, T, R, C, pto::BLayout::RowMajor,
                        RV, CV, pto::SLayout::NoneBox, 512, P>;
-
-#if defined(GDN_A5_KERNEL)
-template <int32_t Rows, int32_t Cols, int32_t SrcAddr, int32_t DstAddr>
-AICORE inline void GdnA5ParallelPrefixScan()
-{
-  using Full = UbND<float, Rows, Cols, Rows, Cols, PadValue::Zero>;
-  using Dyn = UbND<float, Rows, Cols, DYNAMIC, DYNAMIC, PadValue::Zero>;
-  constexpr int32_t RowBytes = Cols * static_cast<int32_t>(sizeof(float));
-
-  for (int32_t step = 1, stage = 0; step < Rows; step <<= 1, ++stage) {
-    if ((stage & 1) == 0) {
-      Full src;
-      Full dst;
-      TASSIGN(src, SrcAddr);
-      TASSIGN(dst, DstAddr);
-      TMOV(dst, src);
-      pipe_barrier(PIPE_V);
-
-      Dyn dst_tail(Rows - step, Cols);
-      Dyn src_tail(Rows - step, Cols);
-      Dyn src_head(Rows - step, Cols);
-      TASSIGN(dst_tail, DstAddr + step * RowBytes);
-      TASSIGN(src_tail, SrcAddr + step * RowBytes);
-      TASSIGN(src_head, SrcAddr);
-      TADD(dst_tail, src_tail, src_head);
-    } else {
-      Full src;
-      Full dst;
-      TASSIGN(src, DstAddr);
-      TASSIGN(dst, SrcAddr);
-      TMOV(dst, src);
-      pipe_barrier(PIPE_V);
-
-      Dyn dst_tail(Rows - step, Cols);
-      Dyn src_tail(Rows - step, Cols);
-      Dyn src_head(Rows - step, Cols);
-      TASSIGN(dst_tail, SrcAddr + step * RowBytes);
-      TASSIGN(src_tail, DstAddr + step * RowBytes);
-      TASSIGN(src_head, DstAddr);
-      TADD(dst_tail, src_tail, src_head);
-    }
-    pipe_barrier(PIPE_V);
-  }
-}
-#endif
 #endif
 
 template <int32_t ChunkSize>
@@ -188,22 +142,19 @@ AICORE void cumsum_kernel(
   auto cid = get_block_idx();
   auto block_num = get_block_num();
   auto vid = get_subblockid();
-  // set_ffts_base_addr(ffts_addr): Configure the base address for FFTS
+  // gdn_sync::InitAddress(ffts_addr): Configure the base address for FFTS
   // (Fast Fine-grained Task Synchronization) — the cross-core signaling mechanism.
   // Required before any cross-core sync (ffts_cross_core_sync / wait_flag_dev).
-  set_ffts_base_addr(ffts_addr);
+  gdn_sync::InitAddress(ffts_addr);
 
-// #if defined(__DAV_C220_VEC__): This block only compiles for the Vec core pass.
+// #if defined(__DAV_VEC__): This block only compiles for the Vec core pass.
 // The bisheng compiler makes 3 passes over the same source file:
 //   Pass 1: __DAV_C220_VEC__  defined → compiles Vec (SIMD) code
 //   Pass 2: __DAV_C220_CUBE__ defined → compiles Cube (matrix) code
 //   Pass 3: neither defined → compiles host (CPU) launcher code
 // Using these guards lets us put Vec, Cube, and host code in one file.
-#if defined(__DAV_C220_VEC__)
-  // Keep the second A5 Vector subcore in the caller so it can participate in
-  // the following MIX-core stage barrier. Returning here can terminate the
-  // inlined caller on C310; guard the work instead.
-  if (vid == 0) {
+#if defined(__DAV_VEC__)
+  if (vid != 0) return;
 
   // set_mask_norm(): Reset Vec mask to normal mode (all lanes active).
   // set_vector_mask(-1, -1): Enable all SIMD lanes (128 lanes for fp32).
@@ -269,11 +220,8 @@ AICORE void cumsum_kernel(
     // Core `cid` handles chunks cid, cid+block_num, cid+2*block_num, ...
     // This is the NPU equivalent of CUDA's grid-stride loop:
     //   for (int i = blockIdx.x; i < total; i += gridDim.x)
-    // Stage-level SyncAll in the fused caller makes each block's GM output
-    // visible before transpose, so chunks can remain grid-stride partitioned.
-    const int64_t chunk_begin = static_cast<int64_t>(cid);
-    const int64_t chunk_stride = static_cast<int64_t>(block_num);
-    for (int64_t gi = chunk_begin; gi < total_chunks; gi += chunk_stride) {
+    for (int64_t gi = static_cast<int64_t>(cid); gi < total_chunks;
+         gi += static_cast<int64_t>(block_num)) {
       int64_t seq_idx = gi / chunks_per_seq;
       int64_t local_chunk = gi % chunks_per_seq;
       int64_t bos = seq_idx * seq_len;
@@ -322,20 +270,17 @@ AICORE void cumsum_kernel(
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
       // ── Vec compute: prefix sum over rows (all H heads in parallel) ───
-#if defined(GDN_A5_KERNEL)
-      GdnA5ParallelPrefixScan<ChunkSize, HTC, GUbAddr, SUbAddr>();
-#else
       // Row 0: acc[h] = g[0,h];  g_sum[0,h] = acc[h]
       UbND<float, 1, HTC> g_row_0;
       TASSIGN(g_row_0, GUbAddr);
       // TMOV(dst, src): Element-wise copy, like dst = src.clone() in UB.
       TMOV(acc_ub, g_row_0);
-      pipe_barrier(PIPE_V);
+      gdn_sync::VectorBarrier();
 
       UbND<float, 1, HTC> s_row_0;
       TASSIGN(s_row_0, SUbAddr);
       TMOV(s_row_0, acc_ub);
-      pipe_barrier(PIPE_V);
+      gdn_sync::VectorBarrier();
 
       // Rows 1..valid-1:  acc[h] += g[i,h];  g_sum[i,h] = acc[h]
       for (int32_t i = 1; i < valid; ++i) {
@@ -347,31 +292,26 @@ AICORE void cumsum_kernel(
         // after this per-row write to acc_ub, ordering it before the scalar issuer
         // launches the next row. Every other barrier in this chain is plain PIPE_V.
         TADD(acc_ub, acc_ub, g_row_i);
-#if defined(GDN_A5_KERNEL)
-        pipe_barrier(PIPE_ALL);
-#else
         AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
         AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
-#endif
 
         UbND<float, 1, HTC> s_row_i;
         TASSIGN(s_row_i, SUbAddr + i * RowBytes);
         TMOV(s_row_i, acc_ub);
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
       }
 
       // Zero-fill rows beyond valid (tail padding for downstream kernels)
       // TEXPANDS(tile, scalar): Fill entire tile with a scalar value.
       // Equivalent to: tile[:] = scalar  (like torch.full_like(tile, scalar))
       TEXPANDS(acc_ub, 0.0f);
-      pipe_barrier(PIPE_V);
+      gdn_sync::VectorBarrier();
       for (int32_t i = valid; i < ChunkSize; ++i) {
         UbND<float, 1, HTC> s_row_i;
         TASSIGN(s_row_i, SUbAddr + i * RowBytes);
         TMOV(s_row_i, acc_ub);
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
       }
-#endif
 
       // ── DMA: store g_sum from UB → GM (MTE3 pipe) ────────────────────
       // ── Synchronization: Vec → MTE3 ───────────────────────────────────
@@ -399,13 +339,8 @@ AICORE void cumsum_kernel(
       // Vec waits before starting the next iteration's TLOAD into the same UB region.
       // Without this, the next TLOAD could overwrite data still being stored.
       // MTE3 → Vec sync: wait for DMA store before reusing UB next iter
-#if defined(GDN_A5_KERNEL)
-      set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-      wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-#else
       set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
       wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-#endif
     }
   }
   // ── Variable-length sequence path (cu_seqlens != nullptr) ─────────────
@@ -443,19 +378,16 @@ AICORE void cumsum_kernel(
           set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
           wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
-#if defined(GDN_A5_KERNEL)
-          GdnA5ParallelPrefixScan<ChunkSize, HTC, GUbAddr, SUbAddr>();
-#else
           // Prefix sum: acc = g[0]; g_sum[0] = acc
           UbND<float, 1, HTC> g_row_0;
           TASSIGN(g_row_0, GUbAddr);
           TMOV(acc_ub, g_row_0);
-          pipe_barrier(PIPE_V);
+          gdn_sync::VectorBarrier();
 
           UbND<float, 1, HTC> s_row_0;
           TASSIGN(s_row_0, SUbAddr);
           TMOV(s_row_0, acc_ub);
-          pipe_barrier(PIPE_V);
+          gdn_sync::VectorBarrier();
 
           // acc += g[i]; g_sum[i] = acc
           for (int32_t i = 1; i < valid; ++i) {
@@ -464,29 +396,24 @@ AICORE void cumsum_kernel(
             // The one load-bearing sync (see chain-sync note above): Vec→Scalar
             // after this per-row write to acc_ub. All other barriers here are PIPE_V.
             TADD(acc_ub, acc_ub, g_row_i);
-#if defined(GDN_A5_KERNEL)
-            pipe_barrier(PIPE_ALL);
-#else
             AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
             AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
-#endif
 
             UbND<float, 1, HTC> s_row_i;
             TASSIGN(s_row_i, SUbAddr + i * RowBytes);
             TMOV(s_row_i, acc_ub);
-            pipe_barrier(PIPE_V);
+            gdn_sync::VectorBarrier();
           }
 
           // Zero-fill padding rows
           TEXPANDS(acc_ub, 0.0f);
-          pipe_barrier(PIPE_V);
+          gdn_sync::VectorBarrier();
           for (int32_t i = valid; i < ChunkSize; ++i) {
             UbND<float, 1, HTC> s_row_i;
             TASSIGN(s_row_i, SUbAddr + i * RowBytes);
             TMOV(s_row_i, acc_ub);
-            pipe_barrier(PIPE_V);
+            gdn_sync::VectorBarrier();
           }
-#endif
 
           // Store g_sum to GM
           set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
@@ -500,18 +427,12 @@ AICORE void cumsum_kernel(
             TASSIGN(s_store, SUbAddr);
             TSTORE(gs_gm, s_store);
           }
-#if defined(GDN_A5_KERNEL)
-          set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-          wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-#else
           set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
           wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-#endif
         }
         gi++;
       }
     }
-  }
   }
 #endif
 }

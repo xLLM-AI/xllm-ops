@@ -385,11 +385,17 @@ inline ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, const Cau
                                             seqLen),
                                     return ge::GRAPH_FAILED);
                     } else if (inputMode == 0 && qslData != nullptr) {
+                        // NOTE: Historically this rejected nat > segment_length
+                        // as invalid input. Investigation showed kernel's
+                        // InitRing/WriteBackStateSpec only depend on
+                        // stateTokenOffset (from nat) reading conv_state[0..2],
+                        // and lenI only affects downstream x writes — the two
+                        // operate on independent memory regions. Relaxing this
+                        // check to allow adaptive spec-verify where controller
+                        // prunes current step's per_seq_val_tokens[i] below the
+                        // previous step's num_accepted_tokens[i].
                         const int64_t lenI = qslData[i + 1] - qslData[i];
-                        OP_CHECK_IF(a > lenI,
-                                    OP_LOGE(context, "numAcceptedTokens[%ld]=%ld exceeds varlen segment length=%ld", i,
-                                            a, lenI),
-                                    return ge::GRAPH_FAILED);
+                        (void)lenI;
                     }
                 }
             }

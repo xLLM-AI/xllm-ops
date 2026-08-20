@@ -61,7 +61,7 @@
 //   TLOAD(dst, gm)          — dst = gm_data      (DMA: GM→UB/L1, async)
 //   TSTORE(gm, src)         — gm = src            (DMA: UB/L0C→GM, async)
 //   TASSIGN(tile, addr)     — bind tile descriptor to buffer address
-//   TCVT(dst, src, mode)    — converts between float and DTYPE_Q
+//   TCVT(dst, src, mode)    — converts between float and ComputeT
 //   TMOV(dst, src)          — copy: dst = src.clone()
 //   TADD(d, a, b)           — d = a + b
 //   TSUB(d, a, b)           — d = a - b
@@ -72,15 +72,15 @@
 //   TCOLEXPAND(2d, row)     — 2d[i,j] = row[j] (broadcast row→columns)
 //   TEXTRACT(l0, l1, r, c)  — copy L1 sub-tile → L0A/L0B (Cube input regs)
 //   TRESHAPE(zn, nz)        — reinterpret L1 fractal layout (transpose, free)
-//   TMATMUL(C, A, B)        — C = A @ B (Cube engine, DTYPE_Q→FP32 accum)
+//   TMATMUL(C, A, B)        — C = A @ B (Cube engine, ComputeT→FP32 accum)
 //   set_flag / wait_flag    — synchronize pipes within same AI core
 //   ffts_cross_core_sync    — signal across Cube↔Vec cores
-//   wait_flag_dev(flag)     — wait for cross-core signal
+//   gdn_sync::Wait(flag)     — wait for cross-core signal
 // ============================================================================
 
 #include <pto/pto-inst.hpp>
 #include "acl/acl.h"
-#include <runtime/rt_ffts.h>
+#include "gdn_sync.h"
 using namespace pto;
 
 // ── Compile-time configuration (overridable at build time via -D flags) ──
@@ -137,23 +137,23 @@ using GmTensor2D = pto::GlobalTensor<T, GmShape2D, GmStride2D>;
 
 #endif  // __CCE_AICORE__
 
-#if defined(__DAV_C220_CUBE__)
+#if defined(__DAV_CUBE__)
 #define GDN_CHUNK_O_KERNEL chunk_o_kernel_aic
-#elif defined(__DAV_C220_VEC__)
+#elif defined(__DAV_VEC__)
 #define GDN_CHUNK_O_KERNEL chunk_o_kernel_aiv
 #else
 #define GDN_CHUNK_O_KERNEL chunk_o_kernel
 #endif
 
-template <int32_t HiddenSize, int32_t ChunkSize>
+template <typename ComputeT, int32_t HiddenSize, int32_t ChunkSize>
 AICORE void GDN_CHUNK_O_KERNEL(
-    __gm__ DTYPE_Q *Q_handle, __gm__ DTYPE_Q *K_handle, __gm__ DTYPE_Q *V_handle,
-    __gm__ DTYPE_Q *S_handle, __gm__ float *G_handle,
+    __gm__ ComputeT *Q_handle, __gm__ ComputeT *K_handle, __gm__ ComputeT *V_handle,
+    __gm__ ComputeT *S_handle, __gm__ float *G_handle,
     __gm__ float *Msk_handle,
-    __gm__ DTYPE_Q *workspace_qk_handle,
-    __gm__ DTYPE_Q *workspace_qs_qkv_handle,
-    __gm__ DTYPE_Q *workspace_qk_gated_handle,
-    __gm__ DTYPE_Q *O_handle,
+    __gm__ ComputeT *workspace_qk_handle,
+    __gm__ ComputeT *workspace_qs_qkv_handle,
+    __gm__ ComputeT *workspace_qk_gated_handle,
+    __gm__ ComputeT *O_handle,
     __gm__ int32_t *cu_seqlens,
     int64_t batch_size, int64_t seq_len,
     int64_t total_tokens,
@@ -181,7 +181,6 @@ AICORE void GDN_CHUNK_O_KERNEL(
   constexpr int32_t WsQKSize = ChunkSize * ChunkSize;
   constexpr int32_t WsQSSize = ChunkSize * HiddenSize;
   constexpr int32_t WsGatedSize = ChunkSize * ChunkSize;
-  constexpr int32_t SecondL0CAddr = ChunkSize * HiddenSize * sizeof(float);
 
   // ── UB memory map (byte addresses within Unified Buffer) ─────────────
   constexpr int32_t GUbAddr      = 0;
@@ -196,7 +195,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
   constexpr int32_t OUbAddr      = QKUbAddr;
 
   // Initialize the cross-core FFTS signaling base address for this AI core.
-  set_ffts_base_addr(ffts_addr);
+  gdn_sync::InitAddress(ffts_addr);
   // cid = which AI core am I? (0..block_num-1). Used to partition work items.
   auto cid = get_block_idx();
   // block_num = total number of AI cores running this kernel in parallel.
@@ -218,21 +217,21 @@ AICORE void GDN_CHUNK_O_KERNEL(
   //   s_l1   at 65536:  S [D×D]       — accumulated state, used in GEMM 2
   //   qk_gated at 98304: QK_gated [C×C] — from Vec, used in GEMM 3
   //   v_l1   at 131072: V [C×D]       — values, used in GEMM 3
-  L1Mat<DTYPE_Q, ChunkSize, HiddenSize> q_l1;
+  L1Mat<ComputeT, ChunkSize, HiddenSize> q_l1;
   TASSIGN(q_l1, 0);
-  L1Mat<DTYPE_Q, ChunkSize, HiddenSize> k_l1;
+  L1Mat<ComputeT, ChunkSize, HiddenSize> k_l1;
   TASSIGN(k_l1, 32768);
   TileAcc<float, ChunkSize, ChunkSize,
           ChunkSize, ChunkSize> qk_l0;
   TASSIGN(qk_l0, 0);
-  L1Mat<DTYPE_Q, HiddenSize, HiddenSize> s_l1;
+  L1Mat<ComputeT, HiddenSize, HiddenSize> s_l1;
   TASSIGN(s_l1, 65536);
   TileAcc<float, ChunkSize, HiddenSize,
           ChunkSize, HiddenSize> qs_l0;
-  TASSIGN(qs_l0, SecondL0CAddr);
-  L1Mat<DTYPE_Q, ChunkSize, ChunkSize> qk_gated_l1;
+  TASSIGN(qs_l0, 65536);
+  L1Mat<ComputeT, ChunkSize, ChunkSize> qk_gated_l1;
   TASSIGN(qk_gated_l1, 98304);
-  L1Mat<DTYPE_Q, ChunkSize, HiddenSize> v_l1;
+  L1Mat<ComputeT, ChunkSize, HiddenSize> v_l1;
   TASSIGN(v_l1, 131072);
   TileAcc<float, ChunkSize, HiddenSize,
           ChunkSize, HiddenSize> qkv_l0;
@@ -248,13 +247,13 @@ AICORE void GDN_CHUNK_O_KERNEL(
   // fit simultaneously in the ~256KB UB without overlapping:
   //   g_ub:       gate values [1, C] float            @ 0
   //   msk_ub:     causal mask [C/2, C] float          @ 512     (loaded once, reused)
-  //   qk_ub:      QK scores in float [C/2, C]         @ 33280   (after cast from DTYPE_Q)
+  //   qk_ub:      QK scores in float [C/2, C]         @ 33280   (after cast from ComputeT)
   //   g_v_ub:     this sub-block's gate slice [1, C/2] @ 66048
   //   coeff_ub:   gating coefficients [C/2, C] float  @ 66304
-  //   qk_ub_half: QK in DTYPE_Q [C/2, C]                @ 99072
-  //   qs_ub_half: QS in DTYPE_Q [C/2, D]                @ 115456
+  //   qk_ub_half: QK in ComputeT [C/2, C]                @ 99072
+  //   qs_ub_half: QS in ComputeT [C/2, D]                @ 115456
   //   qs_ub:      QS in float [C/2, D]               @ 131840
-  //   o_ub_half:  output O in DTYPE_Q [C/2, D]           @ 164608
+  //   o_ub_half:  output O in ComputeT [C/2, D]           @ 164608
   //   o_ub:       output O in float [C/2, D]          @ QKUbAddr (reuses qk_ub space)
   UbND<float, 1, ChunkSize> g_ub;
   TASSIGN(g_ub, GUbAddr);
@@ -266,13 +265,13 @@ AICORE void GDN_CHUNK_O_KERNEL(
   TASSIGN(g_v_ub, GvUbAddr);
   UbND<float, HalfChunk, ChunkSize> coeff_ub;
   TASSIGN(coeff_ub, CoeffUbAddr);
-  UbND<DTYPE_Q, HalfChunk, ChunkSize, HalfChunk, ChunkSize, PadValue::Zero> qk_ub_half;
+  UbND<ComputeT, HalfChunk, ChunkSize, HalfChunk, ChunkSize, PadValue::Zero> qk_ub_half;
   TASSIGN(qk_ub_half, QKHalfUbAddr);
-  UbND<DTYPE_Q, HalfChunk, HiddenSize, HalfChunk, HiddenSize, PadValue::Zero> qs_ub_half;
+  UbND<ComputeT, HalfChunk, HiddenSize, HalfChunk, HiddenSize, PadValue::Zero> qs_ub_half;
   TASSIGN(qs_ub_half, QSHalfUbAddr);
   UbND<float, HalfChunk, HiddenSize> qs_ub;
   TASSIGN(qs_ub, QSUbAddr);
-  UbND<DTYPE_Q, HalfChunk, HiddenSize, HalfChunk, HiddenSize, PadValue::Zero> o_ub_half;
+  UbND<ComputeT, HalfChunk, HiddenSize, HalfChunk, HiddenSize, PadValue::Zero> o_ub_half;
   TASSIGN(o_ub_half, OHalfUbAddr);
   UbND<float, HalfChunk, HiddenSize> o_ub;
   TASSIGN(o_ub, OUbAddr);
@@ -291,7 +290,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
 // performs the heavy matmuls, then writes results to GM workspace for
 // the Vec engine to apply gating and produce the final output.
 // =====================================================================
-#if defined(__DAV_C220_CUBE__)
+#if defined(__DAV_CUBE__)
   if (cu_seqlens == nullptr) {
     // ── Fixed-length sequence path ──────────────────────────────────────
     int64_t chunks_per_seq = (seq_len + ChunkSize - 1) / ChunkSize;
@@ -302,13 +301,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
          work_idx < total_work;
          work_idx += static_cast<int64_t>(block_num)) {
       // Wait for Vec to finish with previous chunk's workspace (flag 3)
-      if (!first_cube_iter) {
-#if defined(GDN_A5_CUBE_KERNEL)
-        GdnA5WaitMte2(3);
-#else
-        wait_flag_dev(3);
-#endif
-      }
+      if (!first_cube_iter) gdn_sync::Wait<PIPE_FIX>(3);
       set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
       wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
 
@@ -350,21 +343,21 @@ AICORE void GDN_CHUNK_O_KERNEL(
       // TLOAD performs DMA (MTE2 pipe). TFILLPAD zero-pads tail rows so
       // downstream GEMMs see a clean C×D matrix.
       {
-        L1Mat<DTYPE_Q, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
+        L1Mat<ComputeT, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
         TASSIGN(_l1, 0);
         GmShape2D _gs(valid_rows, HiddenSize);
         GmStride2D _stride(BSND_QK_STRIDE);
-        GmTensor2D<DTYPE_Q> _gm(Q_handle + qk_off, _gs, _stride);
+        GmTensor2D<ComputeT> _gm(Q_handle + qk_off, _gs, _stride);
         TLOAD(_l1, _gm);
         if (valid_rows != ChunkSize) TFILLPAD(_l1, _l1);
       }
       // ── Load K [valid_rows × D] from GM → L1 ────────────────────────
       {
-        L1Mat<DTYPE_Q, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
+        L1Mat<ComputeT, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
         TASSIGN(_l1, 32768);
         GmShape2D _gs(valid_rows, HiddenSize);
         GmStride2D _stride(BSND_QK_STRIDE);
-        GmTensor2D<DTYPE_Q> _gm(K_handle + qk_off, _gs, _stride);
+        GmTensor2D<ComputeT> _gm(K_handle + qk_off, _gs, _stride);
         TLOAD(_l1, _gm);
         if (valid_rows != ChunkSize) TFILLPAD(_l1, _l1);
       }
@@ -387,14 +380,14 @@ AICORE void GDN_CHUNK_O_KERNEL(
       // transpose_B: TRESHAPE converts k_l1 from NZ → ZN fractal layout,
       // effectively transposing K before TEXTRACT loads it into L0B.
       {
-        TileLeft<DTYPE_Q, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0a;
-        TileRight<DTYPE_Q, HiddenSize, ChunkSize, HiddenSize, ChunkSize> _l0b;
+        TileLeft<ComputeT, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0a;
+        TileRight<ComputeT, HiddenSize, ChunkSize, HiddenSize, ChunkSize> _l0b;
         TASSIGN(_l0a, 0x0); TASSIGN(_l0b, 0x0);
         auto _we = EVENT_ID1;
         set_flag(PIPE_MTE2, PIPE_MTE1, _we); wait_flag(PIPE_MTE2, PIPE_MTE1, _we);
         set_flag(PIPE_M, PIPE_MTE1, _we); wait_flag(PIPE_M, PIPE_MTE1, _we);
         TEXTRACT(_l0a, q_l1, 0, 0);
-        L1MatZN<DTYPE_Q, HiddenSize, ChunkSize> _bzn; TRESHAPE(_bzn, k_l1); TEXTRACT(_l0b, _bzn, 0, 0);
+        L1MatZN<ComputeT, HiddenSize, ChunkSize> _bzn; TRESHAPE(_bzn, k_l1); TEXTRACT(_l0b, _bzn, 0, 0);
         set_flag(PIPE_MTE1, PIPE_M, _we); wait_flag(PIPE_MTE1, PIPE_M, _we);
         TMATMUL(qk_l0, _l0a, _l0b);
         set_flag(PIPE_MTE1, PIPE_MTE2, _we); wait_flag(PIPE_MTE1, PIPE_MTE2, _we);
@@ -403,18 +396,18 @@ AICORE void GDN_CHUNK_O_KERNEL(
 
       // ── Load S [D × D] from GM → L1  (accumulated hidden state) ─────
       {
-        L1Mat<DTYPE_Q, HiddenSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(HiddenSize, HiddenSize);
+        L1Mat<ComputeT, HiddenSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(HiddenSize, HiddenSize);
         TASSIGN(_l1, 65536);
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = HiddenSize; _gs.shape[4] = HiddenSize;
-        GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(S_handle + s_offset, _gs);
+        GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(S_handle + s_offset, _gs);
         TLOAD(_l1, _gm);
       }
 
       // ── GEMM 2: QS = Q @ S  (query applied to accumulated state) ────
       {
-        TileLeft<DTYPE_Q, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0a;
-        TileRight<DTYPE_Q, HiddenSize, HiddenSize, HiddenSize, HiddenSize> _l0b;
+        TileLeft<ComputeT, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0a;
+        TileRight<ComputeT, HiddenSize, HiddenSize, HiddenSize, HiddenSize> _l0b;
         TASSIGN(_l0a, 0x0); TASSIGN(_l0b, 0x0);
         auto _we = EVENT_ID1;
         set_flag(PIPE_MTE2, PIPE_MTE1, _we); wait_flag(PIPE_MTE2, PIPE_MTE1, _we);
@@ -427,14 +420,14 @@ AICORE void GDN_CHUNK_O_KERNEL(
         set_flag(PIPE_M, PIPE_FIX, _we); wait_flag(PIPE_M, PIPE_FIX, _we);
       }
 
-      // ── Store QK [C × C] from L0C → GM workspace (FP32→DTYPE_Q cast) ───
+      // ── Store QK [C × C] from L0C → GM workspace (FP32→ComputeT cast) ───
       // TSTORE on TileAcc triggers MTE3 DMA with implicit type conversion.
       {
         TileAcc<float, ChunkSize, ChunkSize, DYNAMIC, DYNAMIC> _l0(ChunkSize, ChunkSize);
         TASSIGN(_l0, 0);
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = ChunkSize; _gs.shape[4] = ChunkSize;
-        GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
+        GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
             workspace_qk_handle +
                 static_cast<int64_t>(cid) * WsQKSize, _gs);
         TSTORE(_gm, _l0);
@@ -443,10 +436,10 @@ AICORE void GDN_CHUNK_O_KERNEL(
       // ── Store QS [C × D] from L0C → GM workspace ────────────────────
       {
         TileAcc<float, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l0(ChunkSize, HiddenSize);
-        TASSIGN(_l0, SecondL0CAddr);
+        TASSIGN(_l0, 65536);
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = ChunkSize; _gs.shape[4] = HiddenSize;
-        GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
+        GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
             workspace_qs_qkv_handle +
                 static_cast<int64_t>(cid) * WsQSSize, _gs);
         TSTORE(_gm, _l0);
@@ -458,7 +451,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
       // and coordinate via FFTS flags. Think of it as two processes communicating
       // through shared memory with semaphores.
       //
-      // ffts_cross_core_sync(PIPE_FIX, config):
+      // gdn_sync::Signal<PIPE_FIX>(config):
       //   config = 1 | (mode << 4) | (flag_id << 8)
       //   mode=2: broadcast signal to all cores in this block
       //   flag_id: identifies which signal (0, 1, 2, 3)
@@ -468,45 +461,41 @@ AICORE void GDN_CHUNK_O_KERNEL(
       //   flag 1: Vec→Cube "QK_gated is ready for GEMM 3"
       //   flag 2: Cube→Vec "QKV (GEMM 3 result) is ready"
       //   flag 3: Vec→Cube "I'm done with this chunk, you can reuse workspace"
-      ffts_cross_core_sync(PIPE_FIX, 1 | (2 << 4) | (0 << 8));
+      gdn_sync::Signal<PIPE_FIX>(1 | (2 << 4) | (0 << 8));
 
       // Wait for Vec to write QK_gated back (flag 1, Vec→Cube)
-#if defined(GDN_A5_CUBE_KERNEL)
-      GdnA5WaitMte2(1);
-#else
-      wait_flag_dev(1);
-#endif
+      gdn_sync::Wait<PIPE_MTE2>(1);
 
       set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
       wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
 
       // ── Load QK_gated [C × C] from GM workspace → L1 ────────────────
       {
-        L1Mat<DTYPE_Q, ChunkSize, ChunkSize, DYNAMIC, DYNAMIC> _l1(ChunkSize, ChunkSize);
+        L1Mat<ComputeT, ChunkSize, ChunkSize, DYNAMIC, DYNAMIC> _l1(ChunkSize, ChunkSize);
         TASSIGN(_l1, 98304);
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = ChunkSize; _gs.shape[4] = ChunkSize;
-        GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
+        GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
             workspace_qk_gated_handle +
                 static_cast<int64_t>(cid) * WsGatedSize, _gs);
         TLOAD(_l1, _gm);
       }
       // ── Load V [valid_rows × D] from GM → L1 ────────────────────────
       {
-        L1Mat<DTYPE_Q, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
+        L1Mat<ComputeT, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
         TASSIGN(_l1, 131072);
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = valid_rows; _gs.shape[4] = HiddenSize;
         GmStride2D _stride(BSND_V_STRIDE);
-        GmTensor2D<DTYPE_Q> _gm(V_handle + v_off, _gs, _stride);
+        GmTensor2D<ComputeT> _gm(V_handle + v_off, _gs, _stride);
         TLOAD(_l1, _gm);
         if (valid_rows != ChunkSize) TFILLPAD(_l1, _l1);
       }
 
       // ── GEMM 3: QKV = QK_gated @ V  (gated attention → values) ──────
       {
-        TileLeft<DTYPE_Q, ChunkSize, ChunkSize, ChunkSize, ChunkSize> _l0a;
-        TileRight<DTYPE_Q, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0b;
+        TileLeft<ComputeT, ChunkSize, ChunkSize, ChunkSize, ChunkSize> _l0a;
+        TileRight<ComputeT, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0b;
         TASSIGN(_l0a, 0x0); TASSIGN(_l0b, 0x0);
         auto _we = EVENT_ID1;
         set_flag(PIPE_MTE2, PIPE_MTE1, _we); wait_flag(PIPE_MTE2, PIPE_MTE1, _we);
@@ -533,14 +522,14 @@ AICORE void GDN_CHUNK_O_KERNEL(
         TASSIGN(_l0, 0);
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = ChunkSize; _gs.shape[4] = HiddenSize;
-        GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
+        GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
             workspace_qs_qkv_handle +
                 static_cast<int64_t>(cid) * WsQSSize, _gs);
         TSTORE(_gm, _l0);
       }
 
       // Signal Vec: QKV is ready (flag 2, Cube→Vec)
-      ffts_cross_core_sync(PIPE_FIX, 1 | (2 << 4) | (2 << 8));
+      gdn_sync::Signal<PIPE_FIX>(1 | (2 << 4) | (2 << 8));
       first_cube_iter = false;
     }
   } else {
@@ -558,13 +547,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
         for (int32_t h = 0; h < H; ++h) {
           if (gi % static_cast<int64_t>(block_num) ==
               static_cast<int64_t>(cid)) {
-            if (!first_cube_iter_v) {
-#if defined(GDN_A5_CUBE_KERNEL)
-              GdnA5WaitMte2(3);
-#else
-              wait_flag_dev(3);
-#endif
-            }
+            if (!first_cube_iter_v) gdn_sync::Wait<PIPE_FIX>(3);
             set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
             wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
 
@@ -591,35 +574,35 @@ AICORE void GDN_CHUNK_O_KERNEL(
 
             // Load Q
             {
-              L1Mat<DTYPE_Q, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
+              L1Mat<ComputeT, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
               TASSIGN(_l1, 0);
               GmShape2D _gs(valid_rows, HiddenSize);
               GmStride2D _stride(BSND_QK_STRIDE);
-              GmTensor2D<DTYPE_Q> _gm(Q_handle + qk_off, _gs, _stride);
+              GmTensor2D<ComputeT> _gm(Q_handle + qk_off, _gs, _stride);
               TLOAD(_l1, _gm);
               if (valid_rows != ChunkSize) TFILLPAD(_l1, _l1);
             }
             // Load K
             {
-              L1Mat<DTYPE_Q, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
+              L1Mat<ComputeT, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
               TASSIGN(_l1, 32768);
               GmShape2D _gs(valid_rows, HiddenSize);
               GmStride2D _stride(BSND_QK_STRIDE);
-              GmTensor2D<DTYPE_Q> _gm(K_handle + qk_off, _gs, _stride);
+              GmTensor2D<ComputeT> _gm(K_handle + qk_off, _gs, _stride);
               TLOAD(_l1, _gm);
               if (valid_rows != ChunkSize) TFILLPAD(_l1, _l1);
             }
 
             // GEMM 1: QK = Q @ K^T (transpose_B via TRESHAPE NZ→ZN)
             {
-              TileLeft<DTYPE_Q, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0a;
-              TileRight<DTYPE_Q, HiddenSize, ChunkSize, HiddenSize, ChunkSize> _l0b;
+              TileLeft<ComputeT, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0a;
+              TileRight<ComputeT, HiddenSize, ChunkSize, HiddenSize, ChunkSize> _l0b;
               TASSIGN(_l0a, 0x0); TASSIGN(_l0b, 0x0);
               auto _we = EVENT_ID1;
               set_flag(PIPE_MTE2, PIPE_MTE1, _we); wait_flag(PIPE_MTE2, PIPE_MTE1, _we);
               set_flag(PIPE_M, PIPE_MTE1, _we); wait_flag(PIPE_M, PIPE_MTE1, _we);
               TEXTRACT(_l0a, q_l1, 0, 0);
-              L1MatZN<DTYPE_Q, HiddenSize, ChunkSize> _bzn; TRESHAPE(_bzn, k_l1); TEXTRACT(_l0b, _bzn, 0, 0);
+              L1MatZN<ComputeT, HiddenSize, ChunkSize> _bzn; TRESHAPE(_bzn, k_l1); TEXTRACT(_l0b, _bzn, 0, 0);
               set_flag(PIPE_MTE1, PIPE_M, _we); wait_flag(PIPE_MTE1, PIPE_M, _we);
               TMATMUL(qk_l0, _l0a, _l0b);
               set_flag(PIPE_MTE1, PIPE_MTE2, _we); wait_flag(PIPE_MTE1, PIPE_MTE2, _we);
@@ -628,18 +611,18 @@ AICORE void GDN_CHUNK_O_KERNEL(
 
             // Load S
             {
-              L1Mat<DTYPE_Q, HiddenSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(HiddenSize, HiddenSize);
+              L1Mat<ComputeT, HiddenSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(HiddenSize, HiddenSize);
               TASSIGN(_l1, 65536);
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
               _gs.shape[3] = HiddenSize; _gs.shape[4] = HiddenSize;
-              GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(S_handle + s_offset, _gs);
+              GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(S_handle + s_offset, _gs);
               TLOAD(_l1, _gm);
             }
 
             // GEMM 2: QS = Q @ S
             {
-              TileLeft<DTYPE_Q, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0a;
-              TileRight<DTYPE_Q, HiddenSize, HiddenSize, HiddenSize, HiddenSize> _l0b;
+              TileLeft<ComputeT, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0a;
+              TileRight<ComputeT, HiddenSize, HiddenSize, HiddenSize, HiddenSize> _l0b;
               TASSIGN(_l0a, 0x0); TASSIGN(_l0b, 0x0);
               auto _we = EVENT_ID1;
               set_flag(PIPE_MTE2, PIPE_MTE1, _we); wait_flag(PIPE_MTE2, PIPE_MTE1, _we);
@@ -658,7 +641,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
               TASSIGN(_l0, 0);
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
               _gs.shape[3] = ChunkSize; _gs.shape[4] = ChunkSize;
-              GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
+              GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
                   workspace_qk_handle +
                       static_cast<int64_t>(cid) * WsQKSize, _gs);
               TSTORE(_gm, _l0);
@@ -667,55 +650,51 @@ AICORE void GDN_CHUNK_O_KERNEL(
             // Store QS → workspace
             {
               TileAcc<float, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l0(ChunkSize, HiddenSize);
-              TASSIGN(_l0, SecondL0CAddr);
+              TASSIGN(_l0, 65536);
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
               _gs.shape[3] = ChunkSize; _gs.shape[4] = HiddenSize;
-              GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
+              GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
                   workspace_qs_qkv_handle +
                       static_cast<int64_t>(cid) * WsQSSize, _gs);
               TSTORE(_gm, _l0);
             }
 
             // Cube→Vec: QK & QS ready (flag 0)
-            ffts_cross_core_sync(PIPE_FIX, 1 | (2 << 4) | (0 << 8));
+            gdn_sync::Signal<PIPE_FIX>(1 | (2 << 4) | (0 << 8));
 
             // Wait Vec→Cube: QK_gated ready (flag 1)
-#if defined(GDN_A5_CUBE_KERNEL)
-            GdnA5WaitMte2(1);
-#else
-            wait_flag_dev(1);
-#endif
+            gdn_sync::Wait<PIPE_MTE2>(1);
 
             set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
             wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
 
             // Load QK_gated
             {
-              L1Mat<DTYPE_Q, ChunkSize, ChunkSize, DYNAMIC, DYNAMIC> _l1(ChunkSize, ChunkSize);
+              L1Mat<ComputeT, ChunkSize, ChunkSize, DYNAMIC, DYNAMIC> _l1(ChunkSize, ChunkSize);
               TASSIGN(_l1, 98304);
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
               _gs.shape[3] = ChunkSize; _gs.shape[4] = ChunkSize;
-              GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
+              GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
                   workspace_qk_gated_handle +
                       static_cast<int64_t>(cid) * WsGatedSize, _gs);
               TLOAD(_l1, _gm);
             }
             // Load V
             {
-              L1Mat<DTYPE_Q, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
+              L1Mat<ComputeT, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
               TASSIGN(_l1, 131072);
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
               _gs.shape[3] = valid_rows; _gs.shape[4] = HiddenSize;
               GmStride2D _stride(BSND_V_STRIDE);
-              GmTensor2D<DTYPE_Q> _gm(V_handle + v_off, _gs, _stride);
+              GmTensor2D<ComputeT> _gm(V_handle + v_off, _gs, _stride);
               TLOAD(_l1, _gm);
               if (valid_rows != ChunkSize) TFILLPAD(_l1, _l1);
             }
 
             // GEMM 3: QKV = QK_gated @ V
             {
-              TileLeft<DTYPE_Q, ChunkSize, ChunkSize, ChunkSize, ChunkSize> _l0a;
-              TileRight<DTYPE_Q, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0b;
+              TileLeft<ComputeT, ChunkSize, ChunkSize, ChunkSize, ChunkSize> _l0a;
+              TileRight<ComputeT, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0b;
               TASSIGN(_l0a, 0x0); TASSIGN(_l0b, 0x0);
               auto _we = EVENT_ID1;
               set_flag(PIPE_MTE2, PIPE_MTE1, _we); wait_flag(PIPE_MTE2, PIPE_MTE1, _we);
@@ -733,13 +712,13 @@ AICORE void GDN_CHUNK_O_KERNEL(
               TASSIGN(_l0, 0);
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
               _gs.shape[3] = ChunkSize; _gs.shape[4] = HiddenSize;
-              GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
+              GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
                   workspace_qs_qkv_handle +
                       static_cast<int64_t>(cid) * WsQSSize, _gs);
               TSTORE(_gm, _l0);
             }
 
-            ffts_cross_core_sync(PIPE_FIX, 1 | (2 << 4) | (2 << 8));
+            gdn_sync::Signal<PIPE_FIX>(1 | (2 << 4) | (2 << 8));
             first_cube_iter_v = false;
           }
           gi++;
@@ -759,7 +738,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
 //   3. Scales the Cube's QS result by exp(g)
 //   4. Combines QKV + scaled QS → final output O
 // =====================================================================
-#if defined(__DAV_C220_VEC__)
+#if defined(__DAV_VEC__)
   // Vec engine initialization: set_mask_norm selects "normal" masking mode,
   // and set_vector_mask(-1, -1) enables ALL SIMD lanes (no masking).
   set_mask_norm();
@@ -859,22 +838,22 @@ AICORE void GDN_CHUNK_O_KERNEL(
         TROWEXPAND(g_r_2d, g_v_col);       // g_r_2d[i,j] = g_row[i]
         TCOLEXPAND(coeff_ub, g_ub);        // coeff[i,j] = g_col[j]
         TSUB(coeff_ub, g_r_2d, coeff_ub);  // d = g_row - g_col
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
         TMINS(coeff_ub, coeff_ub, 0.0f);
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
         TEXP(coeff_ub, coeff_ub);
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
         TMUL(coeff_ub, coeff_ub, msk_ub);
-        pipe_barrier(PIPE_V);
+        gdn_sync::VectorBarrier();
         TEXP(g_v_ub, g_v_ub);              // exp(g_row) for QS scaling
       }
 
       // ── Wait for Cube→Vec flag 0: QK & QS ready ─────────────────────
-      wait_flag_dev(0);
+      gdn_sync::Wait<PIPE_MTE2>(0);
       if (local_rows == 0) {
-        ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (1 << 8));
-        wait_flag_dev(2);
-        ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (3 << 8));
+        gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (1 << 8));
+        gdn_sync::Wait<PIPE_MTE2>(2);
+        gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (3 << 8));
         continue;
       }
 
@@ -882,11 +861,11 @@ AICORE void GDN_CHUNK_O_KERNEL(
       {
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = local_rows; _gs.shape[4] = ChunkSize;
-        GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
+        GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
             workspace_qk_handle +
                 static_cast<int64_t>(cid) * WsQKSize +
                 static_cast<int64_t>(vid) * HalfChunk * ChunkSize, _gs);
-        UbND<DTYPE_Q, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, ChunkSize);
+        UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, ChunkSize);
         TASSIGN(_ld, QKHalfUbAddr);
         TLOAD(_ld, _gm);
         if (local_rows != HalfChunk) {
@@ -905,11 +884,11 @@ AICORE void GDN_CHUNK_O_KERNEL(
       {
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = local_rows; _gs.shape[4] = HiddenSize;
-        GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
+        GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
             workspace_qs_qkv_handle +
                 static_cast<int64_t>(cid) * WsQSSize +
                 static_cast<int64_t>(vid) * HalfChunk * HiddenSize, _gs);
-        UbND<DTYPE_Q, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, HiddenSize);
+        UbND<ComputeT, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, HiddenSize);
         TASSIGN(_ld, QSHalfUbAddr);
         TLOAD(_ld, _gm);
         if (local_rows != HalfChunk) {
@@ -927,16 +906,16 @@ AICORE void GDN_CHUNK_O_KERNEL(
       {
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = local_rows; _gs.shape[4] = ChunkSize;
-        GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
+        GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
             workspace_qk_gated_handle +
                 static_cast<int64_t>(cid) * WsGatedSize +
                 static_cast<int64_t>(vid) * HalfChunk * ChunkSize, _gs);
-        UbND<DTYPE_Q, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC> _st(local_rows, ChunkSize);
+        UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC> _st(local_rows, ChunkSize);
         TASSIGN(_st, QKHalfUbAddr);
         TSTORE(_gm, _st);
       }
       // Vec→Cube: QK_gated ready (flag 1)
-      ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (1 << 8));
+      gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (1 << 8));
 
       // ── Scale QS by exp(g): QS_gated = QS * exp(g_row) ──────────────
       // ── Scale QS by exp(g): inter-chunk state contribution ────────────
@@ -952,21 +931,21 @@ AICORE void GDN_CHUNK_O_KERNEL(
       UbDN<float, HalfChunk, 1> g_v_col2;
       TASSIGN(g_v_col2, GvUbAddr);
       TROWEXPAND(g_exp_2d, g_v_col2);    // broadcast exp(g_row) across columns
-      pipe_barrier(PIPE_V);
+      gdn_sync::VectorBarrier();
       TMUL(qs_ub, qs_ub, g_exp_2d);      // QS_gated = QS * exp(g_row)
 
       // ── Wait for Cube→Vec flag 2: QKV ready ─────────────────────────
-      wait_flag_dev(2);
+      gdn_sync::Wait<PIPE_MTE2>(2);
 
       // ── Load QKV [C/2 × D] from workspace → UB ──────────────────────
       {
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = local_rows; _gs.shape[4] = HiddenSize;
-        GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
+        GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
             workspace_qs_qkv_handle +
                 static_cast<int64_t>(cid) * WsQSSize +
                 static_cast<int64_t>(vid) * HalfChunk * HiddenSize, _gs);
-        UbND<DTYPE_Q, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, HiddenSize);
+        UbND<ComputeT, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, HiddenSize);
         TASSIGN(_ld, OHalfUbAddr);
         TLOAD(_ld, _gm);
         if (local_rows != HalfChunk) {
@@ -981,7 +960,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
       // ── Final output: O = QKV + QS_scaled ─────────────────────────────
       // numpy: O = (QK_gated @ V) + (Q @ S) * exp(g)[:, None]
       //       = intra_chunk_attention + inter_chunk_state_contribution
-      // TCVT DTYPE_Q→float for QKV, then TADD, then TCVT float→DTYPE_Q for output.
+      // TCVT ComputeT→float for QKV, then TADD, then TCVT float→ComputeT for output.
       TCVT(o_ub, o_ub_half, pto::RoundMode::CAST_NONE);
       TADD(o_ub, qs_ub, o_ub);
       TCVT(o_ub_half, o_ub, pto::RoundMode::CAST_NONE);
@@ -1001,14 +980,14 @@ AICORE void GDN_CHUNK_O_KERNEL(
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = local_rows; _gs.shape[4] = HiddenSize;
         GmStride2D _stride(BSND_V_STRIDE);
-        GmTensor2D<DTYPE_Q> _gm(O_handle + o_offset, _gs, _stride);
-        UbND<DTYPE_Q, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC> _st(local_rows, HiddenSize);
+        GmTensor2D<ComputeT> _gm(O_handle + o_offset, _gs, _stride);
+        UbND<ComputeT, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC> _st(local_rows, HiddenSize);
         TASSIGN(_st, OHalfUbAddr);
         TSTORE(_gm, _st);
       }
 
       // Vec→Cube: done with this chunk (flag 3)
-      ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (3 << 8));
+      gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (3 << 8));
     }
   } else {
     // ── Variable-length sequence path (cu_seqlens != nullptr) ──────────
@@ -1069,31 +1048,31 @@ AICORE void GDN_CHUNK_O_KERNEL(
               TROWEXPAND(g_r_2d_v, g_v_col_v);
               TCOLEXPAND(coeff_ub, g_ub);
               TSUB(coeff_ub, g_r_2d_v, coeff_ub);  // d = g_row - g_col
-              pipe_barrier(PIPE_V);
+              gdn_sync::VectorBarrier();
               TMINS(coeff_ub, coeff_ub, 0.0f);
-              pipe_barrier(PIPE_V);
+              gdn_sync::VectorBarrier();
               TEXP(coeff_ub, coeff_ub);
-              pipe_barrier(PIPE_V);
+              gdn_sync::VectorBarrier();
               TMUL(coeff_ub, coeff_ub, msk_ub);
-              pipe_barrier(PIPE_V);
+              gdn_sync::VectorBarrier();
               TEXP(g_v_ub, g_v_ub);
             }
 
-            wait_flag_dev(0);
+            gdn_sync::Wait<PIPE_MTE2>(0);
             if (local_rows == 0) {
-              ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (1 << 8));
-              wait_flag_dev(2);
-              ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (3 << 8));
+              gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (1 << 8));
+              gdn_sync::Wait<PIPE_MTE2>(2);
+              gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (3 << 8));
             } else {
               // Load QK from workspace
               {
                 Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
                 _gs.shape[3] = local_rows; _gs.shape[4] = ChunkSize;
-                GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
+                GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
                     workspace_qk_handle +
                         static_cast<int64_t>(cid) * WsQKSize +
                         static_cast<int64_t>(vid) * HalfChunk * ChunkSize, _gs);
-                UbND<DTYPE_Q, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, ChunkSize);
+                UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, ChunkSize);
                 TASSIGN(_ld, QKHalfUbAddr);
                 TLOAD(_ld, _gm);
                 if (local_rows != HalfChunk) {
@@ -1112,11 +1091,11 @@ AICORE void GDN_CHUNK_O_KERNEL(
               {
                 Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
                 _gs.shape[3] = local_rows; _gs.shape[4] = HiddenSize;
-                GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
+                GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
                     workspace_qs_qkv_handle +
                         static_cast<int64_t>(cid) * WsQSSize +
                         static_cast<int64_t>(vid) * HalfChunk * HiddenSize, _gs);
-                UbND<DTYPE_Q, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, HiddenSize);
+                UbND<ComputeT, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, HiddenSize);
                 TASSIGN(_ld, QSHalfUbAddr);
                 TLOAD(_ld, _gm);
                 if (local_rows != HalfChunk) {
@@ -1125,7 +1104,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
               }
 
               TMUL(qk_ub, qk_ub, coeff_ub);
-              TCVT(qk_ub_half, qk_ub, pto::RoundMode::CAST_NONE);  // float→DTYPE_Q for GM store
+              TCVT(qk_ub_half, qk_ub, pto::RoundMode::CAST_NONE);  // float→ComputeT for GM store
 
               // Store QK_gated → workspace
               set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
@@ -1133,42 +1112,42 @@ AICORE void GDN_CHUNK_O_KERNEL(
               {
                 Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
                 _gs.shape[3] = local_rows; _gs.shape[4] = ChunkSize;
-                GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
+                GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
                     workspace_qk_gated_handle +
                         static_cast<int64_t>(cid) * WsGatedSize +
                         static_cast<int64_t>(vid) * HalfChunk * ChunkSize, _gs);
-                UbND<DTYPE_Q, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC> _st(local_rows, ChunkSize);
+                UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC> _st(local_rows, ChunkSize);
                 TASSIGN(_st, QKHalfUbAddr);
                 TSTORE(_gm, _st);
               }
               // Vec→Cube: QK_gated ready (flag 1)
-              ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (1 << 8));
+              gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (1 << 8));
 
               // Scale QS by exp(g): QS_scaled = QS * exp(g_row)[:, None]
               // (same inter-chunk state scaling as fixed-length path)
               set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
               wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-              TCVT(qs_ub, qs_ub_half, pto::RoundMode::CAST_NONE);  // DTYPE_Q→float for Vec math
+              TCVT(qs_ub, qs_ub_half, pto::RoundMode::CAST_NONE);  // ComputeT→float for Vec math
 
               UbND<float, HalfChunk, HiddenSize> g_exp_2d_v;
               TASSIGN(g_exp_2d_v, CoeffUbAddr);
               UbDN<float, HalfChunk, 1> g_v_col2_v;
               TASSIGN(g_v_col2_v, GvUbAddr);
               TROWEXPAND(g_exp_2d_v, g_v_col2_v);
-              pipe_barrier(PIPE_V);
+              gdn_sync::VectorBarrier();
               TMUL(qs_ub, qs_ub, g_exp_2d_v);
 
-              wait_flag_dev(2);
+              gdn_sync::Wait<PIPE_MTE2>(2);
 
               // Load QKV from workspace
               {
                 Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
                 _gs.shape[3] = local_rows; _gs.shape[4] = HiddenSize;
-                GlobalTensor<DTYPE_Q, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
+                GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
                     workspace_qs_qkv_handle +
                         static_cast<int64_t>(cid) * WsQSSize +
                         static_cast<int64_t>(vid) * HalfChunk * HiddenSize, _gs);
-                UbND<DTYPE_Q, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, HiddenSize);
+                UbND<ComputeT, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, HiddenSize);
                 TASSIGN(_ld, OHalfUbAddr);
                 TLOAD(_ld, _gm);
                 if (local_rows != HalfChunk) {
@@ -1180,9 +1159,9 @@ AICORE void GDN_CHUNK_O_KERNEL(
               wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
               // O = QS_gated + QKV  (final output: intra-chunk attention + inter-chunk state)
-              TCVT(o_ub, o_ub_half, pto::RoundMode::CAST_NONE);  // DTYPE_Q→float
+              TCVT(o_ub, o_ub_half, pto::RoundMode::CAST_NONE);  // ComputeT→float
               TADD(o_ub, qs_ub, o_ub);                            // O = QS_scaled + QKV
-              TCVT(o_ub_half, o_ub, pto::RoundMode::CAST_NONE);  // float→DTYPE_Q for GM store
+              TCVT(o_ub_half, o_ub, pto::RoundMode::CAST_NONE);  // float→ComputeT for GM store
 
               // Store O → GM
               set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
@@ -1199,14 +1178,14 @@ AICORE void GDN_CHUNK_O_KERNEL(
                 Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
                 _gs.shape[3] = local_rows; _gs.shape[4] = HiddenSize;
                 GmStride2D _stride(BSND_V_STRIDE);
-                GmTensor2D<DTYPE_Q> _gm(O_handle + o_offset, _gs, _stride);
-                UbND<DTYPE_Q, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC> _st(local_rows, HiddenSize);
+                GmTensor2D<ComputeT> _gm(O_handle + o_offset, _gs, _stride);
+                UbND<ComputeT, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC> _st(local_rows, HiddenSize);
                 TASSIGN(_st, OHalfUbAddr);
                 TSTORE(_gm, _st);
               }
 
               // Vec→Cube: done with this chunk (flag 3)
-              ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (3 << 8));
+              gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (3 << 8));
             }
           }
           gi++;

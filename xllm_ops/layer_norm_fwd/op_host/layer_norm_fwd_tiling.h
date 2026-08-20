@@ -21,6 +21,7 @@ TILING_DATA_FIELD_DEF(uint32_t, has_bias);
 TILING_DATA_FIELD_DEF(uint32_t, has_z);
 TILING_DATA_FIELD_DEF(uint32_t, norm_before_gate);
 TILING_DATA_FIELD_DEF(uint32_t, is_rms_norm);
+TILING_DATA_FIELD_DEF(uint32_t, use_a2_scalar_store_fix);
 TILING_DATA_FIELD_DEF(uint32_t, kernel_mode);
 END_TILING_DATA_DEF;
 

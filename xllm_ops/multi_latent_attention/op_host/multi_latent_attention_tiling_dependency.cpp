@@ -110,13 +110,14 @@ void GetAddrOffsetMLA(uint32_t *tilingParam, const AddrOffsets addrOffsets, cons
 
 int32_t GetQNBlockTile(const MLAInfo &mmInfo, int32_t qSeqLen)
 {
+    qSeqLen = std::max<int32_t>(qSeqLen, 1);
     int32_t tileListIdx = static_cast<int32_t>(std::ceil(std::log2(qSeqLen)));
     tileListIdx = (tileListIdx > NUM5) ? NUM5 : tileListIdx;
     int32_t qNBlockTile = QN_TILE_LIST[tileListIdx];
-    int32_t group = mmInfo.numHeads / mmInfo.kvHeads;
+    int32_t group = mmInfo.numHeads / std::max<int32_t>(mmInfo.kvHeads, 1);
     qNBlockTile = (qNBlockTile > group) ? group : qNBlockTile;
 
-    return qNBlockTile;
+    return std::max<int32_t>(qNBlockTile, 1);
 }
 
 int32_t GetMaxQseqlen(const OpParam::MLA &param)
@@ -124,7 +125,7 @@ int32_t GetMaxQseqlen(const OpParam::MLA &param)
     auto qSeqLen = param.qSeqLen;
     auto maxQSeqlenIter = std::max_element(qSeqLen.begin(), qSeqLen.end());
     auto maxQseqlen = maxQSeqlenIter != qSeqLen.end() ? *maxQSeqlenIter : 1;
-    return maxQseqlen;
+    return std::max<int32_t>(maxQseqlen, 1);
 }
 
 int32_t GetMaxKVseqlen(const OpParam::MLA &param)
@@ -132,7 +133,7 @@ int32_t GetMaxKVseqlen(const OpParam::MLA &param)
     auto kvSeqLen = param.kvSeqLen;
     auto maxKVSeqlenIter = std::max_element(kvSeqLen.begin(), kvSeqLen.end());
     auto maxKVseqlen = maxKVSeqlenIter != kvSeqLen.end() ? *maxKVSeqlenIter : 1;
-    return maxKVseqlen;
+    return std::max<int32_t>(maxKVseqlen, 1);
 }
 
 ge::graphStatus GetNdMLATiling(const MLAInfo &mmInfo, uint32_t &blockDim, uint32_t *tilingParam,
@@ -220,6 +221,9 @@ void GetTilingHead(const MLAInfo &mmInfo, const OpParam::MLA &param, uint32_t *t
 ge::graphStatus GetMLATilingParam(OpParam::MLA param, const MLAInfo &mmInfo,
     uint32_t &blockDim, uint32_t *tilingParam, uint64_t tilingParamSize)
 {
+    if (mmInfo.batch <= 0 || mmInfo.totalTaskNum <= 0 || mmInfo.kvSeqLen == nullptr) {
+        return ge::GRAPH_FAILED;
+    }
     float tor = mmInfo.tor;
     uint32_t *torPtr = reinterpret_cast<uint32_t *>(&tor);
 
@@ -236,6 +240,7 @@ ge::graphStatus GetMLATilingParam(OpParam::MLA param, const MLAInfo &mmInfo,
         }
 
         blockDim = mmInfo.batch == BATCH_MLA ? BLOCK_DIM_MLA : blockDim;
+        blockDim = std::max<uint32_t>(blockDim, 1);
     }
     GetTilingHead(mmInfo, param, tilingParam, torPtr);
     return ge::GRAPH_SUCCESS;

@@ -137,6 +137,12 @@ OpParam::MLA GetParamFromTilingContext(gert::TilingContext *context) {
             param.kvSeqLen.push_back(reinterpret_cast<const int64_t *>(kvSeqLenAttr)[i]);
         }
     }
+    if (param.kvSeqLen.empty()) {
+        param.kvSeqLen.push_back(1);
+    }
+    if (!param.qSeqLen.empty() && param.qSeqLen.size() < param.kvSeqLen.size()) {
+        param.qSeqLen.resize(param.kvSeqLen.size(), 1);
+    }
     return param;
 }
 
@@ -149,11 +155,13 @@ uint64_t GetTilingSize(OpParam::MLA param) {
 
     uint32_t launchBufferSize_ = AtbOps::Utils::RoundUp((TILING_PARA_SIZE + TILING_HEAD_SIZE) * sizeof(uint32_t), TILINGMIN);
 
-    auto batch = param.kvSeqLen.size();
+    auto batch = std::max<size_t>(param.kvSeqLen.size(), 1);
     if (param.headSize == M_LIMIT) {
-        uint64_t taskNum = param.qSeqLen.data() == nullptr ? batch :
+        uint64_t taskNum = param.qSeqLen.empty() ? batch :
                            std::accumulate(param.qSeqLen.data(),
-                                           param.qSeqLen.data() + batch, static_cast<int32_t>(0));
+                                           param.qSeqLen.data() + std::min(batch, param.qSeqLen.size()),
+                                           static_cast<int32_t>(0));
+        taskNum = std::max<uint64_t>(taskNum, 1);
         uint64_t bufferSize =
                 AtbOps::Utils::RoundUp(launchBufferSize_ + TILING_PARA_SIZE_TP1 * (taskNum - 1) * sizeof(uint32_t), TILINGMIN);
         return bufferSize;
@@ -173,10 +181,17 @@ ge::graphStatus MLATiling(gert::TilingContext *context)
     MLAInfo mmInfo = {};
     GetTilingKeyTypeBase(mmInfo, qTensor, qRopeTensor);
     GetMLAInfo(context, mmInfo, param);
+    if (mmInfo.batch <= 0 || mmInfo.totalTaskNum <= 0 || mmInfo.kvSeqLen == nullptr) {
+        return ge::GRAPH_FAILED;
+    }
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     
-    auto blockDim = ascendcPlatform.GetCoreNumAic();
+    uint32_t blockDim = ascendcPlatform.GetCoreNumAic();
+    if (blockDim == 0) {
+        blockDim = ascendcPlatform.GetCoreNumAiv();
+    }
+    blockDim = std::max<uint32_t>(blockDim, 1);
 
     uint64_t tilingSizeWithoutWorkspaceParam = GetTilingSize(param);
     uint64_t tilingSizeWithWorkSpace = sizeof(uint64_t) * 6 + tilingSizeWithoutWorkspaceParam;
@@ -228,6 +243,7 @@ ge::graphStatus MLATiling(gert::TilingContext *context)
         return ret2;
     }
 
+    blockDim = std::max<uint32_t>(blockDim, 1);
     context->SetBlockDim(blockDim);
     return ge::GRAPH_SUCCESS;
 }

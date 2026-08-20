@@ -15,11 +15,13 @@ limitations under the License.
 
 #include "mega_chunk_gdn_l0.h"
 
+#include <cstdint>
+
+#include "acl/acl_rt.h"
 #include "aclnn_kernels/common/op_error_check.h"
 #include "opdev/op_def.h"
 #include "opdev/op_dfx.h"
 #include "opdev/op_log.h"
-#include "runtime/rt_ffts.h"
 
 using namespace op;
 
@@ -68,9 +70,14 @@ MegaChunkGdn(const aclTensor *q, const aclTensor *k, const aclTensor *v, const a
              OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "MegaChunkGdn AllocTensor failed."),
              return MakeNullOutputs());
 
-    uint32_t fftsLen = 0;
-    uint64_t fftsAddr = 0;
-    (void)rtGetC2cCtrlAddr(&fftsAddr, &fftsLen);
+    void *hardwareSyncAddr = nullptr;
+    const aclError aclRet = aclrtGetHardwareSyncAddr(&hardwareSyncAddr);
+    const bool hardwareSyncAddrNotRequired = aclRet == ACL_ERROR_RT_FEATURE_NOT_SUPPORT;
+    OP_CHECK(hardwareSyncAddrNotRequired || (aclRet == ACL_SUCCESS && hardwareSyncAddr != nullptr),
+             OP_LOGE(ACLNN_ERR_RUNTIME_ERROR, "aclrtGetHardwareSyncAddr failed, ret=%d.", aclRet),
+             return MakeNullOutputs());
+    const uint64_t fftsAddr =
+        hardwareSyncAddrNotRequired ? 0 : static_cast<uint64_t>(reinterpret_cast<uintptr_t>(hardwareSyncAddr));
 
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(
         MegaChunkGdn, OP_INPUT(q, k, v, g, beta, maskLower, maskFull, minusIdentity, cuSeqlens, initialState),

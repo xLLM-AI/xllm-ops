@@ -20,6 +20,7 @@ SUPPORTED_HEAD_CONFIGS = [
     pytest.param(2, 1, id="H2-Hg1"),
     pytest.param(4, 2, id="H4-Hg2"),
     pytest.param(6, 2, id="H6-Hg2"),
+    pytest.param(12, 4, id="H12-Hg4"),
     pytest.param(16, 4, id="H16-Hg4"),
     pytest.param(16, 8, id="H16-Hg8"),
     pytest.param(16, 16, id="H16-Hg16"),
@@ -176,12 +177,15 @@ def _run_mega(q_cpu, k_cpu, v_cpu, g_cpu, beta_cpu, cu_list=None, initial_state_
 @pytest.mark.parametrize(
     ("total_tokens", "cu_list", "num_value_heads", "num_key_heads"),
     [
+        pytest.param(22, None, 12, 4, id="qwen35-tp4-short-H12-Hg4"),
+        pytest.param(47, [0, 22, 47], 12, 4, id="qwen35-tp4-ragged-short-H12-Hg4"),
         pytest.param(129, None, 2, 1, id="single-H2-Hg1"),
         pytest.param(129, None, 4, 2, id="single-H4-Hg2"),
         pytest.param(129, None, 6, 2, id="single-H6-Hg2"),
         pytest.param(129, None, 16, 4, id="single-H16-Hg4"),
         pytest.param(256, [0, 96, 128, 256], 32, 8, id="varlen-H32-Hg8"),
         pytest.param(512, [0, 96, 128, 512], 48, 16, id="long-varlen-H48-Hg16"),
+        pytest.param(1401, None, 12, 4, id="qwen35-tp4-long-H12-Hg4"),
     ],
 )
 @pytest.mark.parametrize("compute_dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
@@ -242,9 +246,32 @@ def test_mega_chunk_gdn_supported_head_configs(num_value_heads, num_key_heads, c
     )
 
 
-def test_mega_chunk_gdn_prefill_warmup_h4_hg2_smoke():
+def test_mega_chunk_gdn_bf16_correlated_input_stays_finite():
+    total_tokens = 512
+    num_value_heads = 24
+    num_key_heads = 8
+    head_dim = 128
+
+    q = torch.zeros(1, total_tokens, num_key_heads, head_dim, dtype=torch.bfloat16)
+    q[..., 0] = 1
+    k = q.clone()
+    v = torch.ones(1, total_tokens, num_value_heads, head_dim, dtype=torch.bfloat16)
+    g = torch.full((1, total_tokens, num_value_heads), -0.0005, dtype=torch.float32)
+    beta = torch.full((1, total_tokens, num_value_heads), 0.9765625, dtype=torch.bfloat16)
+
+    out, final_state = _run_mega(q, k, v, g, beta, output_final_state=True)
+
+    assert out.dtype == torch.bfloat16
+    assert torch.isfinite(out.float()).all()
+    assert torch.isfinite(final_state.float()).all()
+    assert out.float().abs().max() < 1
+    assert final_state.float().abs().max() < 2
+
+
+@pytest.mark.parametrize("compute_dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+def test_mega_chunk_gdn_prefill_warmup_h4_hg2_smoke(compute_dtype):
     total_tokens = 8192
-    q, k, v, g, beta = _make_inputs(total_tokens, 4, 2, seed=3)
+    q, k, v, g, beta = _make_inputs(total_tokens, 4, 2, seed=3, dtype=compute_dtype)
 
     out, final_state = _run_mega(q, k, v, g, beta, output_final_state=True)
 

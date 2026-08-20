@@ -237,7 +237,17 @@ __aicore__ inline float SqrtValue(LocalTensor<float> scalar, float value) {
 
 __aicore__ inline void StoreFloatValues(GlobalTensor<float> dst,
                                         LocalTensor<float> src,
-                                        uint32_t count) {
+                                        uint32_t count,
+                                        uint32_t use_a2_scalar_store_fix) {
+  if (use_a2_scalar_store_fix != 0 && count == kFp32BlockElems) {
+    WaitVToS();
+    for (uint32_t i = 0; i < count; ++i) {
+      dst.SetValue(i, src.GetValue(i));
+    }
+    DataCacheCleanAndInvalid<float, CacheLine::SINGLE_CACHE_LINE,
+                             DcciDst::CACHELINE_OUT>(dst);
+    return;
+  }
   if (count >= kFp32BlockElems && count % kFp32BlockElems == 0) {
     DataCopyExtParams params;
     params.blockCount = 1;
@@ -433,7 +443,8 @@ class KernelFullRow {
                               uint32_t has_bias,
                               uint32_t has_z,
                               uint32_t norm_before_gate,
-                              uint32_t is_rms_norm) {
+                              uint32_t is_rms_norm,
+                              uint32_t use_a2_scalar_store_fix) {
     m_ = m;
     fullN_ = full_n;
     groupSize_ = group_size;
@@ -448,6 +459,7 @@ class KernelFullRow {
     hasZ_ = has_z;
     normBeforeGate_ = norm_before_gate;
     isRmsNorm_ = is_rms_norm;
+    useA2ScalarStoreFix_ = use_a2_scalar_store_fix;
     blockDim_ = GetBlockNum();
     coreId_ = GetBlockIdx();
 
@@ -599,7 +611,7 @@ class KernelFullRow {
     PipeBarrier<PIPE_V>();
     ApplySiluGate(x_fp32, tmp_fp32, elem_count);
 
-    StoreFloatValues(rstdGm_[row_start], rstd_stat, rows);
+    StoreFloatValues(rstdGm_[row_start], rstd_stat, rows, useA2ScalarStoreFix_);
 
     CastFromFloat<T>(y_local, x_fp32, elem_count);
     PipeBarrier<PIPE_V>();
@@ -686,7 +698,7 @@ class KernelFullRow {
     MulRowsN128ByScalars(x_fp32, x_fp32, rstd_stat, row_reduce_tmp, rows);
     MulRowsN128ByWeight(x_fp32, x_fp32, weightFp32Buf_.Get<float>(), rows);
 
-    StoreFloatValues(rstdGm_[row_start], rstd_stat, rows);
+    StoreFloatValues(rstdGm_[row_start], rstd_stat, rows, useA2ScalarStoreFix_);
 
     CastFromFloat<T>(y_local, x_fp32, elem_count);
     PipeBarrier<PIPE_V>();
@@ -888,12 +900,14 @@ class KernelFullRow {
     if (store_stats != 0 && isRmsNorm_ == 0) {
       StoreFloatValues(meanGm_[group * m_ + row_start],
                        mean_stat[stat_offset],
-                       rows);
+                       rows,
+                       useA2ScalarStoreFix_);
     }
     if (store_stats != 0) {
       StoreFloatValues(rstdGm_[group * m_ + row_start],
                        rstd_stat[stat_offset],
-                       rows);
+                       rows,
+                       useA2ScalarStoreFix_);
     }
 
     CastFromFloat<T>(y_local, x_fp32, rows * groupAlign_);
@@ -1023,11 +1037,13 @@ class KernelFullRow {
     }
 
     if (isRmsNorm_ == 0) {
-      StoreFloatValues(meanGm_[group * m_ + row_start], stats, total_rows);
+      StoreFloatValues(meanGm_[group * m_ + row_start], stats, total_rows,
+                       useA2ScalarStoreFix_);
     }
     StoreFloatValues(rstdGm_[group * m_ + row_start],
                      stats[stat_stride],
-                     total_rows);
+                     total_rows,
+                     useA2ScalarStoreFix_);
   }
 
  private:
@@ -1069,6 +1085,7 @@ class KernelFullRow {
   uint32_t hasZ_ = 0;
   uint32_t normBeforeGate_ = 1;
   uint32_t isRmsNorm_ = 0;
+  uint32_t useA2ScalarStoreFix_ = 0;
   float eps_ = 1e-6f;
 };
 
@@ -1097,7 +1114,8 @@ class KernelStreamingTwoPass {
                               uint32_t has_bias,
                               uint32_t has_z,
                               uint32_t norm_before_gate,
-                              uint32_t is_rms_norm) {
+                              uint32_t is_rms_norm,
+                              uint32_t use_a2_scalar_store_fix) {
     m_ = m;
     fullN_ = full_n;
     groupSize_ = group_size;
@@ -1112,6 +1130,7 @@ class KernelStreamingTwoPass {
     hasZ_ = has_z;
     normBeforeGate_ = norm_before_gate;
     isRmsNorm_ = is_rms_norm;
+    useA2ScalarStoreFix_ = use_a2_scalar_store_fix;
     blockDim_ = GetBlockNum();
     coreId_ = GetBlockIdx();
 
@@ -1166,9 +1185,11 @@ class KernelStreamingTwoPass {
         ProcessLogicalRow(group, row_start + r, mean_stat, rstd_stat, r, 0);
       }
       if (isRmsNorm_ == 0) {
-        StoreFloatValues(meanGm_[group * m_ + row_start], mean_stat, rows);
+        StoreFloatValues(meanGm_[group * m_ + row_start], mean_stat, rows,
+                         useA2ScalarStoreFix_);
       }
-      StoreFloatValues(rstdGm_[group * m_ + row_start], rstd_stat, rows);
+      StoreFloatValues(rstdGm_[group * m_ + row_start], rstd_stat, rows,
+                       useA2ScalarStoreFix_);
     }
   }
 
@@ -1361,7 +1382,8 @@ class KernelStreamingTwoPass {
       if (store_stats != 0) {
         StoreFloatValues(meanGm_[group * m_ + row],
                          mean_stat[stat_offset],
-                         1);
+                         1,
+                         useA2ScalarStoreFix_);
       }
     }
     const float rstd_val = RstdFromVariance<T>(scalar, variance, eps_);
@@ -1369,7 +1391,8 @@ class KernelStreamingTwoPass {
     if (store_stats != 0) {
       StoreFloatValues(rstdGm_[group * m_ + row],
                        rstd_stat[stat_offset],
-                       1);
+                       1,
+                       useA2ScalarStoreFix_);
     }
 
     current_col = 0;
@@ -1496,6 +1519,7 @@ class KernelStreamingTwoPass {
   uint32_t hasZ_ = 0;
   uint32_t normBeforeGate_ = 1;
   uint32_t isRmsNorm_ = 0;
+  uint32_t useA2ScalarStoreFix_ = 0;
   float eps_ = 1e-6f;
 };
 
@@ -1535,7 +1559,8 @@ extern "C" __global__ __aicore__ void layer_norm_fwd(
             tiling_data.has_bias,
             tiling_data.has_z,
             tiling_data.norm_before_gate,
-            tiling_data.is_rms_norm);
+            tiling_data.is_rms_norm,
+            tiling_data.use_a2_scalar_store_fix);
     op.Process();
     return;
   }
@@ -1561,6 +1586,7 @@ extern "C" __global__ __aicore__ void layer_norm_fwd(
           tiling_data.has_bias,
           tiling_data.has_z,
           tiling_data.norm_before_gate,
-          tiling_data.is_rms_norm);
+          tiling_data.is_rms_norm,
+          tiling_data.use_a2_scalar_store_fix);
   op.Process();
 }
