@@ -21,6 +21,22 @@ if (BUILD_OPEN_PROJECT)
     )
 endif()
 
+# Dynamically set CATLASS_ARCH based on the SOC being built (mirrors
+# x_flash_attention_infer/op_host/CMakeLists.txt). In the CMake scope
+# SOC_VERSION may be empty; the reliable variable is ASCEND_COMPUTE_UNIT
+# (e.g. "ascend950"). We accept both spellings and any *950 / *310p5 variant,
+# and inject -DCATLASS_ARCH=3510 for the A5(arch35) build; all other SOCs
+# (AtlasA2/A3) fall back to -DCATLASS_ARCH=2201 so the catlass forwarding
+# headers can still dispatch to the correct specialization.
+string(TOLOWER "${SOC_VERSION}" _DFFN_SOC_LOWER)
+string(TOLOWER "${ASCEND_COMPUTE_UNIT}" _DFFN_UNIT_LOWER)
+if(_DFFN_SOC_LOWER MATCHES "ascend950" OR _DFFN_SOC_LOWER MATCHES "ascend310p5"
+   OR _DFFN_UNIT_LOWER MATCHES "ascend950" OR _DFFN_UNIT_LOWER MATCHES "ascend310p5")
+    set(CATLASS_ARCH_DEF "-DCATLASS_ARCH=3510")
+else()
+    set(CATLASS_ARCH_DEF "-DCATLASS_ARCH=2201")
+endif()
+
 add_ops_compile_options(
     OP_NAME DispatchFFNCombine
     OPTIONS
@@ -28,7 +44,7 @@ add_ops_compile_options(
         -Wno-deprecated-declarations
         -Werror
         -DHCCL_COMM
-        -DCATLASS_ARCH=2201
+        ${CATLASS_ARCH_DEF}
         ${_DISPATCH_FFN_INC_OPTS}
         -I${CANN_3RD_LIB_PATH}/catlass/include
 )

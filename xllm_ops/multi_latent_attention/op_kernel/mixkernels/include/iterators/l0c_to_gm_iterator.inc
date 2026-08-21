@@ -23,13 +23,18 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, half, float> {
                          uint32_t dstStride)
     {
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
-        // A5 architecture: use FixpipeParamsArch3510<ROW_MAJOR>, F322F16 mode does not require cbufWorkspace
+        // A5 architecture: use FixpipeParamsArch3510<ROW_MAJOR>, F322F16 mode.
+        // On 3510, L0C srcStride = RoundUp<16>(m) which matches the official
+        // arch35 reference (FixpipeOut.h).
         AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::ROW_MAJOR> intriParams(
             nTileActual,  // nSize
             mTileActual,  // mSize
             srcStride,    // srcStride
             dstStride);   // dstStride
         intriParams.quantPre = QuantMode_t::F322F16;
+        intriParams.params.ndNum = 1;
+        intriParams.params.srcNdStride = 0;
+        intriParams.params.dstNdStride = 0;
         AscendC::Fixpipe<half, float, AscendC::CFG_ROW_MAJOR>(gmTensor, l0cTensor, intriParams);
 #elif defined(__DAV_C220_CUBE__)
         // V220 architecture (A2/A3): use FixpipeParamsV220
@@ -112,7 +117,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, __bf16, float> {
                          uint32_t dstStride)
     {
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
-        // A5 architecture: use FixpipeParamsArch3510<ROW_MAJOR>, F322BF16 mode
+        // A5 architecture: use FixpipeParamsArch3510<ROW_MAJOR>, F322BF16 mode.
         AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::ROW_MAJOR> intriParams(
             nTileActual,  // nSize
             mTileActual,  // mSize
@@ -155,7 +160,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, float, float> {
                          uint32_t dstStride)
     {
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
-        // A5 architecture: use FixpipeParamsArch3510<ROW_MAJOR>, NoQuant mode
+        // A5 architecture: use FixpipeParamsArch3510<ROW_MAJOR>, NoQuant mode.
         AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::ROW_MAJOR> intriParams(
             nTileActual,  // nSize
             mTileActual,  // mSize

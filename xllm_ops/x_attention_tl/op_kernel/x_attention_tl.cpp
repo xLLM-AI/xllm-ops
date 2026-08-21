@@ -13,6 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+// [catlass arch guard]
+// x_attention_tl.h pulls catlass forwarding headers. The new catlass tile-copy
+// forwarders dispatch ONLY when CATLASS_ARCH is explicitly 2201 (AtlasA2/A3) or
+// 3510 (Ascend950/A5); the device translation unit is NOT given -DCATLASS_ARCH
+// (host-only inject) but the toolchain injects __NPU_ARCH__. Derive CATLASS_ARCH
+// from it HERE, before ANY include, so A3 resolves CopyGmToL1/CopyL1ToL0A/...
+// without affecting the already-validated A5(3510) path.
+#if !defined(CATLASS_ARCH) && defined(__NPU_ARCH__)
+#if (__NPU_ARCH__ == 2201) || (__NPU_ARCH__ == 3510)
+#define CATLASS_ARCH __NPU_ARCH__
+#endif
+#endif
+
 #include "acl/acl.h"
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"

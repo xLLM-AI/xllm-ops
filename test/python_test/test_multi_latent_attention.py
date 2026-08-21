@@ -113,9 +113,22 @@ def _mla_decode_golden(q_nope, q_rope, k_nope, k_rope, v_nope,
 @pytest.mark.parametrize(
     "dtype, batch, q_head, kv_head, kv_seqlen, block_size",
     [
-        (torch.float16, 1, 16, 1, 128, 128),
-        (torch.float16, 2, 16, 1, 128, 128),
-        (torch.float16, 2, 32, 1, 256, 128),
+        (torch.float16, 200, 32, 1, 64, 128),
+        (torch.float16, 1, 128, 1, 1024, 128),
+        (torch.float16, 6, 128, 1, 2048, 128),
+        (torch.float16, 12, 128, 1, 2048, 128),
+        (torch.float16, 24, 128, 1, 4096, 128),
+        (torch.float16, 25, 128, 1, 4096, 128),
+        (torch.float16, 1, 32, 1, 1024, 128),
+        (torch.float16, 6, 32, 1, 2048, 128),
+        (torch.float16, 12, 32, 1, 2048, 128),
+        (torch.float16, 24, 32, 1, 4096, 128),
+        (torch.float16, 25, 32, 1, 4096, 128),
+        (torch.float16, 1, 64, 1, 1024, 128),
+        (torch.float16, 6, 64, 1, 2048, 128),
+        (torch.float16, 12, 64, 1, 2048, 128),
+        (torch.float16, 24, 64, 1, 4096, 128),
+        (torch.float16, 25, 64, 1, 4096, 128),
     ],
 )
 def test_multi_latent_attention(dtype, batch, q_head, kv_head, kv_seqlen, block_size):
@@ -151,7 +164,7 @@ def test_multi_latent_attention(dtype, batch, q_head, kv_head, kv_seqlen, block_
     out = custom_ops.multi_latent_attention_npu(
         query.npu(), query_rope.npu(), kv_cache.npu(), kv_cache_rope.npu(),
         block_table.npu(), context_lens.npu(),
-        q_head, kv_head, tor, [kv_seqlen] * batch,
+        q_head, kv_head, tor, [kv_seqlen] * batch, [q_seqlen] * batch,
     )
     out = out.cpu().view(batch, q_head, NOPE_DIM).to(torch.float32)
 

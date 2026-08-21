@@ -9,6 +9,7 @@ template <ArchType ArchTag, typename DataType, bool IsTransPose>
 struct l1_to_l0_a<ArchTag, DataType, IsTransPose, DataFormat::VECTOR, DataFormat::VECTOR> {
     using HardwareParams = HardwareInfo<ArchTag>;
     static constexpr uint32_t FRACTAL_SIZE = HardwareParams::fractalSize / sizeof(DataType);
+    static constexpr uint32_t K0 = 16; // elements per K-direction fractal (C0_SIZE for half)
 
     __aicore__ l1_to_l0_a(AscendC::LocalTensor<DataType> l0Tensor,
                           AscendC::LocalTensor<DataType> l1Tensor,
@@ -19,6 +20,23 @@ struct l1_to_l0_a<ArchTag, DataType, IsTransPose, DataFormat::VECTOR, DataFormat
                           uint32_t mDstStride,
                           uint32_t kDstStride)
     {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        // 3510: L0A is NZ fractal. Per official arch35 reference:
+        //   mStep = kSrcStride (M-fractal count, one LoadData call writes all M-fractals)
+        //   kStep = kPartCeil (K-direction fractal count)
+        //   srcStride = kSrcStride (L1 K-direction stride)
+        //   dstStride = kSrcStride (L0A K-direction stride = M-fractal count in NZ)
+        AscendC::LoadData(l0Tensor,
+                          l1Tensor,
+                          AscendC::LoadData2DParamsV2(0,                // mStartPosition
+                                                       0,                // kStartPosition
+                                                       static_cast<uint16_t>(kSrcStride),  // mStep
+                                                       static_cast<uint16_t>(kPartCeil),   // kStep
+                                                       static_cast<int32_t>(kSrcStride),  // srcStride
+                                                       static_cast<uint16_t>(kSrcStride),  // dstStride
+                                                       IsTransPose,     // ifTranspose
+                                                       0));             // sid
+#else
         AscendC::LoadData(l0Tensor,
                           l1Tensor,
                           AscendC::LoadData2dParams(0,           // baseIdx
@@ -28,6 +46,7 @@ struct l1_to_l0_a<ArchTag, DataType, IsTransPose, DataFormat::VECTOR, DataFormat
                                                     kDstStride,  // dstStride
                                                     IsTransPose, // transpose
                                                     0));         // addrCalMode
+#endif
     };
 };
 

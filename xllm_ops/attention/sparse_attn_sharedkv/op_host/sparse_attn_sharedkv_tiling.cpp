@@ -197,13 +197,6 @@ ge::graphStatus SASInfoParser::GetNpuInfo()
     aicNum_ = ascendcPlatform.GetCoreNumAic();
     OP_CHECK_IF(aicNum_ == 0 || aivNum_ == 0, OP_LOGE(opName_, "num of core obtained is 0."), return ge::GRAPH_FAILED);
 
-    socVersion_ = ascendcPlatform.GetSocVersion();
-    if ((socVersion_ != platform_ascendc::SocVersion::ASCEND910B) &&
-        (socVersion_ != platform_ascendc::SocVersion::ASCEND910_93)) {
-        OP_LOGE(opName_, "SOC Version[%d] is not support.", (int32_t)socVersion_);
-        return GRAPH_FAILED;
-    }
-
     return ge::GRAPH_SUCCESS;
 }
 

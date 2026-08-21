@@ -18,7 +18,11 @@ limitations under the License.
 #define GROUP_GEMM_H
 
 #include "aclnn_index_group_matmul.h"
+#ifdef USE_GROUPED_MATMUL_WEIGHT_NZ
+#include "aclnnop/aclnn_grouped_matmul_weight_nz.h"
+#else
 #include "aclnnop/aclnn_grouped_matmul_v4.h"
+#endif
 #include "utils_print.h"
 #include "utils_tensor.h"
 namespace group_gemm {
@@ -331,6 +335,36 @@ class GroupGemmNative {
     int64_t groupListType = 0;
     int64_t actType = 0;
 
+#ifdef USE_GROUPED_MATMUL_WEIGHT_NZ
+    // A5(Ascend950): NZ-format weight must go through the dedicated
+    // aclnnGroupedMatmulWeightNz interface. Compared with V4 it has two extra
+    // params after actType: tuningConfigOptional(nullptr) and quantGroupSize(0).
+    aclIntArray* tuningConfig = nullptr;
+    int64_t quantGroupSize = 0;
+    auto ret = aclnnGroupedMatmulWeightNzGetWorkspaceSize(x,
+                                                          weight,
+                                                          bias,
+                                                          scale,
+                                                          offset,
+                                                          antiquantScale,
+                                                          antiquantOffset,
+                                                          perTokenScale,
+                                                          groupedList,
+                                                          activationInput,
+                                                          activationQuantScale,
+                                                          activationQuantOffset,
+                                                          splitItem,
+                                                          groupType,
+                                                          groupListType,
+                                                          actType,
+                                                          tuningConfig,
+                                                          quantGroupSize,
+                                                          y,
+                                                          activationFeatureOut,
+                                                          dynQuantScaleOut,
+                                                          &workspaceSize,
+                                                          &executor);
+#else
     auto ret = aclnnGroupedMatmulV4GetWorkspaceSize(x,
                                                     weight,
                                                     bias,
@@ -351,7 +385,8 @@ class GroupGemmNative {
                                                     activationFeatureOut,
                                                     dynQuantScaleOut,
                                                     &workspaceSize,
-                                                    &executor);
+                                                   &executor);
+#endif
     CHECK_RET(
         ret == ACL_SUCCESS,
         LOG_PRINT("aclnnGroupedMatmulGetWorkspaceSize failed. ERROR: %d\n",
@@ -367,10 +402,17 @@ class GroupGemmNative {
                 return ret);
     }
 
+#ifdef USE_GROUPED_MATMUL_WEIGHT_NZ
+    ret = aclnnGroupedMatmulWeightNz(workspaceAddr, workspaceSize, executor, stream);
+    CHECK_RET(ret == ACL_SUCCESS,
+              LOG_PRINT("aclnnGroupedMatmulWeightNz failed. ERROR: %d\n", ret);
+              return ret);
+#else
     ret = aclnnGroupedMatmulV4(workspaceAddr, workspaceSize, executor, stream);
     CHECK_RET(ret == ACL_SUCCESS,
-              LOG_PRINT("aclnnIndexGroupMatmul failed. ERROR: %d\n", ret);
+              LOG_PRINT("aclnnGroupedMatmulV4 failed. ERROR: %d\n", ret);
               return ret);
+#endif
 
     ret = aclrtSynchronizeStream(stream);
     CHECK_RET(ret == ACL_SUCCESS,
