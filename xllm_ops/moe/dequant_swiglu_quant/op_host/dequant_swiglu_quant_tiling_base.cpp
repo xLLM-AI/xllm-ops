@@ -62,6 +62,19 @@ constexpr uint32_t PERFORMANCE_ROW_LEN = 128;
 constexpr uint32_t MIN_CORE = 12;
 const int64_t DYNAMIC_INT_X_FLOAT32_BIAS_QUANT_D_PERFORMANCE = 30013;
 
+// Vectorised-row fast path (see op_kernel/dequant_swiglu_quant_vecrow.hpp).
+// It removes the per-row V_S sync + GetValue/SetValue round-trip the other
+// dynamic classes pay, which only dominates once there are many rows: measured
+// at colLen=256, rows<=512 is a wash or a small loss (bf16 256 rows +31%) while
+// rows>=1024 wins steadily (int32 2048 rows -32%, bf16 8192 rows -21%).
+// The win also shrinks as colLen grows, because the path spills the fp32 SwiGLU
+// result to UB and reads it back -- by colLen=1024 it is a wash.
+const int64_t DYNAMIC_VECROW_INT32 = 30020;
+const int64_t DYNAMIC_VECROW_FLOAT16 = 30021;
+const int64_t DYNAMIC_VECROW_BFLOAT16 = 30022;
+constexpr uint32_t VECROW_COL_LEN = 512;
+constexpr uint32_t VECROW_MIN_ROW_LEN = 1024;
+
 // Tiling优选参数
 struct GluSingleTilingOptParam {
     // Maximum amount of data that can be transferred by an operator UB at a time. Unit:element
@@ -146,6 +159,8 @@ private:
 
     bool isPerformanceBranch();
 
+    bool isVecRowBranch();
+
     int64_t getTilingKeyStatic(
         const int32_t inputDtype, const ge::DataType biasType, const int64_t scaleSize) const;
 
@@ -170,6 +185,7 @@ private:
     ge::DataType xInputDataType;
 
     bool isPerfBranch = false;
+    bool isVecRow = false;
 
     ge::DataType biasDataType = ge::DT_FLOAT;
     uint64_t quantScaleShapeSize = 0;
@@ -590,6 +606,7 @@ ge::graphStatus DequantSwigluQuantTiling::DoOpTiling()
         return ge::GRAPH_FAILED;
     }
     isPerfBranch = isPerformanceBranch();
+    isVecRow = isVecRowBranch();
     return ge::GRAPH_SUCCESS;
 }
 
@@ -647,12 +664,18 @@ int64_t DequantSwigluQuantTiling::getTilingKeyDynamic(
             if (scaleSize == 1) {
                 return DYNAMIC_FLOAT16_X;
             } else {
+                if (isVecRow) {
+                    return DYNAMIC_VECROW_FLOAT16;
+                }
                 return DYNAMIC_FLOAT16_XD;
             }
         } else {
             if (scaleSize == 1) {
                 return DYNAMIC_BFLOAT16_X;
             } else {
+                if (isVecRow) {
+                    return DYNAMIC_VECROW_BFLOAT16;
+                }
                 return DYNAMIC_BFLOAT16_XD;
             }
         }
@@ -671,6 +694,12 @@ int64_t DequantSwigluQuantTiling::getTilingKeyDynamic(
         if (biasType == ge::DT_INT32) {
             return DYNAMIC_INT_X_INT_BIAS_QUANT_D;
         } else if (biasType == ge::DT_FLOAT) {
+            // isVecRowBranch() checks the bias input directly, so the flag being
+            // set already means no bias is present (biasType defaults to
+            // DT_FLOAT when the optional input is absent).
+            if (isVecRow) {
+                return DYNAMIC_VECROW_INT32;
+            }
             if(isPerfBranch) {
                 return DYNAMIC_INT_X_FLOAT32_BIAS_QUANT_D_PERFORMANCE;
             }
@@ -693,6 +722,42 @@ bool DequantSwigluQuantTiling::isPerformanceBranch() {
         return true;
     }
     return false;
+}
+
+// The vecrow kernel handles one whole row per VF iteration and keeps the
+// per-row max in a vector register, so it needs the row fully loadable and no
+// bias / quant_offset / group_index to fold in. Beyond that it is gated on
+// shape: colLen must be small enough that spilling the fp32 SwiGLU result to UB
+// still pays, and there must be enough rows to amortise its setup.
+bool DequantSwigluQuantTiling::isVecRowBranch() {
+    if (tilingData.get_is32BAligned() != 1) {
+        return false;
+    }
+    // biasIsEmpty is only populated on the int32 branch (checkWeightBiasActivate
+    // runs under `xDataType == DT_INT32`), so it reads 0 for bf16/fp16 whether or
+    // not a bias exists. Ask the context directly instead of trusting the field.
+    if (context_->GetOptionalInputShape(INDEX_IN_BIAS) != nullptr) {
+        return false;
+    }
+    // quant_offset is not folded in by this kernel.
+    if (context_->GetOptionalInputShape(INDEX_IN_QUANT_OFFSET) != nullptr) {
+        return false;
+    }
+    // Row must be fully loadable: the kernel indexes a row in one shot.
+    if (tilingData.get_baseColLen() != tilingData.get_colLen()) {
+        return false;
+    }
+    uint64_t colLen = tilingData.get_colLen();
+    if (colLen > VECROW_COL_LEN) {
+        return false;
+    }
+    // Below this row count the fast path's fixed setup is not amortised and it
+    // loses to the row-wise kernel (measured at colLen=256: 256 rows +31%,
+    // 1024 rows -10%, 8192 rows -21%).
+    if (tilingData.get_rowLen() < VECROW_MIN_ROW_LEN) {
+        return false;
+    }
+    return true;
 }
 
 uint64_t DequantSwigluQuantTiling::GetTilingKey() const

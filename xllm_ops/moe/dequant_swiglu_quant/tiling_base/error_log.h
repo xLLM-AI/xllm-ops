@@ -10,6 +10,10 @@
 
 #pragma once
 
+// tiling_base.h calls CheckLogLevel(static_cast<int32_t>(OP), ...); the OP
+// module id lives in base/log_types.h, which slog.h pulls in. log/log.h alone
+// does not, so include it here as moe_gating_top_k/tiling_base/error_log.h does.
+#include "toolchain/slog.h"
 #include "log/log.h"
 
 #ifndef OP_LOGE_FOR_INVALID_DTYPE
