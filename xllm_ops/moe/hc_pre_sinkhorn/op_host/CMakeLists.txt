@@ -52,6 +52,7 @@ add_ops_compile_options(
         OP_NAME HcPreSinkhorn
         OPTIONS --cce-auto-sync=off
                 -Wno-deprecated-declarations
+                -Wno-constant-conversion
                 -Werror
                 -mllvm -cce-aicore-hoist-movemask=false
                 --op_relocatable_kernel_binary=true
