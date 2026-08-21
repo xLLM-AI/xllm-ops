@@ -89,6 +89,34 @@ at::Tensor x_attention_impl_npu(const at::Tensor& query,
   return attnOut;
 }
 
+at::Tensor x_attention_v2_impl_npu(const at::Tensor& query,
+                                const at::Tensor& key_cache,
+                                const at::Tensor& value_cache,
+                                const at::Tensor& unshared_key,
+                                const at::Tensor& unshared_value,
+                                const c10::optional<at::Tensor>& shared_block_tables,
+                                const c10::optional<at::Tensor>& unshared_block_tables,
+                                const at::Tensor& actual_shared_kvlen,
+                                const at::Tensor& decode_step,
+                                double scale_value = 0.0) {
+  at::Tensor attnOut = at::empty_like(query);
+  
+  EXEC_NPU_CMD(aclnnXAttentionV2,
+               query,
+               key_cache,
+               value_cache,
+               unshared_key,
+               unshared_value,
+               unshared_block_tables,
+               actual_shared_kvlen,
+               decode_step,
+               shared_block_tables,
+               scale_value,
+               attnOut);
+
+  return attnOut;
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> beam_search_impl_npu(
                                 const at::Tensor& log_probs,
                                 const at::Tensor& top_tokens,
@@ -1987,6 +2015,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("select_unshared_kv", &select_unshared_kv_impl_npu, "select_unshared_kv");
   m.def("cache_unshared_kv", &cache_unshared_kv_impl_npu, "cache_unshared_kv");
   m.def("x_attention", &x_attention_impl_npu, "x_attention");
+  m.def("x_attention_v2", &x_attention_v2_impl_npu, "x_attention_v2");
   m.def("beam_search", &beam_search_impl_npu, "beam_search");
   m.def("beam_search_group", &beam_search_group_impl_npu, "beam_search_group");
   m.def("beam_search_rec_final_select",

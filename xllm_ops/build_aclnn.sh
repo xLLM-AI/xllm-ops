@@ -335,6 +335,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         #  ### JD's in-house operators ####
         "beam_search_group"
         "x_attention"
+        "x_attention_v2"
         "cache_unshared_kv"
         "causal_conv1d"
         "causal_conv1d_qkv"
