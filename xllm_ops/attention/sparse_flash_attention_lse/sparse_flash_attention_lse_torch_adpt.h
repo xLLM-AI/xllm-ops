@@ -16,7 +16,7 @@
 #ifndef SPARSE_FLASH_ATTENTION_LSE_TORCH_ADPT_H
 #define SPARSE_FLASH_ATTENTION_LSE_TORCH_ADPT_H
 
-namespace vllm_ascend {
+namespace xllm_ops {
 
 namespace {
 
@@ -147,6 +147,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_lse(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(
         attention_output, softmax_max, softmax_sum);
 }
-}  // namespace vllm_ascend
+}  // namespace xllm_ops
 
 #endif  // SPARSE_FLASH_ATTENTION_LSE_TORCH_ADPT_H
