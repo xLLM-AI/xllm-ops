@@ -5,6 +5,12 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 [English](../en/mega_gdn_mtp_decode.md) | 简体中文
 
+## 系列文档
+
+[核心 MegaChunkGdn](mega_chunk_gdn.md) |
+[融合 Prefill](mega_gdn_prefill_op.md) | [单 token Decode](mega_gdn_decode.md) |
+[Draft Decode](mega_gdn_draft_decode.md)
+
 ## 产品支持情况
 
 | 产品 | 是否支持 |
