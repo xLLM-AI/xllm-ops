@@ -15,6 +15,9 @@ limitations under the License.
 
 #include <torch/library.h>
 
+#include <dlfcn.h>
+
+#include "acl/acl_rt.h"
 #include "pytorch_npu_helper.hpp"
 
 void select_unshared_kv_impl_npu(
@@ -530,7 +533,7 @@ mega_chunk_gdn(
     at::Tensor beta_t = at::empty({num_heads, total_tokens}, beta.options());
     at::Tensor a = at::zeros({1, total_tokens, num_heads, kChunkSize}, beta.options());
     at::Tensor a_inv_f32 = at::zeros({1, total_tokens, num_heads, kChunkSize}, g.options().dtype(at::kFloat));
-    at::Tensor a_inv = at::empty({1, total_tokens, num_heads, kChunkSize}, beta.options());
+    at::Tensor a_inv = at::zeros({1, total_tokens, num_heads, kChunkSize}, beta.options());
     at::Tensor w = at::empty_like(v);
     at::Tensor u = at::empty_like(v);
     at::Tensor h = at::zeros({num_matrices, head_dim, head_dim}, v.options());
@@ -1987,6 +1990,82 @@ mega_gdn_mtp_decode(
       conv_out, conv_state, ssm_state, out);
 }
 
+at::Tensor mega_gdn_prefill_op(
+    const at::Tensor& mixed_qkv,
+    const at::Tensor& b,
+    const at::Tensor& a,
+    const at::Tensor& z,
+    const at::Tensor& conv_weight,
+    at::Tensor& conv_state,
+    const at::Tensor& a_log,
+    const at::Tensor& dt_bias,
+    const at::Tensor& conv_state_read_indices,
+    const at::Tensor& conv_state_write_indices,
+    const at::Tensor& ssm_state_read_indices,
+    const at::Tensor& ssm_state_write_indices,
+    at::Tensor& ssm_cache,
+    const at::Tensor& mask_lower,
+    const at::Tensor& mask_full,
+    const at::Tensor& minus_identity,
+    const at::Tensor& cu_seqlens,
+    const at::Tensor& norm_weight,
+    int64_t num_matrices) {
+  uint64_t ffts_addr = 0;
+  const char* soc_name = aclrtGetSocName();
+  const bool is_ascend950 =
+      soc_name != nullptr &&
+      std::string(soc_name).find("Ascend950") != std::string::npos;
+  // Ascend950 uses the operator's GM-based software synchronization and does
+  // not consume an FFTS address. Keep the required ACLNN attribute at zero.
+  // A2/A3 retain the hardware FFTS address path used by their kernel.
+  if (!is_ascend950) {
+    using RtGetC2cCtrlAddr = int32_t (*)(uint64_t*, uint32_t*);
+    static RtGetC2cCtrlAddr get_c2c_ctrl_addr = [] {
+      void* runtime = dlopen("libruntime.so", RTLD_LAZY | RTLD_LOCAL);
+      TORCH_CHECK(runtime != nullptr,
+                  "failed to load libruntime.so: ", dlerror());
+      void* symbol = dlsym(runtime, "rtGetC2cCtrlAddr");
+      TORCH_CHECK(symbol != nullptr,
+                  "failed to resolve rtGetC2cCtrlAddr: ", dlerror());
+      return reinterpret_cast<RtGetC2cCtrlAddr>(symbol);
+    }();
+    uint32_t ffts_len = 0;
+    TORCH_CHECK(get_c2c_ctrl_addr(&ffts_addr, &ffts_len) == 0,
+                "rtGetC2cCtrlAddr failed");
+    TORCH_CHECK(ffts_len > 0,
+                "rtGetC2cCtrlAddr returned an empty region");
+  }
+  TORCH_CHECK(num_matrices > 0, "num_matrices must be positive");
+  int64_t ffts_addr_arg = static_cast<int64_t>(ffts_addr);
+
+  at::Tensor out = at::empty_like(z);
+  EXEC_NPU_CMD(aclnnMegaGdnPrefillOp,
+               mixed_qkv,
+               b,
+               a,
+               z,
+               conv_weight,
+               conv_state,
+               a_log,
+               dt_bias,
+               conv_state_read_indices,
+               conv_state_write_indices,
+               ssm_state_read_indices,
+               ssm_state_write_indices,
+               ssm_cache,
+               mask_lower,
+               mask_full,
+               minus_identity,
+               cu_seqlens,
+               norm_weight,
+               ffts_addr_arg,
+               num_matrices,
+               out,
+               conv_state,
+               ssm_cache);
+  return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("select_unshared_kv", &select_unshared_kv_impl_npu, "select_unshared_kv");
   m.def("cache_unshared_kv", &cache_unshared_kv_impl_npu, "cache_unshared_kv");
@@ -2042,6 +2121,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("num_accepted_tokens"),
         pybind11::arg("norm_weight"),
         pybind11::arg("fla_ssm_state_layout") = true);
+  m.def("mega_gdn_prefill_op",
+        &mega_gdn_prefill_op,
+        "mega_gdn_prefill_op");
   m.def("layer_norm_fwd", &layer_norm_fwd_impl_npu, "layer_norm_fwd");
   m.def("moe_fused_add_topk", &moe_fused_add_topk_impl_npu, "moe_fused_add_topk");
   m.def("moe_fused_reducesum_div", &moe_fused_reducesum_div_impl_npu, "moe_fused_reducesum_div");

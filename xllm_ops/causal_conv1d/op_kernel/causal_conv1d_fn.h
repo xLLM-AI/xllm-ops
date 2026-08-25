@@ -29,6 +29,7 @@ public:
         this->weightGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(weight));
         this->biasGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(bias));
         this->convStatesGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(convStates));
+        this->convStatesOutGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(convStates));
         this->queryStartLocGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(queryStartLoc));
         this->cacheIndicesGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(cacheIndices));
         this->initialStateModeGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(initialStateMode));

@@ -412,6 +412,34 @@ def test_non_fla_dense_mixed_batch_matches_reference(
     _assert_matches_reference(actual, expected)
 
 
+@pytest.mark.parametrize(
+    "speculative_tokens",
+    (1, 3, 4, 16),
+    ids=("mtp1", "mtp3", "mtp4", "mtp16"),
+)
+@pytest.mark.parametrize("same_slot", (False, True), ids=("fork", "same"))
+def test_batch32_qwen35_tp2_geometry_matches_reference(
+    speculative_tokens: int,
+    same_slot: bool,
+) -> None:
+    inputs = _make_inputs(
+        speculative_tokens,
+        batch_size=32,
+        num_k_heads=8,
+        num_v_heads=24,
+        same_slot=same_slot,
+    )
+    sequence_length = speculative_tokens + 1
+    inputs["num_accepted_tokens"] = (
+        torch.arange(32, dtype=torch.int32) % sequence_length + 1
+    )
+
+    expected = _expected_from_unfused_conv(inputs)
+    actual = _run_npu(inputs)
+
+    _assert_matches_reference(actual, expected)
+
+
 @pytest.mark.parametrize("speculative_tokens", (1, 8, 16))
 @pytest.mark.parametrize("accepted_position", ("first", "middle", "last"))
 @pytest.mark.parametrize("same_slot", (False, True), ids=("fork", "same"))

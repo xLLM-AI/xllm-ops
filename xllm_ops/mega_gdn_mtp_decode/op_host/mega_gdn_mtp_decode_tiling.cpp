@@ -26,6 +26,7 @@ constexpr uint64_t kDeferredNormRequiredUbBytes = 182816;
 constexpr uint64_t kDeferredNormTilingKeyBase = 200;
 constexpr uint32_t kQkGroupCacheRequiredAivCores = 32;
 constexpr uint32_t kAivPerA2A3MixedBlock = 2;
+constexpr uint32_t kAivPerA5MixedBlock = 2;
 constexpr size_t kFlaSsmStateLayoutAttr = 0;
 constexpr uint64_t kNonFlaTilingKeyOffset = 1000;
 
@@ -227,12 +228,16 @@ static ge::graphStatus MegaGdnMtpDecodeTiling(
       info.num_k_heads == 8 && info.num_v_heads == 24;
   const uint32_t qk_group_count =
       static_cast<uint32_t>(info.batch_size * info.num_k_heads);
+  const uint32_t a5_mixed_aiv_core_count =
+      std::min(aiv_core_count, aic_core_count * kAivPerA5MixedBlock);
+  const uint32_t schedulable_aiv_core_count =
+      is_ascend950 ? a5_mixed_aiv_core_count : aiv_core_count;
   const uint32_t min_two_owner_aiv_cores =
       (recurrent_tasks + 1) / 2;
   const uint32_t max_useful_two_owner_aiv_cores = 2 * qk_group_count;
   const bool use_a5_two_owner_qk_group =
       *fla_ssm_state_layout && is_ascend950 && is_qk_group_cache_shape &&
-      aiv_core_count >= min_two_owner_aiv_cores &&
+      schedulable_aiv_core_count >= min_two_owner_aiv_cores &&
       ub_size >= kQkGroupCacheRequiredUbBytes;
   const uint32_t recurrent_dispatch_tasks =
       use_a5_two_owner_qk_group
@@ -240,17 +245,20 @@ static ge::graphStatus MegaGdnMtpDecodeTiling(
           : recurrent_tasks;
   const uint32_t task_count =
       std::max(conv_tasks, recurrent_dispatch_tasks);
-  const uint32_t used_aiv_cores = std::min(task_count, aiv_core_count);
+  const uint32_t used_aiv_cores =
+      std::min(task_count, schedulable_aiv_core_count);
   const uint32_t block_dim =
       is_ascend950
-          ? used_aiv_cores
+          ? (used_aiv_cores + kAivPerA5MixedBlock - 1) /
+                kAivPerA5MixedBlock
           : platform.CalcTschBlockDim(
                 used_aiv_cores, aic_core_count, aiv_core_count);
   if (block_dim == 0) {
     return ge::GRAPH_FAILED;
   }
   const uint32_t launched_aiv_cores =
-      is_ascend950 ? block_dim : block_dim * kAivPerA2A3MixedBlock;
+      is_ascend950 ? block_dim * kAivPerA5MixedBlock
+                   : block_dim * kAivPerA2A3MixedBlock;
   const bool use_qk_group_cache =
       *fla_ssm_state_layout && is_qk_group_cache_shape &&
       launched_aiv_cores >= kQkGroupCacheRequiredAivCores &&

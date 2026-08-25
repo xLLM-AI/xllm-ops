@@ -62,10 +62,10 @@
 //   TCOLEXPAND(2d, row)     — Broadcast row → cols: 2d[i,j] = row[j]
 //   set_flag(P1, P2, EVT)   — Signal from pipe P1 to pipe P2 (like a semaphore post)
 //   wait_flag(P1, P2, EVT)  — Wait for signal from P1 (like a semaphore wait)
-//   gdn_sync::VectorBarrier()    — Local Vec barrier (ensure all Vec ops complete)
+//   pipe_barrier(PIPE_V)    — Local Vec barrier (ensure all Vec ops complete)
 //   pipe_barrier(PIPE_ALL)  — Barrier for all local pipes
-//   gdn_sync::Signal()  — Cross-core signal (Cube↔Vec, different physical cores)
-//   gdn_sync::Wait(flag)     — Wait for cross-core signal
+//   ffts_cross_core_sync()  — Cross-core signal (Cube↔Vec, different physical cores)
+//   wait_flag_dev(flag)     — Wait for cross-core signal
 // ============================================================================
 
 #include <pto/pto-inst.hpp>   // PTO (Performance Tile Operator): NPU kernel API
@@ -124,29 +124,201 @@ using GmStride2D = pto::Stride<1, 1, 1, pto::DYNAMIC, 1>;
 
 template <typename T>
 using GmTensor2D = pto::GlobalTensor<T, GmShape2D, GmStride2D>;
+
 #endif
 
+template <int32_t ChunkSize>
+AICORE inline bool CanReuseGroupKk(
+    int64_t batch_size, int64_t total_tokens, uint32_t num_heads,
+    uint32_t num_key_heads, uint32_t num_matrices,
+    __gm__ int32_t *cu_seqlens)
+{
+#ifdef MEGA_CHUNK_GDN_MULTI_BATCH_GROUP_KK
+  if (batch_size < 1 || total_tokens <= 0 || cu_seqlens == nullptr ||
+#else
+  if (batch_size != 1 || total_tokens <= 0 || cu_seqlens == nullptr ||
+#endif
+      num_key_heads == 0 || num_heads <= num_key_heads ||
+      (num_heads % num_key_heads) != 0) {
+    return false;
+  }
+
+  uint32_t chunk_count = 0;
+  for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
+    const int64_t seq_start = static_cast<int64_t>(cu_seqlens[seq_idx]);
+    const int64_t seq_end = static_cast<int64_t>(cu_seqlens[seq_idx + 1]);
+    const int64_t seq_tokens = seq_end - seq_start;
+    if (seq_tokens <= 0) {
+      return false;
+    }
+    chunk_count += static_cast<uint32_t>(
+        (seq_tokens + ChunkSize - 1) / ChunkSize);
+  }
+
+  const uint64_t cache_elements =
+      static_cast<uint64_t>(chunk_count) * num_key_heads * ChunkSize *
+      ChunkSize;
+  const uint64_t workspace_elements =
+      static_cast<uint64_t>(total_tokens) * num_heads * ChunkSize;
+#ifndef MEGA_CHUNK_GDN_MULTI_BATCH_GROUP_KK
+  constexpr uint32_t MinGroupKkChunks = 16;
+  if (chunk_count < MinGroupKkChunks) {
+    return false;
+  }
+#endif
+  return num_matrices == chunk_count * num_heads &&
+         cache_elements <= workspace_elements;
+}
+
+template <int32_t ChunkSize>
+AICORE inline bool ResolveGroupKkChunk(
+    int64_t global_chunk_idx, int64_t batch_size,
+    __gm__ int32_t *cu_seqlens, int64_t &bos, int64_t &slen,
+    int64_t &local_chunk_idx)
+{
+  int64_t accumulated_chunks = 0;
+  for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
+    const int64_t seq_start = static_cast<int64_t>(cu_seqlens[seq_idx]);
+    const int64_t seq_end = static_cast<int64_t>(cu_seqlens[seq_idx + 1]);
+    const int64_t seq_tokens = seq_end - seq_start;
+    const int64_t seq_chunks =
+        (seq_tokens + ChunkSize - 1) / ChunkSize;
+    if (global_chunk_idx < accumulated_chunks + seq_chunks) {
+      bos = seq_start;
+      slen = seq_tokens;
+      local_chunk_idx = global_chunk_idx - accumulated_chunks;
+      return true;
+    }
+    accumulated_chunks += seq_chunks;
+  }
+  return false;
+}
+
+template <int32_t HiddenSize, int32_t ChunkSize>
+AICORE inline void BuildGroupKkCache(
+    __gm__ ComputeT *k_handle, __gm__ ComputeT *kk_cache_handle,
+    __gm__ int32_t *cu_seqlens, int64_t batch_size,
+    uint32_t num_matrices, uint32_t num_heads,
+    uint32_t num_key_heads)
+{
+#if defined(__DAV_C220_CUBE__)
+  const int32_t h = static_cast<int32_t>(num_heads);
+  const int32_t hg = static_cast<int32_t>(num_key_heads);
+  if (h <= hg || hg <= 0 || (h % hg) != 0 || batch_size < 1 ||
+      cu_seqlens == nullptr || num_matrices % num_heads != 0) {
+    return;
+  }
+
+  const int64_t chunk_count = num_matrices / num_heads;
+  const int64_t total_work = chunk_count * hg;
+  const int32_t qk_stride = hg * HiddenSize;
+  const int64_t core_id = static_cast<int64_t>(get_block_idx());
+  const int64_t core_count = static_cast<int64_t>(get_block_num());
+
+  L1Mat<ComputeT, ChunkSize, HiddenSize> k_l1;
+  TASSIGN(k_l1, 0);
+  TileAcc<float, ChunkSize, ChunkSize, ChunkSize, ChunkSize> kk_l0;
+  TASSIGN(kk_l0, 0);
+
+  for (int64_t work_idx = core_id; work_idx < total_work;
+       work_idx += core_count) {
+    const int32_t key_head = static_cast<int32_t>(work_idx % hg);
+    const int64_t global_chunk_idx = work_idx / hg;
+    int64_t bos = 0;
+    int64_t slen = 0;
+    int64_t local_chunk_idx = 0;
+    if (!ResolveGroupKkChunk<ChunkSize>(
+            global_chunk_idx, batch_size, cu_seqlens, bos, slen,
+            local_chunk_idx)) {
+      continue;
+    }
+    const int64_t chunk_start = local_chunk_idx * ChunkSize;
+    const int64_t remaining = slen - chunk_start;
+    const int32_t valid_rows = static_cast<int32_t>(
+        remaining < ChunkSize ? remaining : ChunkSize);
+    const int64_t k_offset =
+        ((bos + chunk_start) * static_cast<int64_t>(hg) + key_head) *
+        HiddenSize;
+
+    set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
+    wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
+    {
+      L1Mat<ComputeT, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> k_load(
+          valid_rows, HiddenSize);
+      TASSIGN(k_load, 0);
+      GmShape2D shape(valid_rows, HiddenSize);
+      GmStride2D stride(qk_stride);
+      GmTensor2D<ComputeT> k_global(k_handle + k_offset, shape, stride);
+      TLOAD(k_load, k_global);
+      if (valid_rows != ChunkSize) {
+        TFILLPAD(k_load, k_load);
+      }
+    }
+
+    TileLeft<ComputeT, ChunkSize, HiddenSize, ChunkSize, HiddenSize> l0a;
+    TileRight<ComputeT, HiddenSize, ChunkSize, HiddenSize, ChunkSize> l0b;
+    TASSIGN(l0a, 0);
+    TASSIGN(l0b, 0);
+    auto event = EVENT_ID1;
+    set_flag(PIPE_MTE2, PIPE_MTE1, event);
+    wait_flag(PIPE_MTE2, PIPE_MTE1, event);
+    set_flag(PIPE_M, PIPE_MTE1, event);
+    wait_flag(PIPE_M, PIPE_MTE1, event);
+    TEXTRACT(l0a, k_l1, 0, 0);
+    L1MatZN<ComputeT, HiddenSize, ChunkSize> k_zn;
+    TRESHAPE(k_zn, k_l1);
+    TEXTRACT(l0b, k_zn, 0, 0);
+    set_flag(PIPE_MTE1, PIPE_M, event);
+    wait_flag(PIPE_MTE1, PIPE_M, event);
+    TMATMUL(kk_l0, l0a, l0b);
+    set_flag(PIPE_MTE1, PIPE_MTE2, event);
+    wait_flag(PIPE_MTE1, PIPE_MTE2, event);
+    set_flag(PIPE_M, PIPE_FIX, event);
+    wait_flag(PIPE_M, PIPE_FIX, event);
+
+    TileAcc<float, ChunkSize, ChunkSize, DYNAMIC, DYNAMIC> kk_store(
+        ChunkSize, ChunkSize);
+    TASSIGN(kk_store, 0);
+    Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+    shape.shape[3] = ChunkSize;
+    shape.shape[4] = ChunkSize;
+    GlobalTensor<ComputeT, decltype(shape),
+                 Stride<1, 1, 1, ChunkSize, 1>>
+        kk_global(kk_cache_handle + work_idx * ChunkSize * ChunkSize, shape);
+    TSTORE(kk_global, kk_store);
+  }
+#endif
+}
+
 // ── Main kernel function (runs on each AI core) ──────────────────────
-// Template parameters: ComputeT, HiddenSize, ChunkSize.
+// Template parameters: HiddenSize, ChunkSize.
 // GROUP = H/Hg; Cube loads K at head_g = head_idx / GROUP.
 //
 // __gm__: Marks pointers as Global Memory (HBM) — the NPU equivalent of
 // CUDA's device memory. All input/output tensors live in GM.
-template <typename ComputeT, int32_t HiddenSize, int32_t ChunkSize>
-AICORE void kkt_kernel(
+template <int32_t HiddenSize, int32_t ChunkSize, int32_t StaticHeads = 0,
+          int32_t StaticPart = -1>
+AICORE PTO_INLINE void kkt_kernel(
     __gm__ ComputeT *K_handle, __gm__ ComputeT *Beta_handle,
     __gm__ float *G_handle, __gm__ float *Msk_handle,
     __gm__ ComputeT *workspace_handle, __gm__ ComputeT *A_handle,
+    __gm__ ComputeT *KK_cache_handle,
     __gm__ int32_t *cu_seqlens,
     int64_t batch_size, int64_t seq_len,
     int64_t total_tokens,
     uint32_t num_heads,
     uint32_t num_key_heads,
-    uint64_t ffts_addr)
+    uint32_t num_matrices,
+    uint64_t ffts_addr,
+    uint32_t use_group_kk_cache,
+    uint32_t enable_solve_pipeline = 0,
+    uint32_t emit_precomputed_m_neg = 0)
 {
   constexpr int32_t HalfChunk = ChunkSize / 2;
   constexpr int32_t ChunkSquare = ChunkSize * ChunkSize;
-  const int32_t H = static_cast<int32_t>(num_heads);
+  const int32_t H = StaticHeads > 0
+                        ? StaticHeads
+                        : static_cast<int32_t>(num_heads);
   const int32_t key_heads = static_cast<int32_t>(num_key_heads);
   if (H <= 0 || key_heads <= 0 || (H % key_heads) != 0) return;
   const int32_t group = H / key_heads;
@@ -173,6 +345,11 @@ AICORE void kkt_kernel(
   constexpr int32_t CoeffUbAddr  = 157568;  // coeff_ub: gating coefficient [C/2×C]
   // a_ub_half overlaps g_r_2d — safe because they're never live simultaneously
   constexpr int32_t AUbHalfAddr  = GR2dUbAddr;
+  // Cached KKT keeps one BF16 KK half-tile live at GR2dUbAddr. Its row
+  // broadcast scratch must therefore live in the otherwise unused gap before
+  // GC2dUbAddr instead of PTO's fixed 184-KB temporary region.
+  constexpr int32_t GroupKkTmpUbAddr = 83968;
+  constexpr int32_t GroupKkOutUbAddr = GC2dUbAddr;
 
   // set_ffts_base_addr: Tell the hardware where the cross-core flag table lives.
   // This is a one-time setup so ffts_cross_core_sync / wait_flag_dev know
@@ -185,7 +362,8 @@ AICORE void kkt_kernel(
   // They share the same UB memory but run independently in parallel.
   // Here, vid=0 processes rows [0, C/2) and vid=1 processes rows [C/2, C).
   // This halves the per-sub-block work and doubles Vec throughput.
-  auto vid = get_subblockid();       // 0 or 1: which Vec sub-block am I?
+  const int32_t physical_vid = static_cast<int32_t>(get_subblockid());
+  const int32_t vid = StaticPart >= 0 ? StaticPart : physical_vid;
 
   // Work distribution: each (sequence, head) pair is one "work item".
   // AI cores split work round-robin, just like CUDA blocks split a grid.
@@ -239,6 +417,246 @@ AICORE void kkt_kernel(
        HalfChunk, ChunkSize> a_ub_half;
   TASSIGN(a_ub_half, AUbHalfAddr);
 
+  if (use_group_kk_cache != 0) {
+#if defined(__DAV_C220_CUBE__)
+    return;
+#elif defined(__DAV_C220_VEC__)
+    if (batch_size < 1 || cu_seqlens == nullptr ||
+        num_matrices % static_cast<uint32_t>(group) != 0) {
+      return;
+    }
+
+    set_mask_norm();
+    set_vector_mask(-1, -1);
+    {
+      Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+      shape.shape[3] = HalfChunk;
+      shape.shape[4] = ChunkSize;
+      GlobalTensor<float, decltype(shape),
+                   Stride<1, 1, 1, ChunkSize, 1>>
+          mask_global(
+              Msk_handle +
+                  static_cast<int64_t>(vid) * HalfChunk * ChunkSize,
+              shape);
+      UbND<float, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero>
+          mask_load(HalfChunk, ChunkSize);
+      TASSIGN(mask_load, MskUbAddr);
+      TLOAD(mask_load, mask_global);
+    }
+    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+    const int64_t cached_work =
+        num_matrices / static_cast<uint32_t>(group);
+    for (int64_t group_matrix_id = static_cast<int64_t>(cid);
+         group_matrix_id < cached_work;
+         group_matrix_id += static_cast<int64_t>(block_num)) {
+      const int32_t solve_wave =
+          static_cast<int32_t>(group_matrix_id / block_num);
+      const int32_t solve_slot = solve_wave & 3;
+      if (enable_solve_pipeline != 0 && solve_wave >= 4) {
+#if defined(PTO_NPU_ARCH_A5)
+        gdn_sync::Wait<PIPE_MTE2>(4 + solve_slot);
+#else
+        wait_flag_dev(4 + solve_slot);
+#endif
+      }
+      const int32_t head_g =
+          static_cast<int32_t>(group_matrix_id % key_heads);
+      const int64_t global_chunk_idx = group_matrix_id / key_heads;
+      int64_t bos = 0;
+      int64_t slen = 0;
+      int64_t local_chunk_idx = 0;
+      if (!ResolveGroupKkChunk<ChunkSize>(
+              global_chunk_idx, batch_size, cu_seqlens, bos, slen,
+              local_chunk_idx)) {
+        continue;
+      }
+      const int64_t chunk_start = local_chunk_idx * ChunkSize;
+      const int64_t remaining = slen - chunk_start;
+      const int32_t valid_rows = static_cast<int32_t>(
+          remaining < ChunkSize ? remaining : ChunkSize);
+      const int32_t row_offset =
+          static_cast<int32_t>(vid) * HalfChunk;
+      const int32_t local_valid =
+          valid_rows > row_offset
+              ? (valid_rows - row_offset < HalfChunk
+                     ? valid_rows - row_offset
+                     : HalfChunk)
+              : 0;
+      if (local_valid == 0) {
+        if (enable_solve_pipeline != 0) {
+#if defined(PTO_NPU_ARCH_A5)
+          gdn_sync::Signal<PIPE_MTE3>(
+              1 | (2 << 4) | (solve_slot << 8));
+#else
+          ffts_cross_core_sync(
+              PIPE_MTE3, 1 | (2 << 4) | (solve_slot << 8));
+#endif
+        }
+        continue;
+      }
+
+      {
+        Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+        shape.shape[3] = HalfChunk;
+        shape.shape[4] = ChunkSize;
+        const int64_t cache_offset =
+            (global_chunk_idx * key_heads + head_g) *
+                static_cast<int64_t>(ChunkSquare) +
+            static_cast<int64_t>(row_offset) * ChunkSize;
+        GlobalTensor<ComputeT, decltype(shape),
+                     Stride<1, 1, 1, ChunkSize, 1>>
+            kk_global(KK_cache_handle + cache_offset, shape);
+        UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC,
+             PadValue::Zero>
+            kk_load(HalfChunk, ChunkSize);
+        TASSIGN(kk_load, AUbHalfAddr);
+        TLOAD(kk_load, kk_global);
+      }
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+      UbND<ComputeT, HalfChunk, ChunkSize,
+           HalfChunk, ChunkSize> kk_ub_half;
+      TASSIGN(kk_ub_half, AUbHalfAddr);
+      UbND<ComputeT, HalfChunk, ChunkSize,
+           HalfChunk, ChunkSize> output_ub_half;
+      TASSIGN(output_ub_half, GroupKkOutUbAddr);
+      UbND<float, HalfChunk / 8, 64,
+           HalfChunk / 8, 64> row_expand_tmp;
+      TASSIGN(row_expand_tmp, GroupKkTmpUbAddr);
+
+      for (int32_t group_idx = 0; group_idx < group; ++group_idx) {
+        const int32_t head_idx = head_g * group + group_idx;
+        {
+          Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+          shape.shape[3] = 1;
+          shape.shape[4] = valid_rows;
+          GlobalTensor<float, decltype(shape),
+                       Stride<1, 1, 1, 1, 1>>
+              gate_global(
+                  G_handle +
+                      static_cast<int64_t>(head_idx) * total_tokens +
+                      bos + chunk_start,
+                  shape);
+          UbND<float, 1, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero>
+              gate_load(1, valid_rows);
+          TASSIGN(gate_load, GUbAddr);
+          TLOAD(gate_load, gate_global);
+          if (valid_rows != ChunkSize) {
+#if defined(PTO_NPU_ARCH_A5)
+            // A5 executes TFILLPAD_INPLACE for Vec tiles on PIPE_V. Fence
+            // the preceding MTE2 load before both operations touch g_ub.
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+#endif
+            UbND<float, 1, ChunkSize, 1, ChunkSize, PadValue::Zero>
+                gate_padded;
+            TASSIGN(gate_padded, GUbAddr);
+            TFILLPAD_INPLACE(gate_padded, gate_load);
+          }
+        }
+        {
+          Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+          shape.shape[3] = 1;
+          shape.shape[4] = local_valid;
+          GlobalTensor<ComputeT, decltype(shape),
+                       Stride<1, 1, 1, 1, 1>>
+              beta_global(
+                  Beta_handle +
+                      static_cast<int64_t>(head_idx) * total_tokens + bos +
+                      chunk_start + row_offset,
+                  shape);
+          UbND<ComputeT, 1, HalfChunk, DYNAMIC, DYNAMIC, PadValue::Zero>
+              beta_load(1, local_valid);
+          TASSIGN(beta_load, BetaHalfUbAddr);
+          TLOAD(beta_load, beta_global);
+          if (local_valid != HalfChunk) {
+#if defined(PTO_NPU_ARCH_A5)
+            // The beta tail has the same MTE2-to-Vec dependency. Without
+            // it, padding can race the final valid row and scale A wrongly.
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+#endif
+            UbND<ComputeT, 1, HalfChunk, 1, HalfChunk, PadValue::Zero>
+                beta_padded;
+            TASSIGN(beta_padded, BetaHalfUbAddr);
+            TFILLPAD_INPLACE(beta_padded, beta_load);
+          }
+        }
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+        TCVT(beta_ub, beta_ub_half, pto::RoundMode::CAST_NONE);
+        UbND<float, 1, HalfChunk, 1, HalfChunk> gate_rows;
+        TASSIGN(gate_rows,
+                GUbAddr +
+                    row_offset * static_cast<int32_t>(sizeof(float)));
+        TMOV(g_v_ub, gate_rows);
+        pipe_barrier(PIPE_V);
+        TLOG(beta_ub, beta_ub);
+        pipe_barrier(PIPE_V);
+        TADD(g_v_ub, g_v_ub, beta_ub);
+        pipe_barrier(PIPE_V);
+        TMOV(g_r_ub, g_v_ub);
+        TMOV(g_c_ub, g_ub);
+        pipe_barrier(PIPE_V);
+
+        UbDN<float, HalfChunk, 1, HalfChunk, 1> gate_rows_col;
+        TASSIGN(gate_rows_col, GRUbAddr);
+        TCOLEXPAND(g_c_2d_ub, g_c_ub);
+        pipe_barrier(PIPE_V);
+        TROWEXPANDSUB(
+            coeff_ub, gate_rows_col, g_c_2d_ub, row_expand_tmp);
+        pipe_barrier(PIPE_V);
+        TMINS(coeff_ub, coeff_ub, 0.0f);
+        pipe_barrier(PIPE_V);
+        TEXP(coeff_ub, coeff_ub);
+
+        TCVT(a_ub, kk_ub_half, pto::RoundMode::CAST_NONE);
+        TMUL(a_ub, a_ub, coeff_ub);
+        TMUL(a_ub, a_ub, msk_ub);
+        if (emit_precomputed_m_neg != 0) {
+          TNEG(a_ub, a_ub);
+          pipe_barrier(PIPE_V);
+        }
+        TCVT(output_ub_half, a_ub, pto::RoundMode::CAST_NONE);
+        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+
+        const int64_t output_offset =
+            ((bos + chunk_start + row_offset) * H + head_idx) *
+            static_cast<int64_t>(ChunkSize);
+        {
+          GmShape2D shape(local_valid, ChunkSize);
+          GmStride2D stride(H * ChunkSize);
+          GmTensor2D<ComputeT> output_global(
+              A_handle + output_offset, shape, stride);
+          UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC>
+              output_tile(local_valid, ChunkSize);
+          TASSIGN(output_tile, GroupKkOutUbAddr);
+          TSTORE(output_global, output_tile);
+        }
+        pipe_barrier(PIPE_ALL);
+
+      }
+      if (enable_solve_pipeline != 0) {
+#if defined(PTO_NPU_ARCH_A5)
+        gdn_sync::Signal<PIPE_MTE3>(
+            1 | (2 << 4) | (solve_slot << 8));
+#else
+        ffts_cross_core_sync(
+            PIPE_MTE3, 1 | (2 << 4) | (solve_slot << 8));
+#endif
+      }
+    }
+    return;
+#else
+    return;
+#endif
+  }
+
   // ========================================================================
   // CUBE PHASE: Compute KK^T = K @ K^T for each chunk via GEMM
   //
@@ -257,7 +675,7 @@ AICORE void kkt_kernel(
   // ========================================================================
   // __DAV_C220_CUBE__: This code only compiles for the Cube core.
   // On NPU, Cube and Vec are separate compilation targets (like two different GPUs).
-#if defined(__DAV_CUBE__)
+#if defined(__DAV_C220_CUBE__)
   // Outer loop: iterate over all (sequence, head) work items assigned to this core
   for (int64_t work_idx = 0;
        work_idx < (total_work + block_num - 1) / block_num; ++work_idx) {
@@ -291,7 +709,11 @@ AICORE void kkt_kernel(
     for (int64_t ci = 0; ci < num_chunks; ++ci) {
       int32_t slot = static_cast<int32_t>(ci & 1);
       // Wait for Vec to finish reading the previous KK^T from this slot
+#if defined(PTO_NPU_ARCH_A5)
       gdn_sync::Wait<PIPE_FIX>(2 + slot);
+#else
+      wait_flag_dev(2 + slot);
+#endif
       pipe_barrier(PIPE_ALL);
 
       int64_t chunk_start = ci * ChunkSize;
@@ -375,7 +797,7 @@ AICORE void kkt_kernel(
       }
 
       // ── Cross-core synchronization (Cube → Vec) ──────────────────────
-      // gdn_sync::Signal(pipe, config): Signal across physical cores.
+      // ffts_cross_core_sync(pipe, config): Signal across physical cores.
       // Unlike set_flag/wait_flag (which sync pipes within ONE core), this syncs
       // between the Cube core and Vec core (they are separate hardware units).
       //
@@ -383,14 +805,18 @@ AICORE void kkt_kernel(
       //   mode=2: broadcast to all cores on same block
       //   flag_id: which flag to set (0,1,2,3...)
       //
-      // The receiving side calls gdn_sync::Wait(flag_id) to wait for this signal.
+      // The receiving side calls wait_flag_dev(flag_id) to wait for this signal.
       //
       // In this kernel:
-      //   Cube sets flag 0/1 → Vec waits on gdn_sync::Wait(0/1) (KK^T ready)
-      //   Vec sets flag 2/3 → Cube waits on gdn_sync::Wait(2/3) (workspace free)
+      //   Cube sets flag 0/1 → Vec waits on wait_flag_dev(0/1) (KK^T ready)
+      //   Vec sets flag 2/3 → Cube waits on wait_flag_dev(2/3) (workspace free)
       //
       // Signal Vec that this slot's KK^T is ready
+#if defined(PTO_NPU_ARCH_A5)
       gdn_sync::Signal<PIPE_FIX>(1 | (2 << 4) | (slot << 8));
+#else
+      ffts_cross_core_sync(PIPE_FIX, 1 | (2 << 4) | (slot << 8));
+#endif
     }
   }
 #endif
@@ -418,7 +844,7 @@ AICORE void kkt_kernel(
   // A = KK_T[my_rows] * coeff * mask[my_rows]           # TMUL × 2
   // ========================================================================
   // __DAV_C220_VEC__: This code only compiles for the Vec core.
-#if defined(__DAV_VEC__)
+#if defined(__DAV_C220_VEC__)
   // set_mask_norm / set_vector_mask: configure the SIMD mask for Vec ops.
   // (-1, -1) means "all lanes active" — process every element.
   // (Like CUDA's __activemask() returning all 1s for a full warp.)
@@ -431,12 +857,12 @@ AICORE void kkt_kernel(
   {
     Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
     _gs.shape[3] = HalfChunk; _gs.shape[4] = ChunkSize;
+    UbND<float, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(HalfChunk, ChunkSize);
+    TASSIGN(_ld, MskUbAddr);
     GlobalTensor<float, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
         Msk_handle +
             static_cast<int64_t>(vid) * HalfChunk * ChunkSize,
         _gs);
-    UbND<float, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(HalfChunk, ChunkSize);
-    TASSIGN(_ld, MskUbAddr);
     TLOAD(_ld, _gm);
   }
   // MTE2→V sync: ensure mask DMA is complete before Vec reads it
@@ -445,9 +871,14 @@ AICORE void kkt_kernel(
 
   // Initial cross-core sync: release both workspace slots so Cube can start.
   // Vec tells Cube "slots 0 and 1 are free" by setting flags 2 and 3.
-  // Without this, Cube would hang on gdn_sync::Wait(2/3) at the first iteration.
+  // Without this, Cube would hang on wait_flag_dev(2/3) at the first iteration.
+#if defined(PTO_NPU_ARCH_A5)
   gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (2 << 8));
   gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (3 << 8));
+#else
+  ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (2 << 8));
+  ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (3 << 8));
+#endif
 
   for (int64_t work_idx = 0;
        work_idx < (total_work + block_num - 1) / block_num; ++work_idx) {
@@ -477,6 +908,13 @@ AICORE void kkt_kernel(
           remaining < ChunkSize ? remaining : ChunkSize);
       // row_offset: which half of the C×C matrix this sub-block handles
       //   vid=0 → rows [0, C/2),  vid=1 → rows [C/2, C)
+#if defined(GDN_A5_TILED_VECTOR_KERNEL)
+      // Keep the producer and the sequential A5 triangular solve on Vector
+      // subblock 0. A5's second Vector subblock does not reliably execute the
+      // long fp16/fp32 elementwise chain used by this stage.
+      int32_t row_offset = 0;
+      int32_t local_valid = vid == 0 ? valid_rows : 0;
+#else
       int32_t row_offset = static_cast<int32_t>(vid) * HalfChunk;
       // local_valid: how many rows in this sub-block are real (not padding)
       //   Handles the case where the last chunk has fewer than C valid rows
@@ -486,6 +924,7 @@ AICORE void kkt_kernel(
                      ? valid_rows - row_offset
                      : HalfChunk)
               : 0;
+#endif
 
       if (local_valid > 0) {
         // ── Load G (full chunk, 1×C) and Beta (sub-block rows, 1×HalfC) ──
@@ -493,17 +932,17 @@ AICORE void kkt_kernel(
         {
           Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
           _gs.shape[3] = 1; _gs.shape[4] = valid_rows;
+          UbND<float, 1, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(1, valid_rows);
+          TASSIGN(_ld, GUbAddr);
           GlobalTensor<float, decltype(_gs), pto::Stride<1, 1, 1, 1, 1>> _gm(
               G_handle + static_cast<int64_t>(head_idx) * total_tokens
                        + (bos + chunk_start),
               _gs);
-          UbND<float, 1, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(1, valid_rows);
-          TASSIGN(_ld, GUbAddr);
           TLOAD(_ld, _gm);
           if (valid_rows != ChunkSize) {
 #if defined(PTO_NPU_ARCH_A5)
-            // A5 executes TFILLPAD_INPLACE for Vec tiles on PIPE_V.  Fence
-            // the preceding MTE2 load before both operations touch g_ub.
+            // TFILLPAD_INPLACE writes the same UB tile as the outstanding
+            // MTE2 load. Wait before padding the partial final chunk.
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 #endif
@@ -513,6 +952,7 @@ AICORE void kkt_kernel(
           }
         }
 
+#if !defined(GDN_A5_TILED_VECTOR_KERNEL)
         // Beta is [H, total_tokens] ComputeT — contiguous per head
         {
           Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
@@ -526,8 +966,8 @@ AICORE void kkt_kernel(
           TLOAD(_ld, _gm);
           if (local_valid != HalfChunk) {
 #if defined(PTO_NPU_ARCH_A5)
-            // The beta tail has the same MTE2-to-Vec dependency.  Without
-            // it, padding can race the final valid row and scale A wrongly.
+            // The beta tail shares its UB tile with the MTE2 destination.
+            // Padding it early corrupts the final KKT row intermittently.
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 #endif
@@ -536,13 +976,190 @@ AICORE void kkt_kernel(
             TFILLPAD_INPLACE(_pd, _ld);
           }
         }
+#endif
       }
 
       // Wait for Cube to finish writing KK^T for this slot
+#if defined(PTO_NPU_ARCH_A5)
       gdn_sync::Wait<PIPE_MTE2>(slot);
+#else
+      wait_flag_dev(slot);
+#endif
       pipe_barrier(PIPE_ALL);
 
       if (local_valid > 0) {
+#if defined(GDN_A5_TILED_VECTOR_KERNEL)
+        // A5 cannot reliably execute the original 64x128 Vec expression as a
+        // single tile. Vector0 owns the matrix and processes it as 16x128 UB
+        // tiles; Vector1 remains available for the Cube/Vector control events.
+        constexpr int32_t A5RowsPerTile = 16;
+        using A5RowF = UbND<float, 1, ChunkSize, 1, ChunkSize>;
+        using A5RowH = UbND<ComputeT, 1, ChunkSize, 1, ChunkSize>;
+        using A5BetaRows =
+            UbND<ComputeT, 1, ChunkSize, 1, ChunkSize, PadValue::Zero>;
+        using A5TileF = UbND<float, A5RowsPerTile, ChunkSize,
+                            A5RowsPerTile, ChunkSize>;
+        using A5TileH = UbND<ComputeT, A5RowsPerTile, ChunkSize,
+                            A5RowsPerTile, ChunkSize>;
+        using A5GateCol = UbDN<float, A5RowsPerTile, 1,
+                              A5RowsPerTile, 1>;
+        using A5TileShape =
+            Shape<1, 1, 1, A5RowsPerTile, ChunkSize>;
+        using A5TileStride = pto::Stride<1, 1, 1, ChunkSize, 1>;
+
+        A5RowF g_col;
+        A5BetaRows beta_rows;
+        A5RowF gate_rows;
+        A5TileF coeff_tile;
+        A5TileF g_col_tile;
+        A5TileF a_tile;
+        A5TileF mask_tile;
+        A5TileH a_tile_half;
+        TASSIGN(g_col, GUbAddr);
+        TASSIGN(beta_rows, AUbHalfAddr);
+        TASSIGN(gate_rows, GCUbAddr);
+        TASSIGN(coeff_tile, CoeffUbAddr);
+        TASSIGN(g_col_tile, GC2dUbAddr);
+        TASSIGN(a_tile, AUbAddr);
+        TASSIGN(mask_tile, MskUbAddr);
+        TASSIGN(a_tile_half, AUbHalfAddr);
+
+        // Vector0 owns the complete C-row tile on A5. Load all beta values once
+        // and form every row gate with vector instructions; the row loop then
+        // contains only UB/GM DMA and SIMD work.
+        {
+          Shape<1, 1, 1, DYNAMIC, DYNAMIC> beta_shape;
+          beta_shape.shape[3] = 1;
+          beta_shape.shape[4] = valid_rows;
+          UbND<ComputeT, 1, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero>
+              beta_loaded(1, valid_rows);
+          TASSIGN(beta_loaded, AUbHalfAddr);
+          GlobalTensor<ComputeT, decltype(beta_shape),
+                       pto::Stride<1, 1, 1, 1, 1>> beta_gm(
+              Beta_handle + static_cast<int64_t>(head_idx) * total_tokens +
+                  bos + chunk_start,
+              beta_shape);
+#if defined(GDN_A5_KERNEL)
+          for (int32_t r = 0;
+               r < valid_rows * static_cast<int32_t>(sizeof(ComputeT));
+               r += 32) {
+            dcci(static_cast<__gm__ void *>(
+                     reinterpret_cast<__gm__ char *>(
+                         Beta_handle + static_cast<int64_t>(head_idx) *
+                                           total_tokens +
+                                       bos + chunk_start) +
+                     r),
+                 SINGLE_CACHE_LINE);
+          }
+          set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+          wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+#endif
+          TLOAD(beta_loaded, beta_gm);
+          if (valid_rows != ChunkSize) {
+            TFILLPAD_INPLACE(beta_rows, beta_loaded);
+          }
+        }
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
+        TCVT(gate_rows, beta_rows, pto::RoundMode::CAST_NONE);
+        pipe_barrier(PIPE_V);
+        TLOG(gate_rows, gate_rows);
+        pipe_barrier(PIPE_V);
+        TADD(gate_rows, gate_rows, g_col);
+        pipe_barrier(PIPE_V);
+
+        TCOLEXPAND(g_col_tile, g_col);
+        pipe_barrier(PIPE_V);
+
+        for (int32_t tile_row = 0; tile_row < local_valid;
+             tile_row += A5RowsPerTile) {
+          const int32_t chunk_row = row_offset + tile_row;
+          const int32_t tile_valid =
+              local_valid - tile_row < A5RowsPerTile
+                  ? local_valid - tile_row
+                  : A5RowsPerTile;
+          GlobalTensor<ComputeT, A5TileShape, A5TileStride> workspace_gm(
+              workspace_handle +
+              (static_cast<int64_t>(cid) * 2 + slot) * ChunkSquare +
+              static_cast<int64_t>(chunk_row) * ChunkSize);
+          GlobalTensor<float, A5TileShape, A5TileStride> mask_gm(
+              Msk_handle + static_cast<int64_t>(chunk_row) * ChunkSize);
+#if defined(GDN_A5_KERNEL)
+          // Cube and Vector are separate physical cores on A5. Invalidate the
+          // Cube-published workspace and the reused mask lines before MTE2.
+          for (int32_t r = 0; r < tile_valid * ChunkSize; r += 16) {
+            dcci(static_cast<__gm__ void *>(
+                     workspace_handle +
+                     (static_cast<int64_t>(cid) * 2 + slot) * ChunkSquare +
+                     static_cast<int64_t>(chunk_row) * ChunkSize + r),
+                 SINGLE_CACHE_LINE);
+          }
+          for (int32_t r = 0; r < tile_valid * ChunkSize; r += 8) {
+            dcci(static_cast<__gm__ void *>(
+                     Msk_handle +
+                     static_cast<int64_t>(chunk_row) * ChunkSize + r),
+                 SINGLE_CACHE_LINE);
+          }
+          set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+          wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+#endif
+          TLOAD(a_tile_half, workspace_gm);
+          TLOAD(mask_tile, mask_gm);
+          set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+          wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+          A5GateCol gate_col;
+          TASSIGN(gate_col,
+                  GCUbAddr + chunk_row * static_cast<int32_t>(sizeof(float)));
+          TROWEXPAND(coeff_tile, gate_col);
+          pipe_barrier(PIPE_V);
+          TSUB(coeff_tile, coeff_tile, g_col_tile);
+          pipe_barrier(PIPE_V);
+          TMINS(coeff_tile, coeff_tile, 0.0f);
+          pipe_barrier(PIPE_V);
+          TEXP(coeff_tile, coeff_tile);
+          pipe_barrier(PIPE_V);
+
+          TCVT(a_tile, a_tile_half, pto::RoundMode::CAST_NONE);
+          pipe_barrier(PIPE_V);
+          TMUL(a_tile, a_tile, coeff_tile);
+          pipe_barrier(PIPE_V);
+          TMUL(a_tile, a_tile, mask_tile);
+          pipe_barrier(PIPE_V);
+          TCVT(a_tile_half, a_tile, pto::RoundMode::CAST_NONE);
+          set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+          wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+
+          const int64_t a_tile_offset =
+              ((bos + chunk_start + chunk_row) * H + head_idx) *
+              static_cast<int64_t>(ChunkSize);
+          GmShape2D a_shape(tile_valid, ChunkSize);
+          GmStride2D a_stride(H * ChunkSize);
+          GmTensor2D<ComputeT> a_gm(A_handle + a_tile_offset, a_shape, a_stride);
+          UbND<ComputeT, A5RowsPerTile, ChunkSize, DYNAMIC, DYNAMIC>
+              a_store(tile_valid, ChunkSize);
+          TASSIGN(a_store, AUbHalfAddr);
+          TSTORE(a_gm, a_store);
+#if defined(GDN_A5_KERNEL)
+          set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+          wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+          for (int32_t row = 0; row < tile_valid; ++row) {
+            for (int32_t r = 0; r < ChunkSize; r += 16) {
+              dcci(static_cast<__gm__ void *>(
+                       A_handle + a_tile_offset +
+                       static_cast<int64_t>(row) * H * ChunkSize + r),
+                   SINGLE_CACHE_LINE);
+            }
+          }
+          dsb(DSB_ALL);
+          set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+          wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+#else
+          set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+          wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+#endif
+        }
+#else
         // ── Compute gating coefficient ────────────────────────────────
         // Step 1: Convert beta from ComputeT→FP32 for precision
         // Step 2: g_v[i] = g[row_offset+i] + log(β[i])  — combined row gate
@@ -558,15 +1175,15 @@ AICORE void kkt_kernel(
                 GUbAddr + row_offset *
                               static_cast<int32_t>(sizeof(float)));
         TMOV(g_v_ub, g_ub_temp);   // g_v = g[row_offset:row_offset+C/2]
-        gdn_sync::VectorBarrier();       // Wait for TMOV to complete
+        pipe_barrier(PIPE_V);       // Wait for TMOV to complete
 
         TLOG(beta_ub, beta_ub);     // beta_ub = log(beta) in-place
-        gdn_sync::VectorBarrier();
+        pipe_barrier(PIPE_V);
         TADD(g_v_ub, g_v_ub, beta_ub);  // g_v = g_sub + log(beta) — the combined gate
-        gdn_sync::VectorBarrier();
+        pipe_barrier(PIPE_V);
         TMOV(g_r_ub, g_v_ub);      // Copy to g_r for row-broadcast
         TMOV(g_c_ub, g_ub);        // Copy full g to g_c for col-broadcast
-        gdn_sync::VectorBarrier();
+        pipe_barrier(PIPE_V);
 
         // Broadcast g_v to rows, g to columns → 2D gating matrix
         // coeff[i,j] = exp(min(g_v[i] - g[j], 0))
@@ -578,11 +1195,11 @@ AICORE void kkt_kernel(
         TASSIGN(g_r_ub_temp, GRUbAddr);
         TROWEXPAND(g_r_2d_ub, g_r_ub_temp);  // g_r_2d[i,j] = g_v[i] for all j
         TCOLEXPAND(g_c_2d_ub, g_c_ub);       // g_c_2d[i,j] = g[j] for all i
-        gdn_sync::VectorBarrier();
+        pipe_barrier(PIPE_V);
         TSUB(coeff_ub, g_r_2d_ub, g_c_2d_ub);  // coeff[i,j] = g_v[i] - g[j]
-        gdn_sync::VectorBarrier();
+        pipe_barrier(PIPE_V);
         TMINS(coeff_ub, coeff_ub, 0.0f);        // clamp to ≤ 0 (coeff will be ≤ 1 after exp)
-        gdn_sync::VectorBarrier();
+        pipe_barrier(PIPE_V);
         TEXP(coeff_ub, coeff_ub);                // coeff = exp(clamped_diff) ∈ (0, 1]
 
         // V→MTE2 sync: ensure gating computation is done before we start
@@ -597,13 +1214,13 @@ AICORE void kkt_kernel(
         {
           Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
           _gs.shape[3] = HalfChunk; _gs.shape[4] = ChunkSize;
+          UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(HalfChunk, ChunkSize);
+          TASSIGN(_ld, AUbHalfAddr);
           GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
               workspace_handle +
                   (static_cast<int64_t>(cid) * 2 + slot) * ChunkSquare +
                   static_cast<int64_t>(vid) * HalfChunk * ChunkSize,
               _gs);
-          UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(HalfChunk, ChunkSize);
-          TASSIGN(_ld, AUbHalfAddr);
           TLOAD(_ld, _gm);
         }
 
@@ -618,6 +1235,10 @@ AICORE void kkt_kernel(
         TMUL(a_ub, a_ub, coeff_ub);
         // 3. Element-wise multiply by causal mask (lower triangular, zeros above diagonal)
         TMUL(a_ub, a_ub, msk_ub);
+        if (emit_precomputed_m_neg != 0) {
+          TNEG(a_ub, a_ub);
+          pipe_barrier(PIPE_V);
+        }
         // 4. Convert result back to ComputeT for output
         TCVT(a_ub_half, a_ub, pto::RoundMode::CAST_NONE);
 
@@ -642,16 +1263,24 @@ AICORE void kkt_kernel(
           TASSIGN(_st, AUbHalfAddr);
           TSTORE(_gm, _st);
         }
+        pipe_barrier(PIPE_ALL);
+#endif
       }
 
-      pipe_barrier(PIPE_ALL);
       // Signal Cube that this workspace slot is free for reuse.
       // Flag (2+slot): slot 0 → flag 2, slot 1 → flag 3.
-      // Cube is waiting on gdn_sync::Wait(2+slot) before writing the next chunk.
-      gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | ((2 + slot) << 8));
+      // Cube is waiting on wait_flag_dev(2+slot) before writing the next chunk.
+#if defined(PTO_NPU_ARCH_A5)
+      gdn_sync::Signal<PIPE_MTE3>(
+          1 | (2 << 4) | ((2 + slot) << 8));
+#else
+      ffts_cross_core_sync(
+          PIPE_MTE3, 1 | (2 << 4) | ((2 + slot) << 8));
+#endif
     }
   }
 #endif
+
 }
 
 // ── NPU kernel entry point ────────────────────────────────────────────

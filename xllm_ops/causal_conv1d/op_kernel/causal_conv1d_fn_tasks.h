@@ -190,16 +190,18 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::InitRingSeqSplit(int32_t cacheIdx, b
 }
 
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>
-__aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessFnChunk(int32_t cacheIdx, bool hasInit, int32_t seqStart,
+__aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessFnChunk(int32_t readCacheIdx, int32_t writeCacheIdx,
+                                                           bool hasInit, int32_t seqStart,
                                                            int32_t seqLen, int32_t chunkStart, int32_t chunkLen,
                                                            int32_t channelStart, int32_t baseDim, int32_t dim)
 {
     LoadWeightAndBias(channelStart, baseDim);
-    InitRingSeqSplit(cacheIdx, hasInit, seqStart, chunkStart, chunkLen, channelStart, baseDim, dim);
+    InitRingSeqSplit(readCacheIdx, hasInit, seqStart, chunkStart, chunkLen, channelStart, baseDim, dim);
 
     RunSeq(chunkStart, chunkLen, channelStart, baseDim, dim);
 
-    MaybeWriteBackSeqSplitTailChunk(chunkStart, chunkLen, seqStart, seqLen, cacheIdx, channelStart, baseDim, dim);
+    MaybeWriteBackSeqSplitTailChunk(chunkStart, chunkLen, seqStart, seqLen, writeCacheIdx,
+                                    channelStart, baseDim, dim);
     DrainTaskMte3();
 }
 
@@ -317,7 +319,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessVarlenTokenTiled()
         }
 
         const bool hasInit = ResolveSeqHasInit(seq, hasInitialStateMode);
-        ProcessFnChunk(cacheIdx, hasInit, seqStart, curSeqLen, cursor, tileLen, blockTask.channelStart,
+        ProcessFnChunk(cacheIdx, cacheIdx, hasInit, seqStart, curSeqLen, cursor, tileLen, blockTask.channelStart,
                        blockTask.baseDimSize, dim);
 
         cursor = tileEnd;

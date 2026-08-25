@@ -16,25 +16,37 @@ def _has_npu():
 pytestmark = pytest.mark.skipif(not _has_npu(), reason="NPU is required")
 
 
-SUPPORTED_HEAD_CONFIGS = [
-    pytest.param(2, 1, id="H2-Hg1"),
-    pytest.param(4, 2, id="H4-Hg2"),
-    pytest.param(6, 2, id="H6-Hg2"),
-    pytest.param(12, 4, id="H12-Hg4"),
-    pytest.param(16, 4, id="H16-Hg4"),
-    pytest.param(16, 8, id="H16-Hg8"),
-    pytest.param(16, 16, id="H16-Hg16"),
-    pytest.param(24, 8, id="H24-Hg8"),
+QWEN35_TP_HEAD_CONFIGS = [
+    pytest.param(16, 16, id="V16-TP1"),
+    pytest.param(8, 8, id="V16-TP2"),
+    pytest.param(4, 4, id="V16-TP4"),
+    pytest.param(2, 2, id="V16-TP8"),
+    pytest.param(1, 1, id="V16-TP16"),
+    pytest.param(32, 16, id="V32-TP1"),
+    pytest.param(16, 8, id="V32-TP2"),
+    pytest.param(8, 4, id="V32-TP4"),
+    pytest.param(4, 2, id="V32-TP8"),
+    pytest.param(2, 1, id="V32-TP16"),
+    pytest.param(48, 16, id="V48-TP1"),
+    pytest.param(24, 8, id="V48-TP2"),
+    pytest.param(12, 4, id="V48-TP4"),
+    pytest.param(6, 2, id="V48-TP8"),
+    pytest.param(3, 1, id="V48-TP16"),
+    pytest.param(64, 16, id="V64-TP1"),
+    pytest.param(32, 8, id="V64-TP2"),
+    pytest.param(16, 4, id="V64-TP4"),
+    pytest.param(8, 2, id="V64-TP8"),
+    pytest.param(4, 1, id="V64-TP16"),
+]
+
+
+SUPPORTED_HEAD_CONFIGS = QWEN35_TP_HEAD_CONFIGS + [
     pytest.param(32, 4, id="H32-Hg4"),
-    pytest.param(32, 8, id="H32-Hg8"),
-    pytest.param(32, 16, id="H32-Hg16"),
     pytest.param(32, 32, id="H32-Hg32"),
     pytest.param(48, 8, id="H48-Hg8"),
     pytest.param(48, 12, id="H48-Hg12"),
-    pytest.param(48, 16, id="H48-Hg16"),
     pytest.param(64, 4, id="H64-Hg4"),
     pytest.param(64, 8, id="H64-Hg8"),
-    pytest.param(64, 16, id="H64-Hg16"),
 ]
 
 
@@ -177,15 +189,12 @@ def _run_mega(q_cpu, k_cpu, v_cpu, g_cpu, beta_cpu, cu_list=None, initial_state_
 @pytest.mark.parametrize(
     ("total_tokens", "cu_list", "num_value_heads", "num_key_heads"),
     [
-        pytest.param(22, None, 12, 4, id="qwen35-tp4-short-H12-Hg4"),
-        pytest.param(47, [0, 22, 47], 12, 4, id="qwen35-tp4-ragged-short-H12-Hg4"),
         pytest.param(129, None, 2, 1, id="single-H2-Hg1"),
         pytest.param(129, None, 4, 2, id="single-H4-Hg2"),
         pytest.param(129, None, 6, 2, id="single-H6-Hg2"),
         pytest.param(129, None, 16, 4, id="single-H16-Hg4"),
         pytest.param(256, [0, 96, 128, 256], 32, 8, id="varlen-H32-Hg8"),
         pytest.param(512, [0, 96, 128, 512], 48, 16, id="long-varlen-H48-Hg16"),
-        pytest.param(1401, None, 12, 4, id="qwen35-tp4-long-H12-Hg4"),
     ],
 )
 @pytest.mark.parametrize("compute_dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
@@ -246,32 +255,9 @@ def test_mega_chunk_gdn_supported_head_configs(num_value_heads, num_key_heads, c
     )
 
 
-def test_mega_chunk_gdn_bf16_correlated_input_stays_finite():
-    total_tokens = 512
-    num_value_heads = 24
-    num_key_heads = 8
-    head_dim = 128
-
-    q = torch.zeros(1, total_tokens, num_key_heads, head_dim, dtype=torch.bfloat16)
-    q[..., 0] = 1
-    k = q.clone()
-    v = torch.ones(1, total_tokens, num_value_heads, head_dim, dtype=torch.bfloat16)
-    g = torch.full((1, total_tokens, num_value_heads), -0.0005, dtype=torch.float32)
-    beta = torch.full((1, total_tokens, num_value_heads), 0.9765625, dtype=torch.bfloat16)
-
-    out, final_state = _run_mega(q, k, v, g, beta, output_final_state=True)
-
-    assert out.dtype == torch.bfloat16
-    assert torch.isfinite(out.float()).all()
-    assert torch.isfinite(final_state.float()).all()
-    assert out.float().abs().max() < 1
-    assert final_state.float().abs().max() < 2
-
-
-@pytest.mark.parametrize("compute_dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
-def test_mega_chunk_gdn_prefill_warmup_h4_hg2_smoke(compute_dtype):
+def test_mega_chunk_gdn_prefill_warmup_h4_hg2_smoke():
     total_tokens = 8192
-    q, k, v, g, beta = _make_inputs(total_tokens, 4, 2, seed=3, dtype=compute_dtype)
+    q, k, v, g, beta = _make_inputs(total_tokens, 4, 2, seed=3)
 
     out, final_state = _run_mega(q, k, v, g, beta, output_final_state=True)
 

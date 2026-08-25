@@ -75,7 +75,7 @@
 //   TMATMUL(C, A, B)        — C = A @ B (Cube engine, ComputeT→FP32 accum)
 //   set_flag / wait_flag    — synchronize pipes within same AI core
 //   ffts_cross_core_sync    — signal across Cube↔Vec cores
-//   gdn_sync::Wait(flag)     — wait for cross-core signal
+//   wait_flag_dev(flag)     — wait for cross-core signal
 // ============================================================================
 
 #include <pto/pto-inst.hpp>
@@ -91,6 +91,10 @@ using namespace pto;
 
 #ifndef GDN_C
 #define GDN_C 128
+#endif
+
+#ifndef GDN_MAX_HEADS
+#define GDN_MAX_HEADS 64
 #endif
 
 // ── PTO type aliases (device-only, guarded for host pass safety) ────────────
@@ -137,15 +141,1418 @@ using GmTensor2D = pto::GlobalTensor<T, GmShape2D, GmStride2D>;
 
 #endif  // __CCE_AICORE__
 
-#if defined(__DAV_CUBE__)
+#if defined(__DAV_C220_CUBE__)
 #define GDN_CHUNK_O_KERNEL chunk_o_kernel_aic
-#elif defined(__DAV_VEC__)
+#elif defined(__DAV_C220_VEC__)
 #define GDN_CHUNK_O_KERNEL chunk_o_kernel_aiv
 #else
 #define GDN_CHUNK_O_KERNEL chunk_o_kernel
 #endif
 
-template <typename ComputeT, int32_t HiddenSize, int32_t ChunkSize>
+template <int32_t ChunkSize>
+AICORE inline bool CanReuseGroupQk(
+    int64_t batch_size, int64_t total_tokens, uint32_t num_heads,
+    uint32_t num_key_heads, uint32_t num_matrices,
+    __gm__ int32_t *cu_seqlens)
+{
+#ifdef MEGA_CHUNK_GDN_MULTI_BATCH_GROUP_QK
+  if (batch_size < 1 || total_tokens <= 0 || cu_seqlens == nullptr ||
+#else
+  if (batch_size != 1 || total_tokens <= 0 || cu_seqlens == nullptr ||
+#endif
+      num_key_heads == 0 || num_heads <= num_key_heads ||
+      (num_heads % num_key_heads) != 0) {
+    return false;
+  }
+#ifdef MEGA_CHUNK_GDN_MULTI_BATCH_GROUP_QK
+  const uint32_t group = num_heads / num_key_heads;
+  if (group < 2 || group > 3) {
+    return false;
+  }
+  uint32_t chunk_count = 0;
+  for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
+    const int64_t seq_start = static_cast<int64_t>(cu_seqlens[seq_idx]);
+    const int64_t seq_end = static_cast<int64_t>(cu_seqlens[seq_idx + 1]);
+    const int64_t seq_tokens = seq_end - seq_start;
+    if (seq_tokens <= 0) {
+      return false;
+    }
+    chunk_count += static_cast<uint32_t>(
+        (seq_tokens + ChunkSize - 1) / ChunkSize);
+  }
+#else
+  // The group-mailbox schedule is tuned for the Qwen3.5-27B TP2 mapping.
+  // Other valid head layouts use the per-head H/O pipeline below.
+  if (num_heads != 24 || num_key_heads != 8) {
+    return false;
+  }
+  const uint32_t chunk_count =
+      static_cast<uint32_t>((total_tokens + ChunkSize - 1) / ChunkSize);
+#endif
+  const uint64_t group_work_count =
+      static_cast<uint64_t>(chunk_count) * num_key_heads;
+  return num_matrices == chunk_count * num_heads &&
+         group_work_count >= get_block_num();
+}
+
+template <int32_t ChunkSize>
+AICORE inline bool ResolveHoGlobalChunk(
+    int64_t global_chunk_idx, int64_t batch_size,
+    __gm__ int32_t *cu_seqlens, int64_t &seq_idx, int64_t &bos,
+    int64_t &slen, int64_t &local_chunk_idx)
+{
+  int64_t accumulated_chunks = 0;
+  for (int64_t current_seq = 0; current_seq < batch_size; ++current_seq) {
+    const int64_t seq_start =
+        static_cast<int64_t>(cu_seqlens[current_seq]);
+    const int64_t seq_end =
+        static_cast<int64_t>(cu_seqlens[current_seq + 1]);
+    const int64_t seq_tokens = seq_end - seq_start;
+    const int64_t seq_chunks =
+        (seq_tokens + ChunkSize - 1) / ChunkSize;
+    if (global_chunk_idx < accumulated_chunks + seq_chunks) {
+      seq_idx = current_seq;
+      bos = seq_start;
+      slen = seq_tokens;
+      local_chunk_idx = global_chunk_idx - accumulated_chunks;
+      return true;
+    }
+    accumulated_chunks += seq_chunks;
+  }
+  return false;
+}
+
+#if defined(PTO_NPU_ARCH_A2A3)
+template <int32_t Rows, typename TileDataOut, typename TileDataIn>
+__tf__ PTO_INTERNAL void ReduceRowsFp32Normal(TileDataOut &dst,
+                                              TileDataIn &src)
+{
+  __ubuf__ float *dst_ptr = reinterpret_cast<__ubuf__ float *>(
+      __cce_get_tile_ptr(dst.data()));
+  __ubuf__ float *src_ptr = reinterpret_cast<__ubuf__ float *>(
+      __cce_get_tile_ptr(src.data()));
+  vcadd(dst_ptr, src_ptr, Rows, 1, 1, 8, false);
+}
+#endif
+
+template <int32_t HiddenSize, int32_t Rows, int32_t OutputAddr,
+          int32_t SquareAddr, int32_t ReduceTmpAddr, int32_t RowSumAddr,
+          int32_t RowScaleAddr>
+AICORE inline void NormalizeRmsRows()
+{
+#if defined(__DAV_C220_CUBE__) || defined(__DAV_C220_VEC__)
+  UbND<float, Rows, HiddenSize> output_fp32;
+  TASSIGN(output_fp32, OutputAddr);
+  UbND<float, Rows, HiddenSize> square;
+  TASSIGN(square, SquareAddr);
+  UbND<float, Rows, HiddenSize> reduce_tmp;
+  TASSIGN(reduce_tmp, ReduceTmpAddr);
+  UbDN<float, Rows, 1> row_sum_col;
+  TASSIGN(row_sum_col, RowSumAddr);
+  UbND<float, 1, Rows> row_sum_vec;
+  TASSIGN(row_sum_vec, RowSumAddr);
+  UbND<float, Rows, 8> row_scale_blocks;
+  TASSIGN(row_scale_blocks, RowScaleAddr);
+
+  TMUL(square, output_fp32, output_fp32);
+  pipe_barrier(PIPE_V);
+  if constexpr (HiddenSize == 128) {
+    // Match LayerNormFwd's N=128 reduction tree: add the two 64-wide
+    // halves elementwise, then reduce the resulting 64 values.  The source
+    // tiles retain a physical row stride of 128 while exposing 64 valid
+    // columns, so PTO emits one strided vector add for all rows.
+    UbND<float, Rows, HiddenSize, Rows, HiddenSize / 2> square_low;
+    TASSIGN(square_low, SquareAddr);
+    UbND<float, Rows, HiddenSize, Rows, HiddenSize / 2> square_high;
+    TASSIGN(square_high, SquareAddr + HiddenSize / 2 * sizeof(float));
+    UbND<float, Rows, HiddenSize / 2> reduced_halves;
+    TASSIGN(reduced_halves, ReduceTmpAddr);
+    TADD(reduced_halves, square_low, square_high);
+    pipe_barrier(PIPE_V);
+#if defined(PTO_NPU_ARCH_A2A3)
+    // PTO's 64-wide TROWSUM selects count mode on A2/A3. LayerNormFwd uses
+    // normal mode with one explicit repeat per row, so issue the same vcadd
+    // form to preserve its reduction tree bit for bit.
+    set_mask_norm();
+    set_vector_mask(-1, -1);
+    ReduceRowsFp32Normal<Rows>(row_sum_col, reduced_halves);
+#else
+    TROWSUM(row_sum_col, reduced_halves, square);
+#endif
+  } else {
+    TROWSUM(row_sum_col, square, reduce_tmp);
+  }
+  pipe_barrier(PIPE_V);
+  TRESHAPE(row_sum_vec, row_sum_col);
+  TMULS(row_sum_vec, row_sum_vec,
+        1.0f / static_cast<float>(HiddenSize));
+  pipe_barrier(PIPE_V);
+  TADDS(row_sum_vec, row_sum_vec, 1.0e-6f);
+  pipe_barrier(PIPE_V);
+  TSQRT(row_sum_vec, row_sum_vec);
+  pipe_barrier(PIPE_V);
+  UbND<float, 1, Rows> reciprocal_numerator;
+  TASSIGN(reciprocal_numerator, ReduceTmpAddr);
+  TMULS(reciprocal_numerator, row_sum_vec, 0.0f);
+  pipe_barrier(PIPE_V);
+  TADDS(reciprocal_numerator, reciprocal_numerator, 1.0f);
+  pipe_barrier(PIPE_V);
+  TDIV(row_sum_vec, reciprocal_numerator, row_sum_vec);
+  pipe_barrier(PIPE_V);
+  TRESHAPE(row_sum_col, row_sum_vec);
+  TROWEXPAND(row_scale_blocks, row_sum_col);
+  pipe_barrier(PIPE_V);
+  TROWEXPANDMUL(output_fp32, output_fp32, row_scale_blocks);
+  pipe_barrier(PIPE_V);
+#endif
+}
+
+template <int32_t HiddenSize, int32_t ChunkSize, bool FuseGatedRmsNorm>
+AICORE inline void StoreChunkOutput(
+    __gm__ GDN_PUBLIC_DTYPE *output_handle,
+    __gm__ GDN_PUBLIC_DTYPE *z_handle,
+    int64_t output_offset,
+    int32_t row_stride,
+    int32_t local_rows)
+{
+#if defined(__DAV_C220_VEC__)
+  constexpr int32_t HalfChunk = ChunkSize / 2;
+  constexpr int32_t OutputFp32Addr = 33280;
+  // The optimized 64x128 TROWSUM path needs a 512-byte-aligned result
+  // reservation even though the logical 64x1 FP32 tile is only 256 bytes.
+  constexpr int32_t RowSumAddr = 182272;
+  constexpr int32_t RowRstdAddr = 182784;
+  constexpr int32_t ReduceTmpAddr = 66304;
+  constexpr int32_t ZBf16Addr = 99072;
+  constexpr int32_t SquareAddr = 131840;
+  constexpr int32_t OutputComputeAddr = 115456;
+  constexpr int32_t OutputPublicAddr =
+      std::is_same_v<ComputeT, GDN_PUBLIC_DTYPE>
+          ? OutputComputeAddr
+          : 164608;
+  constexpr int32_t NormWeightFp32Addr = 181504;
+  // torch FP16 tensor-scalar Mul converts 1/sqrt(128) to FP16 first.
+  constexpr float OutputScale = 0.08837890625f;
+
+  UbND<float, HalfChunk, HiddenSize> output_fp32;
+  TASSIGN(output_fp32, OutputFp32Addr);
+  UbND<ComputeT, HalfChunk, HiddenSize, HalfChunk, HiddenSize,
+       PadValue::Zero>
+      output_compute;
+  TASSIGN(output_compute, OutputComputeAddr);
+  UbND<GDN_PUBLIC_DTYPE, HalfChunk, HiddenSize, HalfChunk, HiddenSize,
+       PadValue::Zero>
+      output_public;
+  TASSIGN(output_public, OutputPublicAddr);
+
+  // Match the standalone MegaChunkGdn compute boundary before scaling.
+#if defined(PTO_NPU_ARCH_A5)
+  // The caller has just produced output_fp32 with TADD.  C220's compiler
+  // inserts the required Vector dependency, whereas C310 needs the explicit
+  // PR #41-style barrier before the conversion can consume that tile.
+  pipe_barrier(PIPE_V);
+#endif
+  TCVT(output_compute, output_fp32, pto::RoundMode::CAST_NONE);
+
+  if constexpr (FuseGatedRmsNorm) {
+    {
+      Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+      shape.shape[3] = local_rows;
+      shape.shape[4] = HiddenSize;
+      GmStride2D stride(row_stride);
+      GmTensor2D<GDN_PUBLIC_DTYPE> z_global(
+          z_handle + output_offset, shape, stride);
+      UbND<GDN_PUBLIC_DTYPE, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC,
+           PadValue::Zero>
+          z_load(local_rows, HiddenSize);
+      TASSIGN(z_load, ZBf16Addr);
+      TLOAD(z_load, z_global);
+      if (local_rows != HalfChunk) {
+        UbND<GDN_PUBLIC_DTYPE, HalfChunk, HiddenSize,
+             HalfChunk, HiddenSize,
+             PadValue::Zero>
+            z_padded;
+        TASSIGN(z_padded, ZBf16Addr);
+        TFILLPAD_INPLACE(z_padded, z_load);
+      }
+    }
+    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+    pipe_barrier(PIPE_V);
+    TCVT(output_fp32, output_compute, pto::RoundMode::CAST_NONE);
+    pipe_barrier(PIPE_V);
+    TMULS(output_fp32, output_fp32, OutputScale);
+    pipe_barrier(PIPE_V);
+    TCVT(output_compute, output_fp32, pto::RoundMode::CAST_NONE);
+    pipe_barrier(PIPE_V);
+    TCVT(output_fp32, output_compute, pto::RoundMode::CAST_NONE);
+    if constexpr (!std::is_same_v<ComputeT, GDN_PUBLIC_DTYPE>) {
+      // The standalone path returns the scaled FP16 result as BF16 before
+      // the model converts it back to FP32 for gated RMSNorm.
+      pipe_barrier(PIPE_V);
+      TCVT(output_public, output_fp32, pto::RoundMode::CAST_NONE);
+      pipe_barrier(PIPE_V);
+      TCVT(output_fp32, output_public, pto::RoundMode::CAST_NONE);
+    }
+
+    NormalizeRmsRows<HiddenSize, HalfChunk, OutputFp32Addr, SquareAddr,
+                     ReduceTmpAddr, RowSumAddr, RowRstdAddr>();
+
+    UbND<float, 1, HiddenSize> norm_weight_fp32;
+    TASSIGN(norm_weight_fp32, NormWeightFp32Addr);
+    TCOLEXPANDMUL(output_fp32, output_fp32, norm_weight_fp32);
+
+    UbND<float, HalfChunk, HiddenSize> scratch;
+    TASSIGN(scratch, SquareAddr);
+    UbND<float, HalfChunk, HiddenSize> reduce_tmp;
+    TASSIGN(reduce_tmp, ReduceTmpAddr);
+
+    wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+    UbND<GDN_PUBLIC_DTYPE, HalfChunk, HiddenSize,
+         HalfChunk, HiddenSize,
+         PadValue::Zero>
+        z_public;
+    TASSIGN(z_public, ZBf16Addr);
+    TCVT(scratch, z_public, pto::RoundMode::CAST_NONE);
+#if defined(PTO_NPU_ARCH_A5)
+    pipe_barrier(PIPE_V);
+#endif
+    TNEG(reduce_tmp, scratch);
+#if defined(PTO_NPU_ARCH_A5)
+    pipe_barrier(PIPE_V);
+#endif
+    TEXP(reduce_tmp, reduce_tmp);
+#if defined(PTO_NPU_ARCH_A5)
+    pipe_barrier(PIPE_V);
+#endif
+    TADDS(reduce_tmp, reduce_tmp, 1.0f);
+    pipe_barrier(PIPE_V);
+
+    TMUL(output_fp32, output_fp32, scratch);
+#if defined(PTO_NPU_ARCH_A5)
+    pipe_barrier(PIPE_V);
+#endif
+    TDIV(output_fp32, output_fp32, reduce_tmp);
+#if defined(PTO_NPU_ARCH_A5)
+    pipe_barrier(PIPE_V);
+#endif
+    TCVT(output_public, output_fp32, pto::RoundMode::CAST_ROUND);
+  } else if constexpr (!std::is_same_v<ComputeT, GDN_PUBLIC_DTYPE>) {
+    pipe_barrier(PIPE_V);
+    TCVT(output_fp32, output_compute, pto::RoundMode::CAST_NONE);
+    pipe_barrier(PIPE_V);
+    TCVT(output_public, output_fp32, pto::RoundMode::CAST_NONE);
+  }
+
+  set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+  wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+  {
+    Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+    shape.shape[3] = local_rows;
+    shape.shape[4] = HiddenSize;
+    GmStride2D stride(row_stride);
+    GmTensor2D<GDN_PUBLIC_DTYPE> output_global(
+        output_handle + output_offset, shape, stride);
+    UbND<GDN_PUBLIC_DTYPE, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC>
+        output_store(local_rows, HiddenSize);
+    TASSIGN(output_store, OutputPublicAddr);
+    TSTORE(output_global, output_store);
+  }
+#endif
+}
+
+AICORE inline int64_t GetHoConsumerOwner(
+    int64_t global_item, int64_t block_num,
+    bool rebalance_consumers, int64_t balanced_span,
+    int64_t heavy_core_count, int64_t light_core_count)
+{
+  int64_t owner = global_item % block_num;
+  if (rebalance_consumers && global_item >= balanced_span) {
+    owner = heavy_core_count +
+            (global_item - balanced_span) % light_core_count;
+  }
+  return owner;
+}
+
+AICORE inline int64_t GetHoOwnedItem(
+    int64_t owned_idx, int64_t total_items, int64_t core_id,
+    int64_t block_num, bool rebalance_consumers,
+    int64_t balanced_span, int64_t heavy_core_count,
+    int64_t light_core_count, int64_t prefix_count,
+    int64_t tail_owner_shift)
+{
+  if (!rebalance_consumers || owned_idx < prefix_count) {
+    const int64_t item = core_id + owned_idx * block_num;
+    return item < total_items ? item : total_items;
+  }
+  if (core_id < heavy_core_count || light_core_count <= 0) {
+    return total_items;
+  }
+  const int64_t tail_round = owned_idx - prefix_count;
+  const int64_t tail_round_start =
+      balanced_span + tail_round * light_core_count;
+  int64_t tail_rank =
+      core_id - heavy_core_count - tail_owner_shift;
+  if (tail_rank < 0) {
+    tail_rank += light_core_count;
+  }
+  const int64_t item =
+      balanced_span + tail_rank +
+      tail_round * light_core_count;
+  return item < total_items ? item : total_items;
+}
+
+template <int32_t ChunkSize>
+AICORE inline void WaitHoChunkReady(
+    __gm__ int32_t *ready_handle, int32_t head_idx,
+    int64_t chunk_idx)
+{
+#if defined(__DAV_C220_CUBE__) || defined(__DAV_C220_VEC__)
+  constexpr int64_t ReadyStride = 16;
+  const int64_t ready_offset =
+      static_cast<int64_t>(head_idx) * ReadyStride;
+  __gm__ int64_t *ready_cacheline =
+      reinterpret_cast<__gm__ int64_t *>(ready_handle + ready_offset);
+  __gm__ volatile int32_t *ready_ptr = ready_handle + ready_offset;
+  const int32_t required_count = static_cast<int32_t>(chunk_idx + 1);
+  while (true) {
+    dcci(ready_cacheline, cache_line_t::SINGLE_CACHE_LINE,
+         dcci_dst_t::CACHELINE_OUT);
+    const int32_t ready_count = *ready_ptr;
+    if (ready_count >= required_count) {
+      break;
+    }
+  }
+#endif
+}
+
+template <int32_t HiddenSize, int32_t ChunkSize>
+AICORE inline void PublishQKTile(
+    __gm__ ComputeT *q_handle, __gm__ ComputeT *k_handle,
+    __gm__ ComputeT *qk_mailbox, int64_t core_id,
+    int64_t qk_offset, int32_t qk_stride, int32_t valid_rows,
+    int32_t qk_ready_flag, uint32_t strong_publish)
+{
+#if defined(__DAV_C220_CUBE__)
+  L1Mat<ComputeT, ChunkSize, HiddenSize> q_l1;
+  TASSIGN(q_l1, 0);
+  L1Mat<ComputeT, ChunkSize, HiddenSize> k_l1;
+  TASSIGN(k_l1, 32768);
+  TileAcc<float, ChunkSize, ChunkSize,
+          ChunkSize, ChunkSize> qk_l0;
+  TASSIGN(qk_l0, 0);
+
+  set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
+  wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
+
+  {
+    L1Mat<ComputeT, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC>
+        q_load(valid_rows, HiddenSize);
+    TASSIGN(q_load, 0);
+    GmShape2D shape(valid_rows, HiddenSize);
+    GmStride2D stride(qk_stride);
+    GmTensor2D<ComputeT> q_global(q_handle + qk_offset, shape,
+                                 stride);
+    TLOAD(q_load, q_global);
+    if (valid_rows != ChunkSize) {
+      TFILLPAD(q_load, q_load);
+    }
+  }
+  {
+    L1Mat<ComputeT, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC>
+        k_load(valid_rows, HiddenSize);
+    TASSIGN(k_load, 32768);
+    GmShape2D shape(valid_rows, HiddenSize);
+    GmStride2D stride(qk_stride);
+    GmTensor2D<ComputeT> k_global(k_handle + qk_offset, shape,
+                                 stride);
+    TLOAD(k_load, k_global);
+    if (valid_rows != ChunkSize) {
+      TFILLPAD(k_load, k_load);
+    }
+  }
+
+  {
+    TileLeft<ComputeT, ChunkSize, HiddenSize,
+             ChunkSize, HiddenSize> l0a;
+    TileRight<ComputeT, HiddenSize, ChunkSize,
+              HiddenSize, ChunkSize> l0b;
+    TASSIGN(l0a, 0x0);
+    TASSIGN(l0b, 0x0);
+    auto event = EVENT_ID1;
+    set_flag(PIPE_MTE2, PIPE_MTE1, event);
+    wait_flag(PIPE_MTE2, PIPE_MTE1, event);
+    set_flag(PIPE_M, PIPE_MTE1, event);
+    wait_flag(PIPE_M, PIPE_MTE1, event);
+    TEXTRACT(l0a, q_l1, 0, 0);
+    L1MatZN<ComputeT, HiddenSize, ChunkSize> k_zn;
+    TRESHAPE(k_zn, k_l1);
+    TEXTRACT(l0b, k_zn, 0, 0);
+    set_flag(PIPE_MTE1, PIPE_M, event);
+    wait_flag(PIPE_MTE1, PIPE_M, event);
+    TMATMUL(qk_l0, l0a, l0b);
+    set_flag(PIPE_MTE1, PIPE_MTE2, event);
+    wait_flag(PIPE_MTE1, PIPE_MTE2, event);
+    set_flag(PIPE_M, PIPE_FIX, event);
+    wait_flag(PIPE_M, PIPE_FIX, event);
+  }
+
+  {
+    TileAcc<float, ChunkSize, ChunkSize,
+            DYNAMIC, DYNAMIC> qk_store(ChunkSize, ChunkSize);
+    TASSIGN(qk_store, 0);
+    Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+    shape.shape[3] = ChunkSize;
+    shape.shape[4] = ChunkSize;
+    GlobalTensor<ComputeT, decltype(shape),
+                 Stride<1, 1, 1, ChunkSize, 1>>
+        qk_global(
+            qk_mailbox +
+                core_id * static_cast<int64_t>(ChunkSize) *
+                    ChunkSize,
+            shape);
+    TSTORE(qk_global, qk_store);
+  }
+  if (strong_publish != 0) {
+    pipe_barrier(PIPE_ALL);
+  }
+  if (qk_ready_flag >= 0) {
+    ffts_cross_core_sync(
+        PIPE_FIX, 1 | (2 << 4) | (qk_ready_flag << 8));
+  }
+#endif
+}
+
+template <int32_t HiddenSize, int32_t ChunkSize>
+AICORE inline void PublishQKVTile(
+    __gm__ ComputeT *v_handle,
+    __gm__ ComputeT *qk_gated_mailbox,
+    __gm__ ComputeT *qkv_mailbox, int64_t core_id,
+    int64_t v_offset, int32_t v_stride, int32_t valid_rows,
+    int32_t qk_gated_ready_flag, int32_t qkv_ready_flag,
+    int32_t qk_gated_bottom_ready_flag = -1,
+    int32_t qkv_bottom_ready_flag = -1,
+    uint32_t wait_before_v_load = 0u,
+    int32_t qk_gated_bottom_tail_ready_flag = -1,
+    int32_t qkv_bottom_tail_ready_flag = -1)
+{
+#if defined(__DAV_C220_CUBE__)
+  constexpr int32_t HalfChunk = ChunkSize / 2;
+  constexpr int32_t QuarterChunk = HalfChunk / 2;
+  const bool split_rows =
+      qk_gated_bottom_ready_flag >= 0 &&
+      qkv_bottom_ready_flag >= 0;
+  const bool split_bottom_quarters =
+      split_rows && qk_gated_bottom_tail_ready_flag >= 0 &&
+      qkv_bottom_tail_ready_flag >= 0;
+  L1Mat<ComputeT, HalfChunk, ChunkSize> qk_gated_l1;
+  TASSIGN(qk_gated_l1, 98304);
+  L1Mat<ComputeT, ChunkSize, HiddenSize> v_l1;
+  TASSIGN(v_l1, 131072);
+  TileAcc<float, HalfChunk, HiddenSize,
+          HalfChunk, HiddenSize> qkv_l0;
+  TASSIGN(qkv_l0, 0);
+  TileRight<ComputeT, ChunkSize, HiddenSize,
+            ChunkSize, HiddenSize> l0b;
+  TASSIGN(l0b, 0x0);
+
+  if (wait_before_v_load != 0) {
+#if defined(PTO_NPU_ARCH_A5)
+    gdn_sync::Wait<PIPE_MTE2>(qk_gated_ready_flag);
+#else
+    wait_flag_dev(qk_gated_ready_flag);
+#endif
+  }
+
+  // V is independent of QK gating. Start its GM->L1 transfer before the
+  // cross-core wait so MTE2 can run while Vec produces QK_gated.
+  {
+    L1Mat<ComputeT, ChunkSize, HiddenSize,
+          DYNAMIC, DYNAMIC> v_load(valid_rows, HiddenSize);
+    TASSIGN(v_load, 131072);
+    GmShape2D shape(valid_rows, HiddenSize);
+    GmStride2D stride(v_stride);
+    GmTensor2D<ComputeT> v_global(v_handle + v_offset, shape,
+                                 stride);
+    TLOAD(v_load, v_global);
+    if (valid_rows != ChunkSize) {
+      TFILLPAD(v_load, v_load);
+    }
+  }
+
+  if (wait_before_v_load == 0) {
+#if defined(PTO_NPU_ARCH_A5)
+    gdn_sync::Wait<PIPE_MTE2>(qk_gated_ready_flag);
+#else
+    wait_flag_dev(qk_gated_ready_flag);
+#endif
+  }
+
+  for (int32_t half_idx = 0; half_idx < 2; ++half_idx) {
+    if (half_idx != 0 && split_bottom_quarters) {
+      for (int32_t quarter_idx = 0; quarter_idx < 2; ++quarter_idx) {
+        const int32_t gated_ready_flag =
+            quarter_idx == 0
+                ? qk_gated_bottom_ready_flag
+                : qk_gated_bottom_tail_ready_flag;
+#if defined(PTO_NPU_ARCH_A5)
+        gdn_sync::Wait<PIPE_MTE2>(gated_ready_flag);
+#else
+        wait_flag_dev(gated_ready_flag);
+#endif
+
+        const int32_t row_start =
+            HalfChunk + quarter_idx * QuarterChunk;
+        int32_t quarter_valid_rows = valid_rows - row_start;
+        if (quarter_valid_rows < 0) {
+          quarter_valid_rows = 0;
+        }
+        if (quarter_valid_rows > QuarterChunk) {
+          quarter_valid_rows = QuarterChunk;
+        }
+
+        L1Mat<ComputeT, QuarterChunk, ChunkSize> qk_quarter_l1;
+        TASSIGN(qk_quarter_l1, 98304);
+        if (quarter_valid_rows > 0) {
+          L1Mat<ComputeT, QuarterChunk, ChunkSize,
+                DYNAMIC, DYNAMIC>
+              gated_load(quarter_valid_rows, ChunkSize);
+          TASSIGN(gated_load, 98304);
+          Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+          shape.shape[3] = quarter_valid_rows;
+          shape.shape[4] = ChunkSize;
+          GlobalTensor<ComputeT, decltype(shape),
+                       Stride<1, 1, 1, ChunkSize, 1>>
+              gated_global(
+                  qk_gated_mailbox +
+                      core_id * static_cast<int64_t>(ChunkSize) *
+                          ChunkSize +
+                      static_cast<int64_t>(row_start) * ChunkSize,
+                  shape);
+          TLOAD(gated_load, gated_global);
+          if (quarter_valid_rows != QuarterChunk) {
+            TFILLPAD(gated_load, gated_load);
+          }
+        }
+
+        set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
+        wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
+
+        TileLeft<ComputeT, QuarterChunk, ChunkSize,
+                 QuarterChunk, ChunkSize>
+            l0a;
+        TASSIGN(l0a, 0x0);
+        TileAcc<float, QuarterChunk, HiddenSize,
+                QuarterChunk, HiddenSize>
+            qkv_quarter_l0;
+        TASSIGN(qkv_quarter_l0, 0);
+        auto event = EVENT_ID1;
+        set_flag(PIPE_MTE2, PIPE_MTE1, event);
+        wait_flag(PIPE_MTE2, PIPE_MTE1, event);
+        set_flag(PIPE_M, PIPE_MTE1, event);
+        wait_flag(PIPE_M, PIPE_MTE1, event);
+        TEXTRACT(l0a, qk_quarter_l1, 0, 0);
+        set_flag(PIPE_MTE1, PIPE_M, event);
+        wait_flag(PIPE_MTE1, PIPE_M, event);
+        TMATMUL(qkv_quarter_l0, l0a, l0b);
+        set_flag(PIPE_MTE1, PIPE_MTE2, event);
+        wait_flag(PIPE_MTE1, PIPE_MTE2, event);
+        set_flag(PIPE_M, PIPE_FIX, event);
+        wait_flag(PIPE_M, PIPE_FIX, event);
+
+        if (quarter_valid_rows > 0) {
+          TileAcc<float, QuarterChunk, HiddenSize,
+                  DYNAMIC, DYNAMIC>
+              qkv_store(quarter_valid_rows, HiddenSize);
+          TASSIGN(qkv_store, 0);
+          Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+          shape.shape[3] = quarter_valid_rows;
+          shape.shape[4] = HiddenSize;
+          GlobalTensor<ComputeT, decltype(shape),
+                       Stride<1, 1, 1, HiddenSize, 1>>
+              qkv_global(
+                  qkv_mailbox +
+                      core_id * static_cast<int64_t>(ChunkSize) *
+                          HiddenSize +
+                      static_cast<int64_t>(row_start) * HiddenSize,
+                  shape);
+          TSTORE(qkv_global, qkv_store);
+        }
+
+        const int32_t ready_flag =
+            quarter_idx == 0
+                ? qkv_bottom_ready_flag
+                : qkv_bottom_tail_ready_flag;
+        ffts_cross_core_sync(
+            PIPE_FIX,
+            1 | (2 << 4) | (ready_flag << 8));
+      }
+      continue;
+    }
+    if (half_idx != 0 && split_rows) {
+#if defined(PTO_NPU_ARCH_A5)
+      gdn_sync::Wait<PIPE_MTE2>(qk_gated_bottom_ready_flag);
+#else
+      wait_flag_dev(qk_gated_bottom_ready_flag);
+#endif
+    }
+    const int32_t row_start = half_idx * HalfChunk;
+    int32_t half_valid_rows = valid_rows - row_start;
+    if (half_valid_rows < 0) {
+      half_valid_rows = 0;
+    }
+    if (half_valid_rows > HalfChunk) {
+      half_valid_rows = HalfChunk;
+    }
+
+    if (half_valid_rows > 0) {
+      L1Mat<ComputeT, HalfChunk, ChunkSize,
+            DYNAMIC, DYNAMIC> gated_load(
+                half_valid_rows, ChunkSize);
+      TASSIGN(gated_load, 98304);
+      Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+      shape.shape[3] = half_valid_rows;
+      shape.shape[4] = ChunkSize;
+      GlobalTensor<ComputeT, decltype(shape),
+                   Stride<1, 1, 1, ChunkSize, 1>>
+          gated_global(
+              qk_gated_mailbox +
+                  core_id * static_cast<int64_t>(ChunkSize) *
+                      ChunkSize +
+                  static_cast<int64_t>(row_start) * ChunkSize,
+              shape);
+      TLOAD(gated_load, gated_global);
+      if (half_valid_rows != HalfChunk) {
+        TFILLPAD(gated_load, gated_load);
+      }
+    }
+
+    set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
+    wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
+
+    TileLeft<ComputeT, HalfChunk, ChunkSize,
+             HalfChunk, ChunkSize> l0a;
+    TASSIGN(l0a, 0x0);
+    auto event = EVENT_ID1;
+    set_flag(PIPE_MTE2, PIPE_MTE1, event);
+    wait_flag(PIPE_MTE2, PIPE_MTE1, event);
+    set_flag(PIPE_M, PIPE_MTE1, event);
+    wait_flag(PIPE_M, PIPE_MTE1, event);
+    TEXTRACT(l0a, qk_gated_l1, 0, 0);
+    if (half_idx == 0) {
+      TEXTRACT(l0b, v_l1, 0, 0);
+    }
+    set_flag(PIPE_MTE1, PIPE_M, event);
+    wait_flag(PIPE_MTE1, PIPE_M, event);
+    TMATMUL(qkv_l0, l0a, l0b);
+    set_flag(PIPE_MTE1, PIPE_MTE2, event);
+    wait_flag(PIPE_MTE1, PIPE_MTE2, event);
+    set_flag(PIPE_M, PIPE_FIX, event);
+    wait_flag(PIPE_M, PIPE_FIX, event);
+
+    if (half_valid_rows > 0) {
+      TileAcc<float, HalfChunk, HiddenSize,
+              DYNAMIC, DYNAMIC> qkv_store(
+                  half_valid_rows, HiddenSize);
+      TASSIGN(qkv_store, 0);
+      Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+      shape.shape[3] = half_valid_rows;
+      shape.shape[4] = HiddenSize;
+      GlobalTensor<ComputeT, decltype(shape),
+                   Stride<1, 1, 1, HiddenSize, 1>>
+          qkv_global(
+              qkv_mailbox +
+                  core_id * static_cast<int64_t>(ChunkSize) *
+                      HiddenSize +
+                  static_cast<int64_t>(row_start) * HiddenSize,
+              shape);
+      TSTORE(qkv_global, qkv_store);
+    }
+
+    if (split_rows || half_idx == 1) {
+      const int32_t ready_flag =
+          half_idx == 0 ? qkv_ready_flag
+                        : (split_rows ? qkv_bottom_ready_flag
+                                      : qkv_ready_flag);
+      ffts_cross_core_sync(
+          PIPE_FIX, 1 | (2 << 4) | (ready_flag << 8));
+    }
+  }
+#endif
+}
+
+template <int32_t HiddenSize, int32_t ChunkSize>
+AICORE inline void PublishGatedQKTile(
+    __gm__ float *g_handle,
+    __gm__ ComputeT *qk_mailbox,
+    __gm__ ComputeT *qk_gated_mailbox,
+    int64_t core_id, int64_t total_tokens,
+    int64_t chunk_token_start, int32_t head_idx,
+    int32_t valid_rows, int32_t local_rows, int32_t vec_id,
+    int32_t row_gate_addr, uint32_t wait_for_qk_ready,
+    uint32_t release_qk_mailbox, int32_t qk_ready_flag,
+    int32_t qk_mailbox_free_flag, int32_t qk_gated_ready_flag,
+    int32_t qk_gated_bottom_ready_flag = -1,
+    int32_t qk_gated_bottom_tail_ready_flag = -1)
+{
+#if defined(__DAV_C220_VEC__)
+  constexpr int32_t HalfChunk = ChunkSize / 2;
+  constexpr int32_t QuarterChunk = HalfChunk / 2;
+  constexpr int32_t PrefetchRows = HalfChunk / 4;
+  constexpr int32_t RemainingRows = HalfChunk - PrefetchRows;
+  constexpr int32_t GAllUbAddr = 115712;
+  constexpr int32_t MskUbAddr = 512;
+  constexpr int32_t QKUbAddr = 33280;
+  constexpr int32_t CoeffUbAddr = 66304;
+  constexpr int32_t QKHalfUbAddr = 99072;
+  constexpr int32_t QSUbAddr = 131840;
+  constexpr int32_t QKPrefetchUbAddr = 184320;
+  // Rejected QK prefetch experiments remain compiled out while O-stage
+  // scheduling is evaluated against the v73 behavior.
+  constexpr bool pipeline_qk = false;
+  const bool pipeline_bottom_quarters =
+      qk_gated_bottom_tail_ready_flag >= 0 && local_rows == HalfChunk &&
+      vec_id != 0;
+
+  if (local_rows > 0) {
+    {
+      Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+      shape.shape[3] = 1;
+      shape.shape[4] = valid_rows;
+      GlobalTensor<float, decltype(shape),
+                   Stride<1, 1, 1, 1, 1>>
+          g_global(
+              g_handle +
+                  static_cast<int64_t>(head_idx) * total_tokens +
+                  chunk_token_start,
+              shape);
+      UbND<float, 1, ChunkSize, DYNAMIC, DYNAMIC,
+           PadValue::Zero>
+          g_load(1, valid_rows);
+      TASSIGN(g_load, GAllUbAddr);
+      TLOAD(g_load, g_global);
+      if (valid_rows != ChunkSize) {
+        UbND<float, 1, ChunkSize, 1, ChunkSize,
+             PadValue::Zero>
+            g_padded;
+        TASSIGN(g_padded, GAllUbAddr);
+        TFILLPAD_INPLACE(g_padded, g_load);
+      }
+    }
+    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+    if (pipeline_qk) {
+      Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+      shape.shape[3] = PrefetchRows;
+      shape.shape[4] = ChunkSize;
+      GlobalTensor<ComputeT, decltype(shape),
+                   Stride<1, 1, 1, ChunkSize, 1>>
+          qk_global(
+              qk_mailbox +
+                  core_id * static_cast<int64_t>(ChunkSize) *
+                      ChunkSize +
+                  static_cast<int64_t>(vec_id) * HalfChunk *
+                      ChunkSize,
+              shape);
+      UbND<ComputeT, PrefetchRows, ChunkSize,
+           PrefetchRows, ChunkSize, PadValue::Zero>
+          qk_prefetch;
+      TASSIGN(qk_prefetch, QKPrefetchUbAddr);
+      TLOAD(qk_prefetch, qk_global);
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
+    }
+
+    UbND<float, 1, ChunkSize> g_all;
+    TASSIGN(g_all, GAllUbAddr);
+    UbND<float, 1, HalfChunk> g_rows;
+    TASSIGN(g_rows, row_gate_addr);
+    UbND<float, 1, HalfChunk> g_rows_source;
+    TASSIGN(
+        g_rows_source,
+        GAllUbAddr +
+            vec_id * HalfChunk * static_cast<int32_t>(sizeof(float)));
+    TMOV(g_rows, g_rows_source);
+
+    if (pipeline_bottom_quarters) {
+      UbND<float, QuarterChunk, ChunkSize> row_gates;
+      TASSIGN(row_gates, QKUbAddr);
+      UbDN<float, QuarterChunk, 1> row_gates_col;
+      TASSIGN(row_gates_col, row_gate_addr);
+      UbND<float, QuarterChunk, ChunkSize> coefficients;
+      TASSIGN(coefficients, CoeffUbAddr);
+      UbND<float, QuarterChunk, ChunkSize> causal_mask;
+      TASSIGN(causal_mask, MskUbAddr);
+      TROWEXPAND(row_gates, row_gates_col);
+      TCOLEXPAND(coefficients, g_all);
+      TSUB(coefficients, row_gates, coefficients);
+      pipe_barrier(PIPE_V);
+      TMINS(coefficients, coefficients, 0.0f);
+      pipe_barrier(PIPE_V);
+      TEXP(coefficients, coefficients);
+      pipe_barrier(PIPE_V);
+      TMUL(coefficients, coefficients, causal_mask);
+      pipe_barrier(PIPE_V);
+    } else {
+      UbND<float, HalfChunk, ChunkSize> row_gates;
+      TASSIGN(row_gates, QKUbAddr);
+      UbDN<float, HalfChunk, 1> row_gates_col;
+      TASSIGN(row_gates_col, row_gate_addr);
+      UbND<float, HalfChunk, ChunkSize> coefficients;
+      TASSIGN(coefficients, CoeffUbAddr);
+      UbND<float, HalfChunk, ChunkSize> causal_mask;
+      TASSIGN(causal_mask, MskUbAddr);
+      TROWEXPAND(row_gates, row_gates_col);
+      TCOLEXPAND(coefficients, g_all);
+      TSUB(coefficients, row_gates, coefficients);
+      pipe_barrier(PIPE_V);
+      TMINS(coefficients, coefficients, 0.0f);
+      pipe_barrier(PIPE_V);
+      TEXP(coefficients, coefficients);
+      pipe_barrier(PIPE_V);
+      TMUL(coefficients, coefficients, causal_mask);
+      pipe_barrier(PIPE_V);
+    }
+    TEXP(g_rows, g_rows);
+  }
+
+  if (wait_for_qk_ready != 0) {
+    wait_flag_dev(qk_ready_flag);
+  }
+  const bool split_rows = qk_gated_bottom_ready_flag >= 0;
+  if (split_rows) {
+    const int32_t peer_ready_flag =
+        vec_id == 0 ? qk_gated_bottom_ready_flag
+                    : qk_gated_ready_flag;
+    ffts_cross_core_sync(
+        PIPE_MTE3,
+        1 | (2 << 4) | (peer_ready_flag << 8));
+    if (qk_gated_bottom_tail_ready_flag >= 0 && vec_id == 0) {
+      ffts_cross_core_sync(
+          PIPE_MTE3,
+          1 | (2 << 4) |
+              (qk_gated_bottom_tail_ready_flag << 8));
+    }
+  }
+  if (local_rows > 0) {
+    if (pipeline_bottom_quarters) {
+      UbND<ComputeT, QuarterChunk, ChunkSize,
+           QuarterChunk, ChunkSize, PadValue::Zero>
+          qk_first_bf16;
+      TASSIGN(qk_first_bf16, QKHalfUbAddr);
+      {
+        Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+        shape.shape[3] = QuarterChunk;
+        shape.shape[4] = ChunkSize;
+        GlobalTensor<ComputeT, decltype(shape),
+                     Stride<1, 1, 1, ChunkSize, 1>>
+            qk_global(
+                qk_mailbox +
+                    core_id * static_cast<int64_t>(ChunkSize) *
+                        ChunkSize +
+                    static_cast<int64_t>(vec_id) * HalfChunk *
+                        ChunkSize,
+                shape);
+        TLOAD(qk_first_bf16, qk_global);
+      }
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+      UbND<float, QuarterChunk, ChunkSize> qk_fp32;
+      TASSIGN(qk_fp32, QKUbAddr);
+      UbND<float, QuarterChunk, ChunkSize> coefficients;
+      TASSIGN(coefficients, CoeffUbAddr);
+      TCVT(qk_fp32, qk_first_bf16, pto::RoundMode::CAST_NONE);
+      pipe_barrier(PIPE_V);
+      TMUL(qk_fp32, qk_fp32, coefficients);
+      pipe_barrier(PIPE_V);
+      TCVT(qk_first_bf16, qk_fp32, pto::RoundMode::CAST_NONE);
+
+      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      {
+        Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+        shape.shape[3] = QuarterChunk;
+        shape.shape[4] = ChunkSize;
+        GlobalTensor<ComputeT, decltype(shape),
+                     Stride<1, 1, 1, ChunkSize, 1>>
+            gated_global(
+                qk_gated_mailbox +
+                    core_id * static_cast<int64_t>(ChunkSize) *
+                        ChunkSize +
+                    static_cast<int64_t>(vec_id) * HalfChunk *
+                        ChunkSize,
+                shape);
+        TSTORE(gated_global, qk_first_bf16);
+      }
+
+      UbND<ComputeT, QuarterChunk, ChunkSize,
+           QuarterChunk, ChunkSize, PadValue::Zero>
+          qk_second_bf16;
+      TASSIGN(
+          qk_second_bf16,
+          QKHalfUbAddr +
+              QuarterChunk * ChunkSize *
+                  static_cast<int32_t>(sizeof(ComputeT)));
+      {
+        Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+        shape.shape[3] = QuarterChunk;
+        shape.shape[4] = ChunkSize;
+        GlobalTensor<ComputeT, decltype(shape),
+                     Stride<1, 1, 1, ChunkSize, 1>>
+            qk_global(
+                qk_mailbox +
+                    core_id * static_cast<int64_t>(ChunkSize) *
+                        ChunkSize +
+                    (static_cast<int64_t>(vec_id) * HalfChunk +
+                     QuarterChunk) *
+                        ChunkSize,
+                shape);
+        TLOAD(qk_second_bf16, qk_global);
+      }
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      ffts_cross_core_sync(
+          PIPE_MTE3,
+          1 | (2 << 4) |
+              (qk_gated_bottom_ready_flag << 8));
+
+      UbND<float, 1, ChunkSize> g_all;
+      TASSIGN(g_all, GAllUbAddr);
+      UbND<float, QuarterChunk, ChunkSize> row_gates;
+      TASSIGN(row_gates, QKUbAddr);
+      UbDN<float, QuarterChunk, 1> row_gates_col;
+      TASSIGN(
+          row_gates_col,
+          GAllUbAddr +
+              (vec_id * HalfChunk + QuarterChunk) *
+                  static_cast<int32_t>(sizeof(float)));
+      UbND<float, QuarterChunk, ChunkSize> second_coefficients;
+      TASSIGN(second_coefficients, CoeffUbAddr);
+      UbND<float, QuarterChunk, ChunkSize> causal_mask;
+      TASSIGN(
+          causal_mask,
+          MskUbAddr +
+              QuarterChunk * ChunkSize *
+                  static_cast<int32_t>(sizeof(float)));
+      TROWEXPAND(row_gates, row_gates_col);
+      TCOLEXPAND(second_coefficients, g_all);
+      TSUB(second_coefficients, row_gates, second_coefficients);
+      pipe_barrier(PIPE_V);
+      TMINS(second_coefficients, second_coefficients, 0.0f);
+      pipe_barrier(PIPE_V);
+      TEXP(second_coefficients, second_coefficients);
+      pipe_barrier(PIPE_V);
+      TMUL(second_coefficients, second_coefficients, causal_mask);
+      pipe_barrier(PIPE_V);
+      UbND<float, 1, HalfChunk> g_rows;
+      TASSIGN(g_rows, row_gate_addr);
+
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      if (release_qk_mailbox != 0) {
+        ffts_cross_core_sync(
+            PIPE_MTE2,
+            1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+      }
+      TCVT(qk_fp32, qk_second_bf16, pto::RoundMode::CAST_NONE);
+      pipe_barrier(PIPE_V);
+      TMUL(qk_fp32, qk_fp32, second_coefficients);
+      pipe_barrier(PIPE_V);
+      TCVT(qk_second_bf16, qk_fp32, pto::RoundMode::CAST_NONE);
+
+      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      {
+        Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+        shape.shape[3] = QuarterChunk;
+        shape.shape[4] = ChunkSize;
+        GlobalTensor<ComputeT, decltype(shape),
+                     Stride<1, 1, 1, ChunkSize, 1>>
+            gated_global(
+                qk_gated_mailbox +
+                    core_id * static_cast<int64_t>(ChunkSize) *
+                        ChunkSize +
+                    (static_cast<int64_t>(vec_id) * HalfChunk +
+                     QuarterChunk) *
+                        ChunkSize,
+                shape);
+        TSTORE(gated_global, qk_second_bf16);
+      }
+      ffts_cross_core_sync(
+          PIPE_MTE3,
+          1 | (2 << 4) |
+              (qk_gated_bottom_tail_ready_flag << 8));
+    } else if (pipeline_qk) {
+      UbND<ComputeT, PrefetchRows, ChunkSize,
+           PrefetchRows, ChunkSize, PadValue::Zero>
+          qk_prefetch;
+      TASSIGN(qk_prefetch, QKPrefetchUbAddr);
+      UbND<ComputeT, RemainingRows, ChunkSize,
+           RemainingRows, ChunkSize, PadValue::Zero>
+          qk_second;
+      TASSIGN(
+          qk_second,
+          QKHalfUbAddr +
+              PrefetchRows * ChunkSize *
+                  static_cast<int32_t>(sizeof(ComputeT)));
+      UbND<ComputeT, PrefetchRows, ChunkSize,
+           PrefetchRows, ChunkSize, PadValue::Zero>
+          qk_first;
+      TASSIGN(qk_first, QKHalfUbAddr);
+      UbND<ComputeT, HalfChunk, ChunkSize,
+           HalfChunk, ChunkSize, PadValue::Zero>
+          qk_bf16;
+      TASSIGN(qk_bf16, QKHalfUbAddr);
+
+      Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+      shape.shape[3] = RemainingRows;
+      shape.shape[4] = ChunkSize;
+      GlobalTensor<ComputeT, decltype(shape),
+                   Stride<1, 1, 1, ChunkSize, 1>>
+          qk_global(
+              qk_mailbox +
+                  core_id * static_cast<int64_t>(ChunkSize) *
+                      ChunkSize +
+                  (static_cast<int64_t>(vec_id) * HalfChunk +
+                   PrefetchRows) *
+                      ChunkSize,
+              shape);
+      TLOAD(qk_second, qk_global);
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
+
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
+      TMOV(qk_first, qk_prefetch);
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
+      if (release_qk_mailbox != 0) {
+        ffts_cross_core_sync(
+            PIPE_MTE2,
+            1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+      }
+
+      UbND<float, HalfChunk, ChunkSize> qk_fp32;
+      TASSIGN(qk_fp32, QKUbAddr);
+      UbND<float, HalfChunk, ChunkSize> coefficients;
+      TASSIGN(coefficients, CoeffUbAddr);
+      TCVT(qk_fp32, qk_bf16, pto::RoundMode::CAST_NONE);
+      pipe_barrier(PIPE_V);
+      TMUL(qk_fp32, qk_fp32, coefficients);
+      pipe_barrier(PIPE_V);
+      TCVT(qk_bf16, qk_fp32, pto::RoundMode::CAST_NONE);
+
+      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      {
+        Shape<1, 1, 1, DYNAMIC, DYNAMIC> store_shape;
+        store_shape.shape[3] = local_rows;
+        store_shape.shape[4] = ChunkSize;
+        GlobalTensor<ComputeT, decltype(store_shape),
+                     Stride<1, 1, 1, ChunkSize, 1>>
+            gated_global(
+                qk_gated_mailbox +
+                    core_id * static_cast<int64_t>(ChunkSize) *
+                        ChunkSize +
+                    static_cast<int64_t>(vec_id) * HalfChunk *
+                        ChunkSize,
+                store_shape);
+        TSTORE(gated_global, qk_bf16);
+      }
+    } else {
+      UbND<ComputeT, HalfChunk, ChunkSize,
+           HalfChunk, ChunkSize, PadValue::Zero>
+          qk_bf16;
+      TASSIGN(qk_bf16, QKHalfUbAddr);
+      {
+        Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+        shape.shape[3] = local_rows;
+        shape.shape[4] = ChunkSize;
+        GlobalTensor<ComputeT, decltype(shape),
+                     Stride<1, 1, 1, ChunkSize, 1>>
+            qk_global(
+                qk_mailbox +
+                    core_id * static_cast<int64_t>(ChunkSize) *
+                        ChunkSize +
+                    static_cast<int64_t>(vec_id) * HalfChunk *
+                        ChunkSize,
+                shape);
+        UbND<ComputeT, HalfChunk, ChunkSize,
+             DYNAMIC, DYNAMIC, PadValue::Zero>
+            qk_load(local_rows, ChunkSize);
+        TASSIGN(qk_load, QKHalfUbAddr);
+        TLOAD(qk_load, qk_global);
+        if (local_rows != HalfChunk) {
+          TFILLPAD_INPLACE(qk_bf16, qk_load);
+        }
+      }
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      if (release_qk_mailbox != 0) {
+        ffts_cross_core_sync(
+            PIPE_MTE2,
+            1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+      }
+
+      UbND<float, HalfChunk, ChunkSize> qk_fp32;
+      TASSIGN(qk_fp32, QKUbAddr);
+      UbND<float, HalfChunk, ChunkSize> coefficients;
+      TASSIGN(coefficients, CoeffUbAddr);
+      TCVT(qk_fp32, qk_bf16, pto::RoundMode::CAST_NONE);
+      pipe_barrier(PIPE_V);
+      TMUL(qk_fp32, qk_fp32, coefficients);
+      pipe_barrier(PIPE_V);
+      TCVT(qk_bf16, qk_fp32, pto::RoundMode::CAST_NONE);
+
+      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      {
+        Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+        shape.shape[3] = local_rows;
+        shape.shape[4] = ChunkSize;
+        GlobalTensor<ComputeT, decltype(shape),
+                     Stride<1, 1, 1, ChunkSize, 1>>
+            gated_global(
+                qk_gated_mailbox +
+                    core_id * static_cast<int64_t>(ChunkSize) *
+                        ChunkSize +
+                    static_cast<int64_t>(vec_id) * HalfChunk *
+                        ChunkSize,
+                shape);
+        UbND<ComputeT, HalfChunk, ChunkSize,
+             DYNAMIC, DYNAMIC>
+            gated_store(local_rows, ChunkSize);
+        TASSIGN(gated_store, QKHalfUbAddr);
+        TSTORE(gated_global, gated_store);
+      }
+    }
+  } else if (release_qk_mailbox != 0) {
+    ffts_cross_core_sync(
+        PIPE_MTE2,
+        1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+  }
+  if (!pipeline_bottom_quarters) {
+    const int32_t own_ready_flag =
+        split_rows && vec_id != 0
+            ? qk_gated_bottom_ready_flag
+            : qk_gated_ready_flag;
+    ffts_cross_core_sync(
+        PIPE_MTE3,
+        1 | (2 << 4) | (own_ready_flag << 8));
+  }
+#endif
+}
+
+template <int32_t HiddenSize, int32_t ChunkSize,
+          bool FuseGatedRmsNorm>
+AICORE inline void ConsumeQKVTile(
+    __gm__ ComputeT *precomputed_qs_handle,
+    __gm__ ComputeT *qkv_mailbox,
+    __gm__ GDN_PUBLIC_DTYPE *output_handle,
+    __gm__ GDN_PUBLIC_DTYPE *z_handle,
+    int64_t core_id, int64_t chunk_idx,
+    int64_t chunk_token_start, int32_t head_idx,
+    int32_t num_heads, int32_t valid_rows,
+    int32_t local_rows, int32_t vec_id,
+    int32_t row_gate_addr, int32_t qkv_ready_flag,
+    int32_t qkv_mailbox_free_flag,
+    int32_t qkv_bottom_ready_flag = -1,
+    int32_t qkv_bottom_tail_ready_flag = -1)
+{
+#if defined(__DAV_C220_VEC__)
+  constexpr int32_t HalfChunk = ChunkSize / 2;
+  constexpr int32_t QuarterChunk = HalfChunk / 2;
+  constexpr int32_t QKUbAddr = 33280;
+  constexpr int32_t CoeffUbAddr = 66304;
+  constexpr int32_t QSHalfUbAddr = 115456;
+  constexpr int32_t QSUbAddr = 131840;
+  constexpr int32_t OHalfUbAddr = 164608;
+  constexpr int32_t OUbAddr = QKUbAddr;
+  const int32_t output_stride = num_heads * HiddenSize;
+  const bool split_rows = qkv_bottom_ready_flag >= 0;
+  const bool split_bottom_quarters =
+      split_rows && qkv_bottom_tail_ready_flag >= 0 &&
+      local_rows == HalfChunk && vec_id != 0;
+
+  if (local_rows > 0) {
+    UbND<float, 1, HalfChunk> g_rows;
+    TASSIGN(g_rows, row_gate_addr);
+
+    UbND<ComputeT, HalfChunk, HiddenSize,
+         HalfChunk, HiddenSize, PadValue::Zero>
+        qs_bf16;
+    TASSIGN(qs_bf16, QSHalfUbAddr);
+    {
+      Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+      shape.shape[3] = local_rows;
+      shape.shape[4] = HiddenSize;
+      __gm__ ComputeT *qs_source =
+          precomputed_qs_handle +
+          (chunk_idx * num_heads + head_idx) *
+              static_cast<int64_t>(HiddenSize) * HiddenSize;
+      GlobalTensor<ComputeT, decltype(shape),
+                   Stride<1, 1, 1, HiddenSize, 1>>
+          qs_global(
+              qs_source +
+                  static_cast<int64_t>(vec_id) * HalfChunk *
+                      HiddenSize,
+              shape);
+      UbND<ComputeT, HalfChunk, HiddenSize,
+           DYNAMIC, DYNAMIC, PadValue::Zero>
+          qs_load(local_rows, HiddenSize);
+      TASSIGN(qs_load, QSHalfUbAddr);
+      TLOAD(qs_load, qs_global);
+      if (local_rows != HalfChunk) {
+        TFILLPAD_INPLACE(qs_bf16, qs_load);
+      }
+    }
+    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+    UbND<float, HalfChunk, HiddenSize> qs_fp32;
+    TASSIGN(qs_fp32, QSUbAddr);
+    TCVT(qs_fp32, qs_bf16, pto::RoundMode::CAST_NONE);
+    UbND<float, HalfChunk, HiddenSize> expanded_gates;
+    TASSIGN(expanded_gates, CoeffUbAddr);
+    UbDN<float, HalfChunk, 1> row_gates_col;
+    TASSIGN(row_gates_col, row_gate_addr);
+    TROWEXPAND(expanded_gates, row_gates_col);
+    pipe_barrier(PIPE_V);
+    TMUL(qs_fp32, qs_fp32, expanded_gates);
+
+    wait_flag_dev(qkv_ready_flag);
+    if (split_rows && vec_id != 0) {
+      wait_flag_dev(qkv_bottom_ready_flag);
+    }
+
+    UbND<ComputeT, HalfChunk, HiddenSize,
+         HalfChunk, HiddenSize, PadValue::Zero>
+        qkv_bf16;
+    TASSIGN(qkv_bf16, OHalfUbAddr);
+    if (split_bottom_quarters) {
+      {
+        Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+        shape.shape[3] = QuarterChunk;
+        shape.shape[4] = HiddenSize;
+        GlobalTensor<ComputeT, decltype(shape),
+                     Stride<1, 1, 1, HiddenSize, 1>>
+            qkv_global(
+                qkv_mailbox +
+                    core_id * static_cast<int64_t>(ChunkSize) *
+                        HiddenSize +
+                    static_cast<int64_t>(vec_id) * HalfChunk *
+                        HiddenSize,
+                shape);
+        UbND<ComputeT, QuarterChunk, HiddenSize,
+             QuarterChunk, HiddenSize, PadValue::Zero>
+            qkv_load;
+        TASSIGN(qkv_load, OHalfUbAddr);
+        TLOAD(qkv_load, qkv_global);
+      }
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+      wait_flag_dev(qkv_bottom_tail_ready_flag);
+      {
+        Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+        shape.shape[3] = QuarterChunk;
+        shape.shape[4] = HiddenSize;
+        GlobalTensor<ComputeT, decltype(shape),
+                     Stride<1, 1, 1, HiddenSize, 1>>
+            qkv_global(
+                qkv_mailbox +
+                    core_id * static_cast<int64_t>(ChunkSize) *
+                        HiddenSize +
+                    (static_cast<int64_t>(vec_id) * HalfChunk +
+                     QuarterChunk) *
+                        HiddenSize,
+                shape);
+        UbND<ComputeT, QuarterChunk, HiddenSize,
+             QuarterChunk, HiddenSize, PadValue::Zero>
+            qkv_load;
+        TASSIGN(
+            qkv_load,
+            OHalfUbAddr +
+                QuarterChunk * HiddenSize *
+                    static_cast<int32_t>(sizeof(ComputeT)));
+        TLOAD(qkv_load, qkv_global);
+      }
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
+      if (qkv_mailbox_free_flag >= 0) {
+        ffts_cross_core_sync(
+            PIPE_MTE2,
+            1 | (2 << 4) | (qkv_mailbox_free_flag << 8));
+      }
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
+    } else {
+      {
+        Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
+        shape.shape[3] = local_rows;
+        shape.shape[4] = HiddenSize;
+        GlobalTensor<ComputeT, decltype(shape),
+                     Stride<1, 1, 1, HiddenSize, 1>>
+            qkv_global(
+                qkv_mailbox +
+                    core_id * static_cast<int64_t>(ChunkSize) *
+                        HiddenSize +
+                    static_cast<int64_t>(vec_id) * HalfChunk *
+                        HiddenSize,
+                shape);
+        UbND<ComputeT, HalfChunk, HiddenSize,
+             DYNAMIC, DYNAMIC, PadValue::Zero>
+            qkv_load(local_rows, HiddenSize);
+        TASSIGN(qkv_load, OHalfUbAddr);
+        TLOAD(qkv_load, qkv_global);
+        if (local_rows != HalfChunk) {
+          TFILLPAD_INPLACE(qkv_bf16, qkv_load);
+        }
+      }
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      if (qkv_mailbox_free_flag >= 0) {
+        ffts_cross_core_sync(
+            PIPE_MTE2,
+            1 | (2 << 4) | (qkv_mailbox_free_flag << 8));
+      }
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+    }
+
+    UbND<float, HalfChunk, HiddenSize> output_fp32;
+    TASSIGN(output_fp32, OUbAddr);
+    TCVT(output_fp32, qkv_bf16, pto::RoundMode::CAST_NONE);
+    TADD(output_fp32, qs_fp32, output_fp32);
+
+    const int64_t output_offset =
+        (chunk_token_start * static_cast<int64_t>(num_heads) +
+         head_idx) *
+            static_cast<int64_t>(HiddenSize) +
+        static_cast<int64_t>(vec_id) * HalfChunk *
+            output_stride;
+    StoreChunkOutput<HiddenSize, ChunkSize,
+                     FuseGatedRmsNorm>(
+        output_handle, z_handle, output_offset, output_stride,
+        local_rows);
+    if (split_rows && vec_id == 0) {
+      wait_flag_dev(qkv_bottom_ready_flag);
+      if (qkv_bottom_tail_ready_flag >= 0) {
+        wait_flag_dev(qkv_bottom_tail_ready_flag);
+      }
+    }
+  } else {
+    wait_flag_dev(qkv_ready_flag);
+    if (split_rows) {
+      wait_flag_dev(qkv_bottom_ready_flag);
+      if (qkv_bottom_tail_ready_flag >= 0) {
+        wait_flag_dev(qkv_bottom_tail_ready_flag);
+      }
+    }
+    if (qkv_mailbox_free_flag >= 0) {
+      ffts_cross_core_sync(
+          PIPE_MTE3,
+          1 | (2 << 4) | (qkv_mailbox_free_flag << 8));
+    }
+  }
+#endif
+}
+
+template <int32_t HiddenSize, int32_t ChunkSize,
+          bool FuseGatedRmsNorm = false>
 AICORE void GDN_CHUNK_O_KERNEL(
     __gm__ ComputeT *Q_handle, __gm__ ComputeT *K_handle, __gm__ ComputeT *V_handle,
     __gm__ ComputeT *S_handle, __gm__ float *G_handle,
@@ -153,13 +1560,21 @@ AICORE void GDN_CHUNK_O_KERNEL(
     __gm__ ComputeT *workspace_qk_handle,
     __gm__ ComputeT *workspace_qs_qkv_handle,
     __gm__ ComputeT *workspace_qk_gated_handle,
-    __gm__ ComputeT *O_handle,
+    __gm__ ComputeT *workspace_ping_qk_handle,
+    __gm__ ComputeT *workspace_ping_qs_qkv_handle,
+    __gm__ ComputeT *workspace_ping_qk_gated_handle,
+    uint32_t reuse_group_qk,
+    __gm__ GDN_PUBLIC_DTYPE *O_handle,
     __gm__ int32_t *cu_seqlens,
     int64_t batch_size, int64_t seq_len,
     int64_t total_tokens,
     uint32_t num_heads,
     uint32_t num_key_heads,
-    uint64_t ffts_addr)
+    uint32_t precompute_qs,
+    __gm__ int32_t *h_o_ready_handle,
+    uint64_t ffts_addr,
+    __gm__ GDN_PUBLIC_DTYPE *z_handle,
+    __gm__ GDN_PUBLIC_DTYPE *norm_weight_handle)
 {
   // Half the chunk — each Vec sub-block handles C/2 rows independently.
   constexpr int32_t HalfChunk = ChunkSize / 2;
@@ -181,6 +1596,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
   constexpr int32_t WsQKSize = ChunkSize * ChunkSize;
   constexpr int32_t WsQSSize = ChunkSize * HiddenSize;
   constexpr int32_t WsGatedSize = ChunkSize * ChunkSize;
+  constexpr int32_t SecondL0CAddr = ChunkSize * HiddenSize * sizeof(float);
 
   // ── UB memory map (byte addresses within Unified Buffer) ─────────────
   constexpr int32_t GUbAddr      = 0;
@@ -200,6 +1616,67 @@ AICORE void GDN_CHUNK_O_KERNEL(
   auto cid = get_block_idx();
   // block_num = total number of AI cores running this kernel in parallel.
   auto block_num = get_block_num();
+  int64_t h_o_chunk_count = 0;
+  if (cu_seqlens != nullptr) {
+    for (int64_t si = 0; si < batch_size; ++si) {
+      const int64_t bos = static_cast<int64_t>(cu_seqlens[si]);
+      const int64_t eos = static_cast<int64_t>(cu_seqlens[si + 1]);
+      h_o_chunk_count += (eos - bos + ChunkSize - 1) / ChunkSize;
+    }
+  } else {
+    h_o_chunk_count =
+        batch_size * ((seq_len + ChunkSize - 1) / ChunkSize);
+  }
+  const bool use_precomputed_qs =
+      precompute_qs != 0 && ChunkSize == HiddenSize && H >= 8 &&
+      batch_size >= 1 && cu_seqlens != nullptr &&
+      h_o_chunk_count >= 4 && h_o_chunk_count <= 64;
+  const bool decouple_qk_h_ready =
+      use_precomputed_qs &&
+      H > static_cast<int32_t>(block_num);
+  constexpr int64_t H_O_READY_STRIDE = 16;
+  AscendC::GlobalTensor<int32_t> h_o_ready_gm;
+  h_o_ready_gm.SetGlobalBuffer(h_o_ready_handle);
+
+  const int64_t h_o_heavy_core_count =
+      H % static_cast<int64_t>(block_num);
+  const int64_t h_o_light_core_count =
+      static_cast<int64_t>(block_num) - h_o_heavy_core_count;
+  const int64_t h_o_total_items = h_o_chunk_count * H;
+  const bool rebalance_h_o_consumers =
+      use_precomputed_qs && h_o_heavy_core_count > 0 &&
+      h_o_total_items >= static_cast<int64_t>(block_num);
+  const int64_t h_o_delta_o_items =
+      (13 * h_o_chunk_count + 8) / 17;
+  const int64_t h_o_shifted_items =
+      h_o_total_items - h_o_delta_o_items * h_o_light_core_count;
+  const int64_t h_o_heavy_quota_base =
+      h_o_shifted_items > static_cast<int64_t>(block_num)
+          ? h_o_shifted_items / static_cast<int64_t>(block_num)
+          : 1;
+  // Cores [0, H % block_num) own one extra H head. Once QK no longer waits
+  // for H-ready, their QKV wait becomes the tail; move one O item from each
+  // heavy core to the light-core pool.
+  const int64_t h_o_heavy_quota =
+      decouple_qk_h_ready && h_o_heavy_quota_base > 1
+          ? h_o_heavy_quota_base - 1
+          : h_o_heavy_quota_base;
+  const int64_t h_o_balanced_span =
+      h_o_heavy_quota * static_cast<int64_t>(block_num);
+  const int64_t h_o_prefix_limit =
+      h_o_balanced_span < h_o_total_items
+          ? h_o_balanced_span
+          : h_o_total_items;
+  const int64_t h_o_owned_prefix_count =
+      static_cast<int64_t>(cid) < h_o_prefix_limit
+          ? 1 + (h_o_prefix_limit - 1 -
+                 static_cast<int64_t>(cid)) /
+                    static_cast<int64_t>(block_num)
+          : 0;
+  const int64_t h_o_tail_owner_shift =
+      decouple_qk_h_ready && h_o_light_core_count > 0
+          ? h_o_heavy_core_count % h_o_light_core_count
+          : 0;
   // vid = Vec sub-block ID (0 or 1). Each Vec core has 2 sub-blocks that
   // process the upper (vid=0) and lower (vid=1) halves of C/2 rows.
   auto vid = get_subblockid();
@@ -228,7 +1705,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
   TASSIGN(s_l1, 65536);
   TileAcc<float, ChunkSize, HiddenSize,
           ChunkSize, HiddenSize> qs_l0;
-  TASSIGN(qs_l0, 65536);
+  TASSIGN(qs_l0, SecondL0CAddr);
   L1Mat<ComputeT, ChunkSize, ChunkSize> qk_gated_l1;
   TASSIGN(qk_gated_l1, 98304);
   L1Mat<ComputeT, ChunkSize, HiddenSize> v_l1;
@@ -290,7 +1767,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
 // performs the heavy matmuls, then writes results to GM workspace for
 // the Vec engine to apply gating and produce the final output.
 // =====================================================================
-#if defined(__DAV_CUBE__)
+#if defined(__DAV_C220_CUBE__)
   if (cu_seqlens == nullptr) {
     // ── Fixed-length sequence path ──────────────────────────────────────
     int64_t chunks_per_seq = (seq_len + ChunkSize - 1) / ChunkSize;
@@ -301,7 +1778,13 @@ AICORE void GDN_CHUNK_O_KERNEL(
          work_idx < total_work;
          work_idx += static_cast<int64_t>(block_num)) {
       // Wait for Vec to finish with previous chunk's workspace (flag 3)
-      if (!first_cube_iter) gdn_sync::Wait<PIPE_FIX>(3);
+      if (!first_cube_iter) {
+#if defined(PTO_NPU_ARCH_A5)
+        gdn_sync::Wait<PIPE_FIX>(3);
+#else
+        wait_flag_dev(3);
+#endif
+      }
       set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
       wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
 
@@ -436,7 +1919,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
       // ── Store QS [C × D] from L0C → GM workspace ────────────────────
       {
         TileAcc<float, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l0(ChunkSize, HiddenSize);
-        TASSIGN(_l0, 65536);
+        TASSIGN(_l0, SecondL0CAddr);
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = ChunkSize; _gs.shape[4] = HiddenSize;
         GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
@@ -451,7 +1934,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
       // and coordinate via FFTS flags. Think of it as two processes communicating
       // through shared memory with semaphores.
       //
-      // gdn_sync::Signal<PIPE_FIX>(config):
+      // ffts_cross_core_sync(PIPE_FIX, config):
       //   config = 1 | (mode << 4) | (flag_id << 8)
       //   mode=2: broadcast signal to all cores in this block
       //   flag_id: identifies which signal (0, 1, 2, 3)
@@ -461,10 +1944,14 @@ AICORE void GDN_CHUNK_O_KERNEL(
       //   flag 1: Vec→Cube "QK_gated is ready for GEMM 3"
       //   flag 2: Cube→Vec "QKV (GEMM 3 result) is ready"
       //   flag 3: Vec→Cube "I'm done with this chunk, you can reuse workspace"
-      gdn_sync::Signal<PIPE_FIX>(1 | (2 << 4) | (0 << 8));
+      ffts_cross_core_sync(PIPE_FIX, 1 | (2 << 4) | (0 << 8));
 
       // Wait for Vec to write QK_gated back (flag 1, Vec→Cube)
+#if defined(PTO_NPU_ARCH_A5)
       gdn_sync::Wait<PIPE_MTE2>(1);
+#else
+      wait_flag_dev(1);
+#endif
 
       set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
       wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
@@ -529,14 +2016,283 @@ AICORE void GDN_CHUNK_O_KERNEL(
       }
 
       // Signal Vec: QKV is ready (flag 2, Cube→Vec)
-      gdn_sync::Signal<PIPE_FIX>(1 | (2 << 4) | (2 << 8));
+      ffts_cross_core_sync(PIPE_FIX, 1 | (2 << 4) | (2 << 8));
       first_cube_iter = false;
+    }
+  } else if (use_precomputed_qs && reuse_group_qk != 0) {
+    const int64_t group_work_count = h_o_chunk_count * Hg;
+    constexpr int32_t GroupFlowFlag = 8;
+    constexpr int32_t GatedSlot0ReadyFlag = 9;
+    constexpr int32_t QkvSlot0ReadyFlag = 10;
+    constexpr int32_t GatedSlot1ReadyFlag = 11;
+    constexpr int32_t QkvSlot1ReadyFlag = 12;
+    constexpr int32_t GatedBottomReadyFlag = 13;
+    constexpr int32_t QkvBottomReadyFlag = 14;
+    constexpr int32_t QkvSlot2ReadyFlag = 15;
+    constexpr int32_t QkMailboxFreeFlag = QkvSlot2ReadyFlag;
+    const bool use_inplace_lane2 = GROUP == 3;
+    __gm__ ComputeT *lane2_mailbox =
+        workspace_ping_qk_handle +
+        static_cast<int64_t>(block_num) * WsQKSize;
+    const int64_t regular_group_rounds =
+        group_work_count / static_cast<int64_t>(block_num);
+    const bool rebalance_group_owners =
+        h_o_heavy_core_count > 0 && h_o_light_core_count > 0 &&
+        regular_group_rounds > GROUP;
+    const int64_t group_prefix_rounds =
+        rebalance_group_owners ? regular_group_rounds - GROUP
+                               : regular_group_rounds;
+    const int64_t group_balanced_span =
+        group_prefix_rounds * static_cast<int64_t>(block_num);
+    const int64_t group_tail_owner_shift =
+        h_o_heavy_core_count % h_o_light_core_count;
+    bool first_group = true;
+    int64_t group_owned_idx = 0;
+    int64_t group_work = GetHoOwnedItem(
+        group_owned_idx, group_work_count, static_cast<int64_t>(cid),
+        static_cast<int64_t>(block_num), rebalance_group_owners,
+        group_balanced_span, h_o_heavy_core_count,
+        h_o_light_core_count, group_prefix_rounds,
+        group_tail_owner_shift);
+
+    while (group_work < group_work_count) {
+      if (!first_group) {
+        wait_flag_dev(QkMailboxFreeFlag);
+      }
+      __gm__ ComputeT *current_qk_mailbox = workspace_qk_handle;
+
+      const int64_t global_chunk_idx = group_work / Hg;
+      const int32_t head_group =
+          static_cast<int32_t>(group_work - global_chunk_idx * Hg);
+      int64_t seq_idx = 0;
+      int64_t bos = 0;
+      int64_t slen = 0;
+      int64_t local_chunk_idx = 0;
+      if (!ResolveHoGlobalChunk<ChunkSize>(
+              global_chunk_idx, batch_size, cu_seqlens, seq_idx, bos,
+              slen, local_chunk_idx)) {
+        break;
+      }
+      const int64_t chunk_start = local_chunk_idx * ChunkSize;
+      const int64_t remaining = slen - chunk_start;
+      const int32_t valid_rows = static_cast<int32_t>(
+          remaining < ChunkSize ? remaining : ChunkSize);
+      const int64_t chunk_token_start = bos + chunk_start;
+      const int64_t qk_offset =
+          (chunk_token_start * static_cast<int64_t>(Hg) + head_group) *
+          static_cast<int64_t>(HiddenSize);
+      PublishQKTile<HiddenSize, ChunkSize>(
+          Q_handle, K_handle, current_qk_mailbox,
+          static_cast<int64_t>(cid), qk_offset,
+          BSND_QK_STRIDE, valid_rows, -1, 0u);
+
+      for (int32_t group_lane = 0; group_lane < GROUP; ++group_lane) {
+        const int32_t head_idx = head_group * GROUP + group_lane;
+        WaitHoChunkReady<ChunkSize>(
+            h_o_ready_handle,
+            static_cast<int32_t>(seq_idx * H + head_idx),
+            local_chunk_idx);
+      }
+      ffts_cross_core_sync(
+          PIPE_FIX, 1 | (2 << 4) | (GroupFlowFlag << 8));
+
+      for (int32_t group_lane = 0; group_lane < GROUP; ++group_lane) {
+        const int32_t head_idx = head_group * GROUP + group_lane;
+        const bool use_packed_v =
+            batch_size == 1 && (slen % ChunkSize) == 0;
+        const int32_t v_row_stride =
+            use_packed_v ? HiddenSize : BSND_V_STRIDE;
+        const int64_t v_offset =
+            use_packed_v
+                ? (global_chunk_idx * H + head_idx) *
+                      static_cast<int64_t>(ChunkSize) * HiddenSize
+                : (chunk_token_start * static_cast<int64_t>(H) +
+                   head_idx) *
+                      static_cast<int64_t>(HiddenSize);
+        const int32_t slot = group_lane & 1;
+        const bool inplace_lane2 =
+            use_inplace_lane2 && group_lane == 2;
+        __gm__ ComputeT *gated_mailbox =
+            inplace_lane2
+                ? lane2_mailbox
+                : (slot == 0 ? workspace_qk_gated_handle
+                             : workspace_ping_qk_gated_handle);
+        __gm__ ComputeT *qkv_mailbox =
+            inplace_lane2
+                ? lane2_mailbox
+                : (slot == 0 ? workspace_qs_qkv_handle
+                             : workspace_ping_qs_qkv_handle);
+        if (group_lane >= 2 && !inplace_lane2) {
+          wait_flag_dev(GroupFlowFlag);
+        }
+        const int32_t gated_ready_flag =
+            inplace_lane2
+                ? GroupFlowFlag
+                : (slot == 0 ? GatedSlot0ReadyFlag
+                             : GatedSlot1ReadyFlag);
+        const int32_t qkv_ready_flag =
+            inplace_lane2
+                ? QkvSlot2ReadyFlag
+                : (slot == 0 ? QkvSlot0ReadyFlag
+                             : QkvSlot1ReadyFlag);
+        PublishQKVTile<HiddenSize, ChunkSize>(
+            V_handle, gated_mailbox, qkv_mailbox,
+            static_cast<int64_t>(cid), v_offset,
+            v_row_stride,
+            valid_rows, gated_ready_flag, qkv_ready_flag,
+            GatedBottomReadyFlag, QkvBottomReadyFlag);
+      }
+      first_group = false;
+      ++group_owned_idx;
+      group_work = GetHoOwnedItem(
+          group_owned_idx, group_work_count,
+          static_cast<int64_t>(cid),
+          static_cast<int64_t>(block_num), rebalance_group_owners,
+          group_balanced_span, h_o_heavy_core_count,
+          h_o_light_core_count, group_prefix_rounds,
+          group_tail_owner_shift);
+    }
+
+  } else if (use_precomputed_qs && batch_size == 1) {
+    // Keep the next QK item in the other mailbox slot while the current
+    // item waits for gating and runs QKV. This overlaps Vec gating for
+    // item N+1 with Cube QKV for item N.
+    const int64_t bos = static_cast<int64_t>(cu_seqlens[0]);
+    const int64_t eos = static_cast<int64_t>(cu_seqlens[1]);
+    const int64_t slen = eos - bos;
+    const bool use_packed_v = (slen % ChunkSize) == 0;
+    const int32_t v_row_stride =
+        use_packed_v ? HiddenSize : BSND_V_STRIDE;
+    const int64_t v_sequence_base =
+        use_packed_v
+            ? 0
+            : bos * static_cast<int64_t>(H) * HiddenSize;
+    const int64_t v_head_stride =
+        use_packed_v
+            ? static_cast<int64_t>(ChunkSize) * HiddenSize
+            : HiddenSize;
+    const int64_t v_chunk_stride =
+        static_cast<int64_t>(H) * ChunkSize * HiddenSize;
+    int64_t owned_idx = 0;
+    int64_t current_item = GetHoOwnedItem(
+        0, h_o_total_items, static_cast<int64_t>(cid),
+        static_cast<int64_t>(block_num), rebalance_h_o_consumers,
+        h_o_balanced_span, h_o_heavy_core_count,
+        h_o_light_core_count, h_o_owned_prefix_count,
+        h_o_tail_owner_shift);
+    bool current_qk_published = false;
+
+    while (current_item < h_o_total_items) {
+      const int64_t ci = current_item / H;
+      const int32_t head_idx =
+          static_cast<int32_t>(current_item - ci * H);
+      const int64_t chunk_start = ci * ChunkSize;
+      const int64_t remaining = slen - chunk_start;
+      const int32_t valid_rows = static_cast<int32_t>(
+          remaining < ChunkSize ? remaining : ChunkSize);
+      const int64_t chunk_token_start = bos + chunk_start;
+      const int32_t head_group = head_idx / GROUP;
+      const int64_t qk_offset =
+          (chunk_token_start * static_cast<int64_t>(Hg) +
+           head_group) *
+          static_cast<int64_t>(HiddenSize);
+      const int64_t v_offset =
+          v_sequence_base + ci * v_chunk_stride +
+          static_cast<int64_t>(head_idx) * v_head_stride;
+      const int32_t slot = static_cast<int32_t>(owned_idx & 1);
+      __gm__ ComputeT *qk_mailbox =
+          slot == 0
+              ? workspace_qk_handle
+              : workspace_ping_qk_handle +
+                    static_cast<int64_t>(block_num) * WsQKSize;
+      __gm__ ComputeT *qkv_mailbox =
+          slot == 0 ? workspace_qs_qkv_handle
+                    : workspace_ping_qs_qkv_handle;
+      __gm__ ComputeT *gated_mailbox =
+          slot == 0 ? workspace_qk_gated_handle
+                    : workspace_ping_qk_gated_handle;
+
+      if (!current_qk_published && reuse_group_qk == 0) {
+        if (!decouple_qk_h_ready) {
+          WaitHoChunkReady<ChunkSize>(
+              h_o_ready_handle, head_idx, ci);
+        }
+        PublishQKTile<HiddenSize, ChunkSize>(
+            Q_handle, K_handle, qk_mailbox,
+            static_cast<int64_t>(cid), qk_offset,
+            BSND_QK_STRIDE, valid_rows, slot, 0u);
+      }
+
+      const int64_t next_item = GetHoOwnedItem(
+          owned_idx + 1, h_o_total_items,
+          static_cast<int64_t>(cid),
+          static_cast<int64_t>(block_num),
+          rebalance_h_o_consumers, h_o_balanced_span,
+          h_o_heavy_core_count, h_o_light_core_count,
+          h_o_owned_prefix_count, h_o_tail_owner_shift);
+      if (next_item < h_o_total_items && reuse_group_qk == 0) {
+        const int64_t next_owned_idx = owned_idx + 1;
+        const int32_t next_slot =
+            static_cast<int32_t>(next_owned_idx & 1);
+        if (next_owned_idx >= 2) {
+          wait_flag_dev(6 + next_slot);
+        }
+
+        const int64_t next_ci = next_item / H;
+        const int32_t next_head_idx =
+            static_cast<int32_t>(next_item - next_ci * H);
+        const int64_t next_chunk_start = next_ci * ChunkSize;
+        const int64_t next_remaining = slen - next_chunk_start;
+        const int32_t next_valid_rows = static_cast<int32_t>(
+            next_remaining < ChunkSize ? next_remaining : ChunkSize);
+        const int64_t next_chunk_token_start =
+            bos + next_chunk_start;
+        const int32_t next_head_group = next_head_idx / GROUP;
+        const int64_t next_qk_offset =
+            (next_chunk_token_start * static_cast<int64_t>(Hg) +
+             next_head_group) *
+            static_cast<int64_t>(HiddenSize);
+        __gm__ ComputeT *next_qk_mailbox =
+            next_slot == 0
+                ? workspace_qk_handle
+                : workspace_ping_qk_handle +
+                      static_cast<int64_t>(block_num) * WsQKSize;
+
+        if (!decouple_qk_h_ready) {
+          WaitHoChunkReady<ChunkSize>(
+              h_o_ready_handle, next_head_idx, next_ci);
+        }
+        PublishQKTile<HiddenSize, ChunkSize>(
+            Q_handle, K_handle, next_qk_mailbox,
+            static_cast<int64_t>(cid), next_qk_offset,
+            BSND_QK_STRIDE, next_valid_rows, next_slot, 0u);
+      }
+
+      // For head-rich shapes, Q/K are independent of the H-stage output:
+      // publish QK early and wait only when V/precomputed QS are consumed.
+      // Small-head shapes retain the original ordering because their short
+      // owner queues cannot safely absorb this lookahead.
+      if (decouple_qk_h_ready) {
+        WaitHoChunkReady<ChunkSize>(
+            h_o_ready_handle, head_idx, ci);
+      }
+      PublishQKVTile<HiddenSize, ChunkSize>(
+          V_handle, gated_mailbox, qkv_mailbox,
+          static_cast<int64_t>(cid), v_offset,
+          v_row_stride,
+          valid_rows, 2 + slot, 4 + slot);
+
+      current_item = next_item;
+      current_qk_published =
+          reuse_group_qk != 0 || next_item < h_o_total_items;
+      ++owned_idx;
     }
   } else {
     // ── Variable-length sequence path (cu_seqlens != nullptr) ──────────
     int64_t gi = 0;
     int64_t chunk_global_idx = 0;
     bool first_cube_iter_v = true;
+    int64_t cube_owned_idx_v = 0;
     for (int64_t si = 0; si < num_seqs; ++si) {
       int64_t bos = static_cast<int64_t>(cu_seqlens[si]);
       int64_t eos = static_cast<int64_t>(cu_seqlens[si + 1]);
@@ -545,9 +2301,68 @@ AICORE void GDN_CHUNK_O_KERNEL(
 
       for (int64_t ci = 0; ci < nc; ++ci) {
         for (int32_t h = 0; h < H; ++h) {
-          if (gi % static_cast<int64_t>(block_num) ==
-              static_cast<int64_t>(cid)) {
-            if (!first_cube_iter_v) gdn_sync::Wait<PIPE_FIX>(3);
+          int64_t consumer_owner =
+              gi % static_cast<int64_t>(block_num);
+          if (rebalance_h_o_consumers && gi >= h_o_balanced_span) {
+            consumer_owner =
+                h_o_heavy_core_count +
+                (gi - h_o_balanced_span) % h_o_light_core_count;
+          }
+          if (consumer_owner == static_cast<int64_t>(cid)) {
+            const int32_t mailbox_slot =
+                use_precomputed_qs
+                    ? static_cast<int32_t>(cube_owned_idx_v & 1)
+                    : 0;
+            if (use_precomputed_qs) {
+              if (cube_owned_idx_v >= 2) {
+                wait_flag_dev(6 + mailbox_slot);
+              }
+            } else if (!first_cube_iter_v) {
+#if defined(PTO_NPU_ARCH_A5)
+              gdn_sync::Wait<PIPE_FIX>(3);
+#else
+              wait_flag_dev(3);
+#endif
+            }
+            __gm__ ComputeT *qk_mailbox =
+                mailbox_slot == 0
+                    ? workspace_qk_handle
+                    : workspace_ping_qk_handle +
+                          static_cast<int64_t>(block_num) * WsQKSize;
+            __gm__ ComputeT *qs_qkv_mailbox =
+                mailbox_slot == 0
+                    ? workspace_qs_qkv_handle
+                    : workspace_ping_qs_qkv_handle;
+            __gm__ ComputeT *qk_gated_mailbox =
+                mailbox_slot == 0
+                    ? workspace_qk_gated_handle
+                    : workspace_ping_qk_gated_handle;
+            const int32_t qk_ready_flag =
+                use_precomputed_qs ? mailbox_slot : 0;
+            const int32_t qk_gated_ready_flag =
+                use_precomputed_qs ? 2 + mailbox_slot : 1;
+            const int32_t qkv_ready_flag =
+                use_precomputed_qs ? 4 + mailbox_slot : 2;
+            if (use_precomputed_qs) {
+              const int64_t ready_offset =
+                  (si * static_cast<int64_t>(H) + h) *
+                  H_O_READY_STRIDE;
+              const int32_t required_count =
+                  static_cast<int32_t>(ci + 1);
+              while (true) {
+                __asm__ __volatile__("");
+                AscendC::DataCacheCleanAndInvalid<
+                    int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
+                    AscendC::DcciDst::CACHELINE_OUT>(
+                    h_o_ready_gm[ready_offset]);
+                __asm__ __volatile__("");
+                const int32_t ready_count =
+                    h_o_ready_gm.GetValue(ready_offset);
+                if (ready_count >= required_count) {
+                  break;
+                }
+              }
+            }
             set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
             wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
 
@@ -609,8 +2424,8 @@ AICORE void GDN_CHUNK_O_KERNEL(
               set_flag(PIPE_M, PIPE_FIX, _we); wait_flag(PIPE_M, PIPE_FIX, _we);
             }
 
-            // Load S
-            {
+            // H has already consumed S and replaced this slot with Q @ S.
+            if (!use_precomputed_qs) {
               L1Mat<ComputeT, HiddenSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(HiddenSize, HiddenSize);
               TASSIGN(_l1, 65536);
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
@@ -620,7 +2435,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
             }
 
             // GEMM 2: QS = Q @ S
-            {
+            if (!use_precomputed_qs) {
               TileLeft<ComputeT, ChunkSize, HiddenSize, ChunkSize, HiddenSize> _l0a;
               TileRight<ComputeT, HiddenSize, HiddenSize, HiddenSize, HiddenSize> _l0b;
               TASSIGN(_l0a, 0x0); TASSIGN(_l0b, 0x0);
@@ -642,28 +2457,42 @@ AICORE void GDN_CHUNK_O_KERNEL(
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
               _gs.shape[3] = ChunkSize; _gs.shape[4] = ChunkSize;
               GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
-                  workspace_qk_handle +
+                  qk_mailbox +
                       static_cast<int64_t>(cid) * WsQKSize, _gs);
               TSTORE(_gm, _l0);
             }
 
-            // Store QS → workspace
-            {
+            // Store QS on the legacy path. The pipelined path reads the
+            // precomputed value directly from S_handle.
+            if (!use_precomputed_qs) {
               TileAcc<float, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l0(ChunkSize, HiddenSize);
-              TASSIGN(_l0, 65536);
+              TASSIGN(_l0, SecondL0CAddr);
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
               _gs.shape[3] = ChunkSize; _gs.shape[4] = HiddenSize;
               GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
-                  workspace_qs_qkv_handle +
+                  qs_qkv_mailbox +
                       static_cast<int64_t>(cid) * WsQSSize, _gs);
               TSTORE(_gm, _l0);
             }
 
             // Cube→Vec: QK & QS ready (flag 0)
-            gdn_sync::Signal<PIPE_FIX>(1 | (2 << 4) | (0 << 8));
+            ffts_cross_core_sync(
+                PIPE_FIX, 1 | (2 << 4) | (qk_ready_flag << 8));
 
             // Wait Vec→Cube: QK_gated ready (flag 1)
-            gdn_sync::Wait<PIPE_MTE2>(1);
+            if (use_precomputed_qs) {
+#if defined(PTO_NPU_ARCH_A5)
+              gdn_sync::Wait<PIPE_MTE2>(qk_gated_ready_flag);
+#else
+              wait_flag_dev(qk_gated_ready_flag);
+#endif
+            } else {
+#if defined(PTO_NPU_ARCH_A5)
+              gdn_sync::Wait<PIPE_MTE2>(1);
+#else
+              wait_flag_dev(1);
+#endif
+            }
 
             set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
             wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
@@ -675,7 +2504,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
               _gs.shape[3] = ChunkSize; _gs.shape[4] = ChunkSize;
               GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
-                  workspace_qk_gated_handle +
+                  qk_gated_mailbox +
                       static_cast<int64_t>(cid) * WsGatedSize, _gs);
               TLOAD(_l1, _gm);
             }
@@ -713,13 +2542,15 @@ AICORE void GDN_CHUNK_O_KERNEL(
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
               _gs.shape[3] = ChunkSize; _gs.shape[4] = HiddenSize;
               GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
-                  workspace_qs_qkv_handle +
+                  qs_qkv_mailbox +
                       static_cast<int64_t>(cid) * WsQSSize, _gs);
               TSTORE(_gm, _l0);
             }
 
-            gdn_sync::Signal<PIPE_FIX>(1 | (2 << 4) | (2 << 8));
+            ffts_cross_core_sync(
+                PIPE_FIX, 1 | (2 << 4) | (qkv_ready_flag << 8));
             first_cube_iter_v = false;
+            ++cube_owned_idx_v;
           }
           gi++;
         }
@@ -738,11 +2569,23 @@ AICORE void GDN_CHUNK_O_KERNEL(
 //   3. Scales the Cube's QS result by exp(g)
 //   4. Combines QKV + scaled QS → final output O
 // =====================================================================
-#if defined(__DAV_VEC__)
+#if defined(__DAV_C220_VEC__)
   // Vec engine initialization: set_mask_norm selects "normal" masking mode,
   // and set_vector_mask(-1, -1) enables ALL SIMD lanes (no masking).
   set_mask_norm();
   set_vector_mask(-1, -1);
+
+  constexpr int32_t NormWeightBf16Addr = 180992;
+  constexpr int32_t NormWeightFp32Addr = 181504;
+  if constexpr (FuseGatedRmsNorm) {
+    Shape<1, 1, 1, 1, HiddenSize> shape;
+    GlobalTensor<GDN_PUBLIC_DTYPE, decltype(shape),
+                 Stride<1, 1, 1, HiddenSize, 1>>
+        weight_global(norm_weight_handle, shape);
+    UbND<GDN_PUBLIC_DTYPE, 1, HiddenSize> weight_load;
+    TASSIGN(weight_load, NormWeightBf16Addr);
+    TLOAD(weight_load, weight_global);
+  }
 
   // ── Load causal mask once (reused across all chunks) ─────────────────
   // ── Causal mask (loaded once, reused) ─────────────────────────────────
@@ -764,6 +2607,16 @@ AICORE void GDN_CHUNK_O_KERNEL(
   }
   set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
   wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+  if constexpr (FuseGatedRmsNorm) {
+    UbND<GDN_PUBLIC_DTYPE, 1, HiddenSize> norm_weight_public;
+    TASSIGN(norm_weight_public, NormWeightBf16Addr);
+    UbND<float, 1, HiddenSize> norm_weight_fp32;
+    TASSIGN(norm_weight_fp32, NormWeightFp32Addr);
+    TCVT(norm_weight_fp32, norm_weight_public,
+         pto::RoundMode::CAST_NONE);
+    pipe_barrier(PIPE_V);
+  }
 
   if (cu_seqlens == nullptr) {
     // ── Fixed-length sequence path ──────────────────────────────────────
@@ -838,22 +2691,22 @@ AICORE void GDN_CHUNK_O_KERNEL(
         TROWEXPAND(g_r_2d, g_v_col);       // g_r_2d[i,j] = g_row[i]
         TCOLEXPAND(coeff_ub, g_ub);        // coeff[i,j] = g_col[j]
         TSUB(coeff_ub, g_r_2d, coeff_ub);  // d = g_row - g_col
-        gdn_sync::VectorBarrier();
+        pipe_barrier(PIPE_V);
         TMINS(coeff_ub, coeff_ub, 0.0f);
-        gdn_sync::VectorBarrier();
+        pipe_barrier(PIPE_V);
         TEXP(coeff_ub, coeff_ub);
-        gdn_sync::VectorBarrier();
+        pipe_barrier(PIPE_V);
         TMUL(coeff_ub, coeff_ub, msk_ub);
-        gdn_sync::VectorBarrier();
+        pipe_barrier(PIPE_V);
         TEXP(g_v_ub, g_v_ub);              // exp(g_row) for QS scaling
       }
 
       // ── Wait for Cube→Vec flag 0: QK & QS ready ─────────────────────
-      gdn_sync::Wait<PIPE_MTE2>(0);
+      wait_flag_dev(0);
       if (local_rows == 0) {
-        gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (1 << 8));
-        gdn_sync::Wait<PIPE_MTE2>(2);
-        gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (3 << 8));
+        ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (1 << 8));
+        wait_flag_dev(2);
+        ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (3 << 8));
         continue;
       }
 
@@ -915,7 +2768,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
         TSTORE(_gm, _st);
       }
       // Vec→Cube: QK_gated ready (flag 1)
-      gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (1 << 8));
+      ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (1 << 8));
 
       // ── Scale QS by exp(g): QS_gated = QS * exp(g_row) ──────────────
       // ── Scale QS by exp(g): inter-chunk state contribution ────────────
@@ -931,11 +2784,11 @@ AICORE void GDN_CHUNK_O_KERNEL(
       UbDN<float, HalfChunk, 1> g_v_col2;
       TASSIGN(g_v_col2, GvUbAddr);
       TROWEXPAND(g_exp_2d, g_v_col2);    // broadcast exp(g_row) across columns
-      gdn_sync::VectorBarrier();
+      pipe_barrier(PIPE_V);
       TMUL(qs_ub, qs_ub, g_exp_2d);      // QS_gated = QS * exp(g_row)
 
       // ── Wait for Cube→Vec flag 2: QKV ready ─────────────────────────
-      gdn_sync::Wait<PIPE_MTE2>(2);
+      wait_flag_dev(2);
 
       // ── Load QKV [C/2 × D] from workspace → UB ──────────────────────
       {
@@ -960,14 +2813,9 @@ AICORE void GDN_CHUNK_O_KERNEL(
       // ── Final output: O = QKV + QS_scaled ─────────────────────────────
       // numpy: O = (QK_gated @ V) + (Q @ S) * exp(g)[:, None]
       //       = intra_chunk_attention + inter_chunk_state_contribution
-      // TCVT ComputeT→float for QKV, then TADD, then TCVT float→ComputeT for output.
+      // TCVT ComputeT→float for QKV, then add the state contribution.
       TCVT(o_ub, o_ub_half, pto::RoundMode::CAST_NONE);
       TADD(o_ub, qs_ub, o_ub);
-      TCVT(o_ub_half, o_ub, pto::RoundMode::CAST_NONE);
-
-      // ── Store O [C/2 × D] → GM in BSND layout ───────────────────────
-      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
 
       int64_t o_offset =
           (chunk_token_start * static_cast<int64_t>(H) +
@@ -975,23 +2823,292 @@ AICORE void GDN_CHUNK_O_KERNEL(
               static_cast<int64_t>(HiddenSize) +
           static_cast<int64_t>(vid) * HalfChunk *
               static_cast<int64_t>(BSND_V_STRIDE);
-
-      {
-        Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
-        _gs.shape[3] = local_rows; _gs.shape[4] = HiddenSize;
-        GmStride2D _stride(BSND_V_STRIDE);
-        GmTensor2D<ComputeT> _gm(O_handle + o_offset, _gs, _stride);
-        UbND<ComputeT, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC> _st(local_rows, HiddenSize);
-        TASSIGN(_st, OHalfUbAddr);
-        TSTORE(_gm, _st);
-      }
+      StoreChunkOutput<HiddenSize, ChunkSize, FuseGatedRmsNorm>(
+          O_handle, z_handle, o_offset, BSND_V_STRIDE, local_rows);
 
       // Vec→Cube: done with this chunk (flag 3)
-      gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (3 << 8));
+      ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (3 << 8));
+    }
+  } else if (use_precomputed_qs && reuse_group_qk != 0) {
+    const int64_t group_work_count = h_o_chunk_count * Hg;
+    constexpr int32_t GroupFlowFlag = 8;
+    constexpr int32_t GatedSlot0ReadyFlag = 9;
+    constexpr int32_t QkvSlot0ReadyFlag = 10;
+    constexpr int32_t GatedSlot1ReadyFlag = 11;
+    constexpr int32_t QkvSlot1ReadyFlag = 12;
+    constexpr int32_t GatedBottomReadyFlag = 13;
+    constexpr int32_t QkvBottomReadyFlag = 14;
+    constexpr int32_t QkvSlot2ReadyFlag = 15;
+    constexpr int32_t QkMailboxFreeFlag = QkvSlot2ReadyFlag;
+    const bool use_inplace_lane2 = GROUP == 3;
+    __gm__ ComputeT *lane2_mailbox =
+        workspace_ping_qk_handle +
+        static_cast<int64_t>(block_num) * WsQKSize;
+    const int64_t regular_group_rounds =
+        group_work_count / static_cast<int64_t>(block_num);
+    const bool rebalance_group_owners =
+        h_o_heavy_core_count > 0 && h_o_light_core_count > 0 &&
+        regular_group_rounds > GROUP;
+    const int64_t group_prefix_rounds =
+        rebalance_group_owners ? regular_group_rounds - GROUP
+                               : regular_group_rounds;
+    const int64_t group_balanced_span =
+        group_prefix_rounds * static_cast<int64_t>(block_num);
+    const int64_t group_tail_owner_shift =
+        h_o_heavy_core_count % h_o_light_core_count;
+    bool produced_output = false;
+    constexpr int32_t GateSlot0Addr = GUbAddr;
+    constexpr int32_t GateSlot1Addr = GvUbAddr;
+    int64_t group_owned_idx = 0;
+    int64_t group_work = GetHoOwnedItem(
+        group_owned_idx, group_work_count, static_cast<int64_t>(cid),
+        static_cast<int64_t>(block_num), rebalance_group_owners,
+        group_balanced_span, h_o_heavy_core_count,
+        h_o_light_core_count, group_prefix_rounds,
+        group_tail_owner_shift);
+
+    while (group_work < group_work_count) {
+      __gm__ ComputeT *current_qk_mailbox = workspace_qk_handle;
+      const int64_t global_chunk_idx = group_work / Hg;
+      const int32_t head_group =
+          static_cast<int32_t>(group_work - global_chunk_idx * Hg);
+      int64_t seq_idx = 0;
+      int64_t bos = 0;
+      int64_t slen = 0;
+      int64_t local_chunk_idx = 0;
+      if (!ResolveHoGlobalChunk<ChunkSize>(
+              global_chunk_idx, batch_size, cu_seqlens, seq_idx, bos,
+              slen, local_chunk_idx)) {
+        break;
+      }
+      const int64_t chunk_start = local_chunk_idx * ChunkSize;
+      const int64_t remaining = slen - chunk_start;
+      const int32_t valid_rows = static_cast<int32_t>(
+          remaining < ChunkSize ? remaining : ChunkSize);
+      const int64_t chunk_token_start = bos + chunk_start;
+      const int32_t row_offset =
+          static_cast<int32_t>(vid) * HalfChunk;
+      int32_t local_rows = valid_rows - row_offset;
+      if (local_rows < 0) {
+        local_rows = 0;
+      }
+      if (local_rows > HalfChunk) {
+        local_rows = HalfChunk;
+      }
+      for (int32_t group_lane = 0; group_lane < GROUP; ++group_lane) {
+        const int32_t head_idx = head_group * GROUP + group_lane;
+        const int32_t slot = group_lane & 1;
+        const bool inplace_lane2 =
+            use_inplace_lane2 && group_lane == 2;
+        __gm__ ComputeT *qkv_mailbox =
+            inplace_lane2
+                ? lane2_mailbox
+                : (slot == 0 ? workspace_qs_qkv_handle
+                             : workspace_ping_qs_qkv_handle);
+        const int32_t row_gate_addr =
+            slot == 0 ? GateSlot0Addr : GateSlot1Addr;
+
+        if (group_lane == 0) {
+          PublishGatedQKTile<HiddenSize, ChunkSize>(
+              G_handle, current_qk_mailbox,
+              workspace_qk_gated_handle, static_cast<int64_t>(cid),
+              total_tokens, chunk_token_start, head_idx, valid_rows,
+              local_rows, static_cast<int32_t>(vid), row_gate_addr,
+              1u, 0u, GroupFlowFlag, GroupFlowFlag,
+              GatedSlot0ReadyFlag, GatedBottomReadyFlag);
+        }
+
+        const int32_t next_lane = group_lane + 1;
+        if (next_lane < GROUP) {
+          const int32_t next_head_idx =
+              head_group * GROUP + next_lane;
+          const int32_t next_slot = next_lane & 1;
+          const bool next_inplace_lane2 =
+              use_inplace_lane2 && next_lane == 2;
+          __gm__ ComputeT *next_gated_mailbox =
+              next_inplace_lane2
+                  ? lane2_mailbox
+                  : (next_slot == 0
+                         ? workspace_qk_gated_handle
+                         : workspace_ping_qk_gated_handle);
+          const int32_t next_row_gate_addr =
+              next_slot == 0 ? GateSlot0Addr : GateSlot1Addr;
+          const bool next_releases_qk =
+              next_lane + 1 == GROUP;
+          PublishGatedQKTile<HiddenSize, ChunkSize>(
+              G_handle, current_qk_mailbox,
+              next_gated_mailbox, static_cast<int64_t>(cid),
+              total_tokens, chunk_token_start, next_head_idx,
+              valid_rows, local_rows, static_cast<int32_t>(vid),
+              next_row_gate_addr, 0u,
+              (next_inplace_lane2 || next_releases_qk) ? 1u : 0u,
+              GroupFlowFlag, QkMailboxFreeFlag,
+              next_inplace_lane2
+                  ? GroupFlowFlag
+                  : (next_slot == 0 ? GatedSlot0ReadyFlag
+                                    : GatedSlot1ReadyFlag),
+              GatedBottomReadyFlag);
+        }
+
+        const bool release_group_flow =
+            !use_inplace_lane2 &&
+            (group_lane + 2 < GROUP || group_lane + 1 == GROUP);
+        ConsumeQKVTile<HiddenSize, ChunkSize, FuseGatedRmsNorm>(
+            S_handle, qkv_mailbox, O_handle, z_handle,
+            static_cast<int64_t>(cid), global_chunk_idx,
+            chunk_token_start,
+            head_idx, H, valid_rows, local_rows,
+            static_cast<int32_t>(vid), row_gate_addr,
+            inplace_lane2
+                ? QkvSlot2ReadyFlag
+                : (slot == 0 ? QkvSlot0ReadyFlag
+                             : QkvSlot1ReadyFlag),
+            release_group_flow ? GroupFlowFlag : -1,
+            QkvBottomReadyFlag);
+        produced_output = true;
+      }
+      ++group_owned_idx;
+      group_work = GetHoOwnedItem(
+          group_owned_idx, group_work_count,
+          static_cast<int64_t>(cid),
+          static_cast<int64_t>(block_num), rebalance_group_owners,
+          group_balanced_span, h_o_heavy_core_count,
+          h_o_light_core_count, group_prefix_rounds,
+          group_tail_owner_shift);
+    }
+
+    if (produced_output) {
+      ffts_cross_core_sync(
+          PIPE_MTE3, 1 | (2 << 4) | (3 << 8));
+    }
+  } else if (use_precomputed_qs && batch_size == 1) {
+    // Keep one row-gate vector per mailbox slot. G-all uses the otherwise
+    // idle QS input buffer during gating, so lookahead no longer needs to
+    // save and restore the current gate around item N+1.
+    constexpr int32_t GateSlot0Addr = GUbAddr;
+    constexpr int32_t GateSlot1Addr = GvUbAddr;
+
+    const int64_t bos = static_cast<int64_t>(cu_seqlens[0]);
+    const int64_t eos = static_cast<int64_t>(cu_seqlens[1]);
+    const int64_t slen = eos - bos;
+    int64_t owned_idx = 0;
+    int64_t current_item = GetHoOwnedItem(
+        0, h_o_total_items, static_cast<int64_t>(cid),
+        static_cast<int64_t>(block_num), rebalance_h_o_consumers,
+        h_o_balanced_span, h_o_heavy_core_count,
+        h_o_light_core_count, h_o_owned_prefix_count,
+        h_o_tail_owner_shift);
+    bool current_gating_published = false;
+
+    while (current_item < h_o_total_items) {
+      const int64_t ci = current_item / H;
+      const int32_t head_idx =
+          static_cast<int32_t>(current_item - ci * H);
+      const int64_t chunk_start = ci * ChunkSize;
+      const int64_t remaining = slen - chunk_start;
+      const int32_t valid_rows = static_cast<int32_t>(
+          remaining < ChunkSize ? remaining : ChunkSize);
+      const int64_t chunk_token_start = bos + chunk_start;
+      const int32_t row_offset =
+          static_cast<int32_t>(vid) * HalfChunk;
+      int32_t local_rows = valid_rows - row_offset;
+      if (local_rows < 0) {
+        local_rows = 0;
+      }
+      if (local_rows > HalfChunk) {
+        local_rows = HalfChunk;
+      }
+
+      const int32_t slot = static_cast<int32_t>(owned_idx & 1);
+      __gm__ ComputeT *qk_mailbox =
+          slot == 0
+              ? workspace_qk_handle
+              : workspace_ping_qk_handle +
+                    static_cast<int64_t>(block_num) * WsQKSize;
+      __gm__ ComputeT *qkv_mailbox =
+          slot == 0 ? workspace_qs_qkv_handle
+                    : workspace_ping_qs_qkv_handle;
+      __gm__ ComputeT *gated_mailbox =
+          slot == 0 ? workspace_qk_gated_handle
+                    : workspace_ping_qk_gated_handle;
+      const int32_t row_gate_addr =
+          slot == 0 ? GateSlot0Addr : GateSlot1Addr;
+
+      if (!current_gating_published) {
+        PublishGatedQKTile<HiddenSize, ChunkSize>(
+            G_handle, qk_mailbox, gated_mailbox,
+            static_cast<int64_t>(cid), total_tokens,
+            chunk_token_start, head_idx, valid_rows, local_rows,
+            static_cast<int32_t>(vid), row_gate_addr, 1u, 1u,
+            slot, 6 + slot, 2 + slot);
+      }
+
+      const int64_t next_item = GetHoOwnedItem(
+          owned_idx + 1, h_o_total_items,
+          static_cast<int64_t>(cid),
+          static_cast<int64_t>(block_num),
+          rebalance_h_o_consumers, h_o_balanced_span,
+          h_o_heavy_core_count, h_o_light_core_count,
+          h_o_owned_prefix_count, h_o_tail_owner_shift);
+      if (next_item < h_o_total_items) {
+        const int64_t next_ci = next_item / H;
+        const int32_t next_head_idx =
+            static_cast<int32_t>(next_item - next_ci * H);
+        const int64_t next_chunk_start = next_ci * ChunkSize;
+        const int64_t next_remaining = slen - next_chunk_start;
+        const int32_t next_valid_rows = static_cast<int32_t>(
+            next_remaining < ChunkSize ? next_remaining : ChunkSize);
+        const int64_t next_chunk_token_start =
+            bos + next_chunk_start;
+        int32_t next_local_rows = next_valid_rows - row_offset;
+        if (next_local_rows < 0) {
+          next_local_rows = 0;
+        }
+        if (next_local_rows > HalfChunk) {
+          next_local_rows = HalfChunk;
+        }
+        const int32_t next_slot =
+            static_cast<int32_t>((owned_idx + 1) & 1);
+        __gm__ ComputeT *next_qk_mailbox =
+            next_slot == 0
+                ? workspace_qk_handle
+                : workspace_ping_qk_handle +
+                      static_cast<int64_t>(block_num) * WsQKSize;
+        __gm__ ComputeT *next_gated_mailbox =
+            next_slot == 0 ? workspace_qk_gated_handle
+                           : workspace_ping_qk_gated_handle;
+        const int32_t next_row_gate_addr =
+            next_slot == 0 ? GateSlot0Addr : GateSlot1Addr;
+
+        PublishGatedQKTile<HiddenSize, ChunkSize>(
+            G_handle, next_qk_mailbox, next_gated_mailbox,
+            static_cast<int64_t>(cid), total_tokens,
+            next_chunk_token_start, next_head_idx,
+            next_valid_rows, next_local_rows,
+            static_cast<int32_t>(vid), next_row_gate_addr,
+            1u, 1u, next_slot, 6 + next_slot, 2 + next_slot);
+      }
+
+      ConsumeQKVTile<HiddenSize, ChunkSize, FuseGatedRmsNorm>(
+          S_handle, qkv_mailbox, O_handle, z_handle,
+          static_cast<int64_t>(cid), ci, chunk_token_start,
+          head_idx, H, valid_rows, local_rows,
+          static_cast<int32_t>(vid), row_gate_addr, 4 + slot, -1);
+
+      current_item = next_item;
+      current_gating_published = next_item < h_o_total_items;
+      ++owned_idx;
+    }
+
+    if (owned_idx > 0) {
+      ffts_cross_core_sync(
+          PIPE_MTE3, 1 | (2 << 4) | (3 << 8));
     }
   } else {
     // ── Variable-length sequence path (cu_seqlens != nullptr) ──────────
     int64_t gi = 0;
+    int64_t chunk_global_idx = 0;
+    int64_t vec_owned_idx_v = 0;
     for (int64_t si = 0; si < num_seqs; ++si) {
       int64_t bos = static_cast<int64_t>(cu_seqlens[si]);
       int64_t eos = static_cast<int64_t>(cu_seqlens[si + 1]);
@@ -1000,8 +3117,39 @@ AICORE void GDN_CHUNK_O_KERNEL(
 
       for (int64_t ci = 0; ci < nc; ++ci) {
         for (int32_t h = 0; h < H; ++h) {
-          if (gi % static_cast<int64_t>(block_num) ==
-              static_cast<int64_t>(cid)) {
+          int64_t consumer_owner =
+              gi % static_cast<int64_t>(block_num);
+          if (rebalance_h_o_consumers && gi >= h_o_balanced_span) {
+            consumer_owner =
+                h_o_heavy_core_count +
+                (gi - h_o_balanced_span) % h_o_light_core_count;
+          }
+          if (consumer_owner == static_cast<int64_t>(cid)) {
+            const int32_t mailbox_slot =
+                use_precomputed_qs
+                    ? static_cast<int32_t>(vec_owned_idx_v & 1)
+                    : 0;
+            __gm__ ComputeT *qk_mailbox =
+                mailbox_slot == 0
+                    ? workspace_qk_handle
+                    : workspace_ping_qk_handle +
+                          static_cast<int64_t>(block_num) * WsQKSize;
+            __gm__ ComputeT *qs_qkv_mailbox =
+                mailbox_slot == 0
+                    ? workspace_qs_qkv_handle
+                    : workspace_ping_qs_qkv_handle;
+            __gm__ ComputeT *qk_gated_mailbox =
+                mailbox_slot == 0
+                    ? workspace_qk_gated_handle
+                    : workspace_ping_qk_gated_handle;
+            const int32_t qk_ready_flag =
+                use_precomputed_qs ? mailbox_slot : 0;
+            const int32_t qk_gated_ready_flag =
+                use_precomputed_qs ? 2 + mailbox_slot : 1;
+            const int32_t qkv_ready_flag =
+                use_precomputed_qs ? 4 + mailbox_slot : 2;
+            const int32_t mailbox_free_flag =
+                use_precomputed_qs ? 6 + mailbox_slot : 3;
             int64_t chunk_start = ci * ChunkSize;
             int64_t remaining = slen - chunk_start;
             int32_t valid_rows = static_cast<int32_t>(
@@ -1048,28 +3196,32 @@ AICORE void GDN_CHUNK_O_KERNEL(
               TROWEXPAND(g_r_2d_v, g_v_col_v);
               TCOLEXPAND(coeff_ub, g_ub);
               TSUB(coeff_ub, g_r_2d_v, coeff_ub);  // d = g_row - g_col
-              gdn_sync::VectorBarrier();
+              pipe_barrier(PIPE_V);
               TMINS(coeff_ub, coeff_ub, 0.0f);
-              gdn_sync::VectorBarrier();
+              pipe_barrier(PIPE_V);
               TEXP(coeff_ub, coeff_ub);
-              gdn_sync::VectorBarrier();
+              pipe_barrier(PIPE_V);
               TMUL(coeff_ub, coeff_ub, msk_ub);
-              gdn_sync::VectorBarrier();
+              pipe_barrier(PIPE_V);
               TEXP(g_v_ub, g_v_ub);
             }
 
-            gdn_sync::Wait<PIPE_MTE2>(0);
+            wait_flag_dev(qk_ready_flag);
             if (local_rows == 0) {
-              gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (1 << 8));
-              gdn_sync::Wait<PIPE_MTE2>(2);
-              gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (3 << 8));
+              ffts_cross_core_sync(
+                  PIPE_MTE3,
+                  1 | (2 << 4) | (qk_gated_ready_flag << 8));
+              wait_flag_dev(qkv_ready_flag);
+              ffts_cross_core_sync(
+                  PIPE_MTE3,
+                  1 | (2 << 4) | (mailbox_free_flag << 8));
             } else {
               // Load QK from workspace
               {
                 Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
                 _gs.shape[3] = local_rows; _gs.shape[4] = ChunkSize;
                 GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
-                    workspace_qk_handle +
+                    qk_mailbox +
                         static_cast<int64_t>(cid) * WsQKSize +
                         static_cast<int64_t>(vid) * HalfChunk * ChunkSize, _gs);
                 UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, ChunkSize);
@@ -1091,9 +3243,17 @@ AICORE void GDN_CHUNK_O_KERNEL(
               {
                 Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
                 _gs.shape[3] = local_rows; _gs.shape[4] = HiddenSize;
+                __gm__ ComputeT *qs_source =
+                    qs_qkv_mailbox +
+                    static_cast<int64_t>(cid) * WsQSSize;
+                if (use_precomputed_qs) {
+                  qs_source =
+                      S_handle +
+                      (chunk_global_idx * H + head_idx) *
+                          static_cast<int64_t>(HiddenSize) * HiddenSize;
+                }
                 GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
-                    workspace_qs_qkv_handle +
-                        static_cast<int64_t>(cid) * WsQSSize +
+                    qs_source +
                         static_cast<int64_t>(vid) * HalfChunk * HiddenSize, _gs);
                 UbND<ComputeT, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, HiddenSize);
                 TASSIGN(_ld, QSHalfUbAddr);
@@ -1113,7 +3273,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
                 Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
                 _gs.shape[3] = local_rows; _gs.shape[4] = ChunkSize;
                 GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, ChunkSize, 1>> _gm(
-                    workspace_qk_gated_handle +
+                    qk_gated_mailbox +
                         static_cast<int64_t>(cid) * WsGatedSize +
                         static_cast<int64_t>(vid) * HalfChunk * ChunkSize, _gs);
                 UbND<ComputeT, HalfChunk, ChunkSize, DYNAMIC, DYNAMIC> _st(local_rows, ChunkSize);
@@ -1121,7 +3281,9 @@ AICORE void GDN_CHUNK_O_KERNEL(
                 TSTORE(_gm, _st);
               }
               // Vec→Cube: QK_gated ready (flag 1)
-              gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (1 << 8));
+              ffts_cross_core_sync(
+                  PIPE_MTE3,
+                  1 | (2 << 4) | (qk_gated_ready_flag << 8));
 
               // Scale QS by exp(g): QS_scaled = QS * exp(g_row)[:, None]
               // (same inter-chunk state scaling as fixed-length path)
@@ -1134,17 +3296,17 @@ AICORE void GDN_CHUNK_O_KERNEL(
               UbDN<float, HalfChunk, 1> g_v_col2_v;
               TASSIGN(g_v_col2_v, GvUbAddr);
               TROWEXPAND(g_exp_2d_v, g_v_col2_v);
-              gdn_sync::VectorBarrier();
+              pipe_barrier(PIPE_V);
               TMUL(qs_ub, qs_ub, g_exp_2d_v);
 
-              gdn_sync::Wait<PIPE_MTE2>(2);
+              wait_flag_dev(qkv_ready_flag);
 
               // Load QKV from workspace
               {
                 Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
                 _gs.shape[3] = local_rows; _gs.shape[4] = HiddenSize;
                 GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
-                    workspace_qs_qkv_handle +
+                    qs_qkv_mailbox +
                         static_cast<int64_t>(cid) * WsQSSize +
                         static_cast<int64_t>(vid) * HalfChunk * HiddenSize, _gs);
                 UbND<ComputeT, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC, PadValue::Zero> _ld(local_rows, HiddenSize);
@@ -1159,13 +3321,8 @@ AICORE void GDN_CHUNK_O_KERNEL(
               wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
               // O = QS_gated + QKV  (final output: intra-chunk attention + inter-chunk state)
-              TCVT(o_ub, o_ub_half, pto::RoundMode::CAST_NONE);  // ComputeT→float
-              TADD(o_ub, qs_ub, o_ub);                            // O = QS_scaled + QKV
-              TCVT(o_ub_half, o_ub, pto::RoundMode::CAST_NONE);  // float→ComputeT for GM store
-
-              // Store O → GM
-              set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-              wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+              TCVT(o_ub, o_ub_half, pto::RoundMode::CAST_NONE);
+              TADD(o_ub, qs_ub, o_ub);
 
               int64_t o_offset =
                   (chunk_token_start * static_cast<int64_t>(H) +
@@ -1173,24 +3330,26 @@ AICORE void GDN_CHUNK_O_KERNEL(
                       static_cast<int64_t>(HiddenSize) +
                   static_cast<int64_t>(vid) * HalfChunk *
                       static_cast<int64_t>(BSND_V_STRIDE);
-
-              {
-                Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
-                _gs.shape[3] = local_rows; _gs.shape[4] = HiddenSize;
-                GmStride2D _stride(BSND_V_STRIDE);
-                GmTensor2D<ComputeT> _gm(O_handle + o_offset, _gs, _stride);
-                UbND<ComputeT, HalfChunk, HiddenSize, DYNAMIC, DYNAMIC> _st(local_rows, HiddenSize);
-                TASSIGN(_st, OHalfUbAddr);
-                TSTORE(_gm, _st);
-              }
+              StoreChunkOutput<HiddenSize, ChunkSize,
+                               FuseGatedRmsNorm>(
+                  O_handle, z_handle, o_offset, BSND_V_STRIDE,
+                  local_rows);
 
               // Vec→Cube: done with this chunk (flag 3)
-              gdn_sync::Signal<PIPE_MTE3>(1 | (2 << 4) | (3 << 8));
+              ffts_cross_core_sync(
+                  PIPE_MTE3,
+                  1 | (2 << 4) | (mailbox_free_flag << 8));
             }
+            ++vec_owned_idx_v;
           }
           gi++;
         }
+        ++chunk_global_idx;
       }
+    }
+    if (use_precomputed_qs && vec_owned_idx_v > 0) {
+      // Keep the outer MegaChunkGdn drain protocol unchanged.
+      ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (3 << 8));
     }
   }
 #endif

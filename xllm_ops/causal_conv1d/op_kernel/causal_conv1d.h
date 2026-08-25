@@ -28,6 +28,7 @@ namespace NsCausalConv1d {
 
 using namespace AscendC;
 using namespace NsCausalConv1dCommon;
+using AscendC::RoundMode;
 
 using PackedQkvT = DTYPE_Y;
 static_assert(IsSameType<PackedQkvT, half>::value || IsSameType<PackedQkvT, bfloat16_t>::value,
@@ -161,9 +162,10 @@ protected:
     template <int32_t kWindowMode>
     __aicore__ inline void ProcessDefaultByWindowMode();
     __aicore__ inline void ProcessVarlenTokenTiled();
-    __aicore__ inline void ProcessFnChunk(int32_t cacheIdx, bool hasInit, int32_t seqStart, int32_t seqLen,
-                                          int32_t chunkStart, int32_t chunkLen, int32_t channelStart,
-                                          int32_t baseDim, int32_t dim);
+    __aicore__ inline void ProcessFnChunk(int32_t readCacheIdx, int32_t writeCacheIdx, bool hasInit,
+                                          int32_t seqStart, int32_t seqLen, int32_t chunkStart,
+                                          int32_t chunkLen, int32_t channelStart, int32_t baseDim,
+                                          int32_t dim);
     __aicore__ inline const CausalConv1dTilingData *GetTilingData() const;
     __aicore__ inline bool HasActivation() const;
     __aicore__ inline bool IsPackedQkvOutput() const;
@@ -174,7 +176,7 @@ protected:
     __aicore__ inline bool IsUpdateSpecDecodingEnabled() const;
 
 protected:
-    TPipe pipe;
+    AscendC::TPipe pipe;
     TBuf<QuePosition::VECIN> inBuf;
     TBuf<QuePosition::VECOUT> outBuf;
     TBuf<QuePosition::VECCALC> calcBuf;
@@ -198,18 +200,19 @@ protected:
     TEventID specWritebackMte2ToMte3Event_[2];
     TEventID specWritebackMte3ToMte2Event_[2];
 
-    GlobalTensor<T> xGm;
-    GlobalTensor<T> weightGm;
-    GlobalTensor<T> biasGm;
-    GlobalTensor<T> convStatesGm;
-    GlobalTensor<int64_t> queryStartLocGm;
-    GlobalTensor<int64_t> cacheIndicesGm;
-    GlobalTensor<int64_t> initialStateModeGm;
-    GlobalTensor<int64_t> numAcceptedTokensGm;
-    GlobalTensor<T> yGm;
-    GlobalTensor<PackedQkvT> packedQkvYGm;
-    GlobalTensor<int32_t> initStateSyncGm_;
-    GlobalTensor<T> initStateWorkspaceGm_;
+    AscendC::GlobalTensor<T> xGm;
+    AscendC::GlobalTensor<T> weightGm;
+    AscendC::GlobalTensor<T> biasGm;
+    AscendC::GlobalTensor<T> convStatesGm;
+    AscendC::GlobalTensor<T> convStatesOutGm;
+    AscendC::GlobalTensor<int64_t> queryStartLocGm;
+    AscendC::GlobalTensor<int64_t> cacheIndicesGm;
+    AscendC::GlobalTensor<int64_t> initialStateModeGm;
+    AscendC::GlobalTensor<int64_t> numAcceptedTokensGm;
+    AscendC::GlobalTensor<T> yGm;
+    AscendC::GlobalTensor<PackedQkvT> packedQkvYGm;
+    AscendC::GlobalTensor<int32_t> initStateSyncGm_;
+    AscendC::GlobalTensor<T> initStateWorkspaceGm_;
 
     const CausalConv1dTilingData *tilingData_{nullptr};
 };
@@ -837,7 +840,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackState(int32_t cacheIdx, int
         const int32_t tap = (width - 2) - pos;
         const int32_t slot = RetreatRingSlot(lastSlot, tap);
         const int64_t stateOffset = stateBaseOffset + static_cast<int64_t>(pos) * dim;
-        DataCopy(convStatesGm[stateOffset], ring[slot * MAX_BLOCK_DIM], baseDim);
+        DataCopy(convStatesOutGm[stateOffset], ring[slot * MAX_BLOCK_DIM], baseDim);
     }
 }
 
@@ -883,8 +886,8 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx,
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(0) * dim + channelStart;
         const int64_t dstOffset1 =
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(1) * dim + channelStart;
-        DataCopy(convStatesGm[dstOffset0], buf0, baseDim);
-        DataCopy(convStatesGm[dstOffset1], buf1, baseDim);
+        DataCopy(convStatesOutGm[dstOffset0], buf0, baseDim);
+        DataCopy(convStatesOutGm[dstOffset1], buf1, baseDim);
         SetFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
         WaitFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
     } else {
@@ -895,8 +898,8 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx,
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(0) * dim + channelStart;
         const int64_t dstOffset1 =
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(1) * dim + channelStart;
-        DataCopy(convStatesGm[dstOffset0], buf0, baseDim);
-        DataCopy(convStatesGm[dstOffset1], buf0, baseDim);
+        DataCopy(convStatesOutGm[dstOffset0], buf0, baseDim);
+        DataCopy(convStatesOutGm[dstOffset1], buf0, baseDim);
         SetFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
         WaitFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
     }
@@ -924,7 +927,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx,
 
         const int64_t dstOffset =
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(keep + t) * dim + channelStart;
-        DataCopy(convStatesGm[dstOffset], currBuf, baseDim);
+        DataCopy(convStatesOutGm[dstOffset], currBuf, baseDim);
         SetFlag<HardEvent::MTE3_MTE2>(specWritebackMte3ToMte2Event_[curr]);
     }
 

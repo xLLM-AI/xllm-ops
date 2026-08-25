@@ -102,7 +102,7 @@ extern "C" __global__ __aicore__ void mega_gdn_mtp_decode(
     GM_ADDR workspace,
     GM_ADDR tiling) {
 #if defined(PTO_NPU_ARCH_A5)
-  KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+  KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
 #else
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
 #endif

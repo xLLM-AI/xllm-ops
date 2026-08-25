@@ -21,6 +21,33 @@ constexpr int32_t kMaxConvDim =
     (2 * kMaxNumKHeads + kMaxNumVHeads) * kHeadDim;
 constexpr int32_t kQkGroupCacheSequenceLength = 9;
 
+#if defined(PTO_NPU_ARCH_A5)
+// Kept for mega_gdn_draft_decode, which shares this header and still uses its
+// existing AIV-only software barrier. mega_gdn_mtp_decode does not call it.
+constexpr uint32_t kSoftSyncUbAddress = 188 * 1024;
+
+#if defined(__DAV_VEC__) || defined(__DAV_C220_VEC__) || \
+    defined(__DAV_C310_VEC__)
+AICORE PTO_INLINE void SyncAllAivSoft(GM_ADDR sync_workspace,
+                                      int32_t used_aiv_cores,
+                                      int32_t aiv_index) {
+  pipe_barrier(PIPE_ALL);
+  pto::SYNCALL_SOFT_AIV_BARRIER(
+      reinterpret_cast<__gm__ int32_t*>(sync_workspace),
+      reinterpret_cast<__ubuf__ int32_t*>(kSoftSyncUbAddress),
+      used_aiv_cores,
+      aiv_index);
+  pipe_barrier(PIPE_ALL);
+}
+#endif
+
+AICORE PTO_INLINE void SyncAllMixA5() {
+  // Match the validated PTO MegaGDN A5 protocol: each AIC gathers its two
+  // paired AIVs, all AICs enter the hardware barrier, then release both AIVs.
+  pto::SYNCALL<pto::SyncCoreType::Mix>();
+}
+#endif
+
 namespace ub_layout {
 
 // All values are byte offsets in UB. The regions are intentionally reused
@@ -1276,7 +1303,7 @@ AICORE PTO_INLINE void Run(
   TASSIGN(deferred_z_half, kRunDeferredZHalf);
 
 #if defined(__DAV_VEC__) || defined(__DAV_C220_VEC__)
-#if defined(PTO_NPU_ARCH_A2A3)
+#if defined(PTO_NPU_ARCH_A2A3) || defined(PTO_NPU_ARCH_A5)
   const auto cid = get_block_idx();
   const auto vid = get_subblockid();
   set_mask_norm();
@@ -1306,16 +1333,22 @@ AICORE PTO_INLINE void Run(
       conv_state_stride,
       vector_core_idx,
       vector_core_count);
+#endif
 
   // Conv output is a GM hand-off between different channel/head owners.
+#if defined(PTO_NPU_ARCH_A5)
+  SyncAllMixA5();
+#elif defined(__DAV_VEC__) || defined(__DAV_C220_VEC__)
   mega_gdn_decode_pto::SyncAllAiv();
+#endif
 
+#if defined(__DAV_VEC__) || defined(__DAV_C220_VEC__)
 #if defined(PTO_NPU_ARCH_A5)
   // Phase 2: each owner keeps one complete FP32 state in UB for all S steps.
   // Key 208 assigns all value heads in one Q/K group to one owner. A5 key 308
   // assigns heads 0/1 to the group owner and head 2 to a singleton owner.
-  // With 56 AIVs, eight singleton owners process a second group; with 64 AIVs,
-  // every singleton has its own owner. Hosts with more than 64 AIVs launch 64.
+  // With the A5 1:2 MIX geometry, 28 AICs launch 56 AIVs, so eight singleton
+  // owners process a second group.
   static_assert(!UseQkGroupCache || SpeculativeTokens == 8);
   const int32_t total_heads = batch_size * num_v_heads;
   const int32_t qk_group_count = batch_size * num_k_heads;
