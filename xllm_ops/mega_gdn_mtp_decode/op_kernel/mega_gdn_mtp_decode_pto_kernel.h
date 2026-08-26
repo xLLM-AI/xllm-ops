@@ -1741,6 +1741,14 @@ AICORE PTO_INLINE void Run(
     }
   }
 #endif
+
+  // Publish output and checkpoint stores before the next MTP invocation can
+  // consume the updated Conv/SSM state.
+#if defined(PTO_NPU_ARCH_A5)
+  SyncAllMixA5();
+#elif defined(__DAV_VEC__) || defined(__DAV_C220_VEC__)
+  mega_gdn_decode_pto::SyncAllAiv();
+#endif
 }
 
 }  // namespace mega_gdn_mtp_decode_pto
