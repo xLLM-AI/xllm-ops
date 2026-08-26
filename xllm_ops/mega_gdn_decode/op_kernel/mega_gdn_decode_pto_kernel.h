@@ -1568,6 +1568,9 @@ AICORE PTO_INLINE void Run(
     }
 #endif
   }
+  // Publish all output and persistent-state stores before the next decode
+  // invocation can consume the in-place Conv/SSM caches.
+  mega_gdn_decode_pto::SyncAllAiv();
 #endif
 }
 
