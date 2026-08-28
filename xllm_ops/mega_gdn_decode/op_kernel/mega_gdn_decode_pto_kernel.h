@@ -472,6 +472,7 @@ AICORE PTO_INLINE void NormalizeQk128(
 }
 
 constexpr uint16_t kSyncAivOnlyFlag = 14;
+constexpr uint16_t kStatePublishAivFlag = 13;
 constexpr uint16_t kSyncModeShift = 4;
 constexpr uint16_t kSyncFlagShift = 8;
 
@@ -489,6 +490,18 @@ AICORE PTO_INLINE void SyncAllAiv()
 #else
     ffts_cross_core_sync(PIPE_MTE3, GetFftsMessage(0, kSyncAivOnlyFlag));
     wait_flag_dev(kSyncAivOnlyFlag);
+#endif
+}
+
+AICORE PTO_INLINE void SyncAllAivStatePublish()
+{
+    pipe_barrier(PIPE_ALL);
+#if defined(PTO_NPU_ARCH_A5)
+    SYNCALL<pto::SyncCoreType::AIVOnly>();
+#else
+    ffts_cross_core_sync(
+        PIPE_MTE3, GetFftsMessage(0, kStatePublishAivFlag));
+    wait_flag_dev(kStatePublishAivFlag);
 #endif
 }
 
@@ -1570,7 +1583,7 @@ AICORE PTO_INLINE void Run(
   }
   // Publish all output and persistent-state stores before the next decode
   // invocation can consume the in-place Conv/SSM caches.
-  mega_gdn_decode_pto::SyncAllAiv();
+  mega_gdn_decode_pto::SyncAllAivStatePublish();
 #endif
 }
 

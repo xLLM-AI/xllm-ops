@@ -13,6 +13,7 @@ using mega_gdn_decode_pto::TileUbDataDN;
 using mega_gdn_decode_pto::TileUbDataND;
 
 constexpr int32_t kHeadDim = 128;
+constexpr uint16_t kStatePublishAivFlag = 13;
 constexpr int32_t kSsmHeadElements = kHeadDim * kHeadDim;
 constexpr int32_t kMaxBatchSize = 32;
 constexpr int32_t kMaxNumKHeads = 16;
@@ -45,6 +46,17 @@ AICORE PTO_INLINE void SyncAllMixA5() {
   // Match the validated PTO MegaGDN A5 protocol: each AIC gathers its two
   // paired AIVs, all AICs enter the hardware barrier, then release both AIVs.
   pto::SYNCALL<pto::SyncCoreType::Mix>();
+}
+#endif
+
+#if !defined(PTO_NPU_ARCH_A5) && \
+    (defined(__DAV_VEC__) || defined(__DAV_C220_VEC__))
+AICORE PTO_INLINE void SyncAllAivStatePublish() {
+  pipe_barrier(PIPE_ALL);
+  ffts_cross_core_sync(
+      PIPE_MTE3,
+      mega_gdn_decode_pto::GetFftsMessage(0, kStatePublishAivFlag));
+  wait_flag_dev(kStatePublishAivFlag);
 }
 #endif
 
@@ -1742,12 +1754,13 @@ AICORE PTO_INLINE void Run(
   }
 #endif
 
-  // Publish output and checkpoint stores before the next MTP invocation can
-  // consume the updated Conv/SSM state.
+  // Keep persistent-state publication separate from the Conv-to-GDN hand-off
+  // barrier. Reusing one device flag for both phases can mix barrier generations
+  // under graph replay.
 #if defined(PTO_NPU_ARCH_A5)
   SyncAllMixA5();
 #elif defined(__DAV_VEC__) || defined(__DAV_C220_VEC__)
-  mega_gdn_decode_pto::SyncAllAiv();
+  SyncAllAivStatePublish();
 #endif
 }
 
