@@ -449,7 +449,7 @@ template <typename SrcT, typename DstT>
 AICORE inline void mega_prepare_solve_constants(
     __gm__ SrcT *src, __gm__ DstT *dst, int64_t element_count)
 {
-#if defined(__DAV_C220_VEC__)
+#if defined(__DAV_C220_VEC__) || defined(__DAV_C310_VEC__)
     static_assert(!std::is_same_v<SrcT, DstT>,
                   "mega_prepare_solve_constants requires distinct types.");
     if (get_subblockid() != 0) return;
@@ -937,6 +937,17 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
 
     GDN_STAGE_SYNC();
 
+#ifdef MEGA_CHUNK_GDN_A5_DUMP_SOLVE_OUTPUT
+#if defined(__DAV_C310_VEC__)
+    mk_solve::TriInvA5DumpBsndBuffer<ComputeT, C>(
+        reinterpret_cast<__gm__ ComputeT *>(o_ptr),
+        reinterpret_cast<__gm__ ComputeT *>(A_inv_ptr), num_matrices,
+        static_cast<uint32_t>(H),
+        reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr));
+#endif
+    GDN_STAGE_SYNC();
+    return;
+#endif
 
     GDN_STAGE_SYNC();
 #ifdef MEGA_STOP_AFTER_SYNC_BEFORE_WY

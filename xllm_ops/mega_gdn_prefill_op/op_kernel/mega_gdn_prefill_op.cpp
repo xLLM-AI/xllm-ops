@@ -29,11 +29,87 @@ struct MegaGdnPrefillOpKernelTilingData {
 #define MEGA_CHUNK_GDN_HELPERS_ONLY
 #define MEGA_CHUNK_GDN_HELPER_NAMESPACE qwen35_e2e_pto
 #define MEGA_GDN_BUILD_REV 2026082515
+
+// A5 solve experiments.  The default remains the validated fp32 hybrid.
+// Override this definition for candidate builds only:
+//   0: Cube diagonals + fp32 AIV off-diagonal recurrence (baseline)
+//   1: Cube diagonals with fp16 recurrent state + fp32 AIV off-diagonal
+//   2: blocked Cube sums with fp16 Cube/AIV block handoffs
+//   3: resident full-Cube solve with one final fp16 handoff
+//   4: full-matrix Cube-resident Neumann solve with one final packed handoff
+//   5: megagdn-pto recursive Cube solve with direct final GM store
+//   6: megagdn-pto recursive Cube solve with packed AIV layout conversion
+//   7: variant 6 with a true fp32 final Cube-to-AIV handoff
+//   8: variant 7 identity-publication diagnostic
+//   9: variant 8 with an AIV BSND-scatter bypass diagnostic
+//  10: direct recursive Cube solve with a fused MIX completion handoff
+//  11: direct BSND recursive Cube solve with fp32 final handoff
+//  12: variant 11 with the solve buffer copied to the public output
+//  13: variant 11 with one fp32-accumulated Cube Newton refinement
+//  14: variant 13 with the final BSND scatter striped across both AIVs
+#ifndef MEGA_GDN_A5_SOLVE_VARIANT
+#define MEGA_GDN_A5_SOLVE_VARIANT 0
+#endif
+
 #if defined(GDN_PREFILL_ARCH_A5)
 #define MEGA_CHUNK_GDN_A5_DUAL_AIV_SOLVE
+#if MEGA_GDN_A5_SOLVE_VARIANT != 4 && MEGA_GDN_A5_SOLVE_VARIANT != 5 && \
+    MEGA_GDN_A5_SOLVE_VARIANT != 6 && MEGA_GDN_A5_SOLVE_VARIANT != 7 && \
+    MEGA_GDN_A5_SOLVE_VARIANT != 8 && MEGA_GDN_A5_SOLVE_VARIANT != 9 && \
+    MEGA_GDN_A5_SOLVE_VARIANT != 10 && MEGA_GDN_A5_SOLVE_VARIANT != 11 && \
+    MEGA_GDN_A5_SOLVE_VARIANT != 12 && MEGA_GDN_A5_SOLVE_VARIANT != 13 && \
+    MEGA_GDN_A5_SOLVE_VARIANT != 14
 #define MEGA_CHUNK_GDN_A5_BLOCKED_CUBE_SOLVE
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT < 2
 #define MEGA_CHUNK_GDN_A5_CUBE_DIAG_AIV_OFFDIAG
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 1
+#define MEGA_CHUNK_GDN_A5_FP16_INTERMEDIATE
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 0
 #define MEGA_CHUNK_GDN_A5_CUBE_FP32_HANDOFF
+#define MEGA_CHUNK_GDN_A5_SKIP_DIAGONAL_REFINEMENT
+#define MEGA_CHUNK_GDN_A5_VECTOR_OFFDIAG
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 3
+#define MEGA_CHUNK_GDN_A5_RESIDENT_FULL_CUBE_SOLVE
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 4
+#define MEGA_CHUNK_GDN_A5_FULL_MATRIX_CUBE_SOLVE
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 5
+#define MEGA_CHUNK_GDN_A5_REFERENCE_RECURSIVE_CUBE_SOLVE
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 10
+#define MEGA_CHUNK_GDN_A5_REFERENCE_RECURSIVE_CUBE_SYNC_SOLVE
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 11 || MEGA_GDN_A5_SOLVE_VARIANT == 12 || \
+    MEGA_GDN_A5_SOLVE_VARIANT == 13 || MEGA_GDN_A5_SOLVE_VARIANT == 14
+#define MEGA_CHUNK_GDN_A5_DIRECT_RECURSIVE_CUBE_FP32_SOLVE
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 13 || MEGA_GDN_A5_SOLVE_VARIANT == 14
+#define MEGA_CHUNK_GDN_A5_CUBE_NEWTON_REFINE
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 14
+#define MEGA_CHUNK_GDN_A5_DUAL_FP32_SCATTER
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 12
+#define MEGA_CHUNK_GDN_A5_DUMP_SOLVE_OUTPUT
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 6
+#define MEGA_CHUNK_GDN_A5_PACKED_RECURSIVE_CUBE_SOLVE
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 7 || MEGA_GDN_A5_SOLVE_VARIANT == 8 || \
+    MEGA_GDN_A5_SOLVE_VARIANT == 9
+#define MEGA_CHUNK_GDN_A5_PACKED_RECURSIVE_CUBE_FP32_SOLVE
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 8 || MEGA_GDN_A5_SOLVE_VARIANT == 9
+#define MEGA_CHUNK_GDN_A5_PACKED_RECURSIVE_IDENTITY_PROBE
+#endif
+#if MEGA_GDN_A5_SOLVE_VARIANT == 9
+#define MEGA_CHUNK_GDN_A5_PACKED_RECURSIVE_BSND_SCATTER_PROBE
+#endif
 #endif
 #if defined(GDN_PREFILL_ARCH_A2A3)
 #define MEGA_CHUNK_GDN_PRECOMPUTED_SOLVE_AUX
@@ -51,11 +127,27 @@ struct MegaGdnPrefillOpKernelTilingData {
 #undef MEGA_CHUNK_GDN_HELPER_NAMESPACE
 #undef MEGA_CHUNK_GDN_HELPERS_ONLY
 #if defined(GDN_PREFILL_ARCH_A5)
+#undef MEGA_CHUNK_GDN_A5_DUAL_FP32_SCATTER
+#undef MEGA_CHUNK_GDN_A5_CUBE_NEWTON_REFINE
+#undef MEGA_CHUNK_GDN_A5_DUMP_SOLVE_OUTPUT
+#undef MEGA_CHUNK_GDN_A5_DIRECT_RECURSIVE_CUBE_FP32_SOLVE
+#undef MEGA_CHUNK_GDN_A5_REFERENCE_RECURSIVE_CUBE_SYNC_SOLVE
+#undef MEGA_CHUNK_GDN_A5_PACKED_RECURSIVE_BSND_SCATTER_PROBE
+#undef MEGA_CHUNK_GDN_A5_PACKED_RECURSIVE_IDENTITY_PROBE
+#undef MEGA_CHUNK_GDN_A5_PACKED_RECURSIVE_CUBE_FP32_SOLVE
+#undef MEGA_CHUNK_GDN_A5_PACKED_RECURSIVE_CUBE_SOLVE
+#undef MEGA_CHUNK_GDN_A5_REFERENCE_RECURSIVE_CUBE_SOLVE
+#undef MEGA_CHUNK_GDN_A5_FULL_MATRIX_CUBE_SOLVE
+#undef MEGA_CHUNK_GDN_A5_RESIDENT_FULL_CUBE_SOLVE
+#undef MEGA_CHUNK_GDN_A5_SKIP_DIAGONAL_REFINEMENT
+#undef MEGA_CHUNK_GDN_A5_VECTOR_OFFDIAG
+#undef MEGA_CHUNK_GDN_A5_FP16_INTERMEDIATE
 #undef MEGA_CHUNK_GDN_A5_CUBE_FP32_HANDOFF
 #undef MEGA_CHUNK_GDN_A5_CUBE_DIAG_AIV_OFFDIAG
 #undef MEGA_CHUNK_GDN_A5_BLOCKED_CUBE_SOLVE
 #undef MEGA_CHUNK_GDN_A5_DUAL_AIV_SOLVE
 #endif
+#undef MEGA_GDN_A5_SOLVE_VARIANT
 #undef GDN_PUBLIC_DTYPE
 #undef GDN_COMPUTE_DTYPE
 
