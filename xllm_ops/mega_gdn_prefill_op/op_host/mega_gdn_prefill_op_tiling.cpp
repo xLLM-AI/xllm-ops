@@ -19,8 +19,6 @@ constexpr uint64_t kFloatBytes = 4;
 constexpr uint64_t kHWorkspacePadBytes = 8192;
 constexpr uint64_t kHWorkspaceAlignmentBytes = 16 * 1024 * 1024;
 constexpr uint64_t kHWorkspaceMaxPhaseBytes = 8 * 1024 * 1024;
-constexpr uint32_t kA2A3VectorTaskCount = 40;
-constexpr uint32_t kA5VectorTaskCount = 56;
 constexpr uint32_t kPreferredBaseDim = 3072;
 constexpr uint32_t kPackedHeadDim = 128;
 
@@ -31,7 +29,6 @@ enum class GdnTargetArch : uint32_t {
 
 struct GdnArchPolicy {
     GdnTargetArch target;
-    uint32_t vector_task_count;
 };
 
 bool ResolveArchPolicy(platform_ascendc::SocVersion soc_version,
@@ -43,10 +40,10 @@ bool ResolveArchPolicy(platform_ascendc::SocVersion soc_version,
     switch (soc_version) {
         case platform_ascendc::SocVersion::ASCEND910B:
         case platform_ascendc::SocVersion::ASCEND910_93:
-            *policy = {GdnTargetArch::A2A3, kA2A3VectorTaskCount};
+            *policy = {GdnTargetArch::A2A3};
             return true;
         case platform_ascendc::SocVersion::ASCEND950:
-            *policy = {GdnTargetArch::A5, kA5VectorTaskCount};
+            *policy = {GdnTargetArch::A5};
             return true;
         default:
             return false;
@@ -85,7 +82,8 @@ struct ConvChannelTiling {
 };
 
 ConvChannelTiling ResolveConvChannelTiling(uint32_t conv_dim,
-                                           const GdnArchPolicy &policy)
+                                           const GdnArchPolicy &policy,
+                                           uint32_t vector_task_count)
 {
     if (policy.target != GdnTargetArch::A5) {
         const uint32_t base_dim =
@@ -93,14 +91,15 @@ ConvChannelTiling ResolveConvChannelTiling(uint32_t conv_dim,
         return {base_dim, CeilDiv(conv_dim, base_dim)};
     }
 
-    // A5 exposes 56 AIV tasks for the 28 MIX blocks. Select the smallest
-    // factor of 56 that keeps a channel tile within the causal-conv UB limit.
-    // Keeping the channel count a factor of 56 lets the remaining dimension
-    // use every AIV, while 128-element alignment keeps Q/K head normalization
-    // boundaries intact. For V24/K8 this changes 3072+2048 on 40 tasks into
-    // two equal 2560-channel tiles on 2*28 tasks.
-    constexpr uint32_t kA5ChannelCounts[] = {1, 2, 4, 7, 8, 14, 28, 56};
-    for (const uint32_t channel_count : kA5ChannelCounts) {
+    // Select the smallest factor of the schedulable AIV count that keeps a
+    // channel tile within the causal-conv UB limit. This preserves a complete
+    // AIV grid on different core-count SKUs, while packed-head alignment keeps
+    // Q/K head-normalization boundaries intact.
+    for (uint32_t channel_count = 1;
+         channel_count <= vector_task_count; ++channel_count) {
+        if (vector_task_count % channel_count != 0) {
+            continue;
+        }
         uint32_t base_dim = CeilDiv(conv_dim, channel_count);
         base_dim = CeilDiv(base_dim, kPackedHeadDim) * kPackedHeadDim;
         if (base_dim > kPreferredBaseDim ||
@@ -212,11 +211,22 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context)
     if (!ResolveArchPolicy(platform.GetSocVersion(), &arch_policy)) {
         return ge::GRAPH_FAILED;
     }
-    uint32_t block_dim = platform.GetCoreNumAic();
-    if (block_dim == 0) {
-        block_dim = platform.GetCoreNumAiv();
+    const uint32_t aic_core_count = platform.GetCoreNumAic();
+    const uint32_t aiv_core_count = platform.GetCoreNumAiv();
+    if (aic_core_count == 0 || aiv_core_count == 0) {
+        return ge::GRAPH_FAILED;
     }
-    block_dim = std::max<uint32_t>(block_dim, 1);
+    const uint32_t block_dim = aic_core_count;
+    // On A5, the 1:2 mixed-kernel launch schedules one alternating AIV
+    // sub-block for each AIC block, so the number of active vector tasks is
+    // the mixed block count rather than the platform's physical AIV count.
+    const uint32_t vector_task_count =
+        arch_policy.target == GdnTargetArch::A5
+            ? std::min(aiv_core_count, aic_core_count)
+            : aiv_core_count;
+    if (vector_task_count == 0) {
+        return ge::GRAPH_FAILED;
+    }
 
     const auto *mixed_storage = context->GetInputShape(MIXED_QKV_INDEX);
     const auto *b_storage = context->GetInputShape(B_INDEX);
@@ -334,12 +344,12 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context)
     }
 
     const ConvChannelTiling conv_channel_tiling =
-        ResolveConvChannelTiling(conv_dim, arch_policy);
+        ResolveConvChannelTiling(conv_dim, arch_policy, vector_task_count);
     const uint32_t base_dim = conv_channel_tiling.base_dim;
     const uint32_t base_dim_count = conv_channel_tiling.base_dim_count;
     const uint32_t token_core_budget =
         std::max<uint32_t>(
-            arch_policy.vector_task_count / base_dim_count, 1);
+            vector_task_count / base_dim_count, 1);
     const uint32_t token_block_size =
         CeilDiv(tokens, token_core_budget);
     const uint32_t token_block_count =
@@ -366,6 +376,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context)
 
     MegaGdnPrefillOpTilingData tiling;
     tiling.set_block_dim(block_dim);
+    tiling.set_vector_task_count(vector_task_count);
     tiling.set_target_arch(static_cast<uint32_t>(arch_policy.target));
     tiling.set_num_matrices(num_matrices);
     tiling.set_batch_size(batch_size);

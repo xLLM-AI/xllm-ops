@@ -7,6 +7,7 @@
 namespace optiling {
 BEGIN_TILING_DATA_DEF(MegaGdnPrefillOpTilingData)
 TILING_DATA_FIELD_DEF(uint32_t, block_dim);
+TILING_DATA_FIELD_DEF(uint32_t, vector_task_count);
 TILING_DATA_FIELD_DEF(uint32_t, target_arch);
 TILING_DATA_FIELD_DEF(uint32_t, num_matrices);
 TILING_DATA_FIELD_DEF(uint32_t, batch_size);

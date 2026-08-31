@@ -4,6 +4,7 @@
 
 struct MegaGdnPrefillOpKernelTilingData {
     uint32_t block_dim;
+    uint32_t vector_task_count;
     uint32_t target_arch;
     uint32_t num_matrices;
     uint32_t batch_size;
@@ -56,7 +57,7 @@ struct MegaGdnPrefillOpKernelTilingData {
 //  21: variant 16 with A5 per-chunk H/O producer-consumer overlap
 //  22: variant 16 with a full-chunk 2x64 recursive solve
 #ifndef MEGA_GDN_A5_SOLVE_VARIANT
-#define MEGA_GDN_A5_SOLVE_VARIANT 22
+#define MEGA_GDN_A5_SOLVE_VARIANT 16
 #endif
 
 #if defined(GDN_PREFILL_ARCH_A5)
@@ -371,7 +372,9 @@ extern "C" __global__ __aicore__ void GDN_KERNEL_NAME(
 #endif
     gdn_prefill_frontend::PrepareGate<GDN_PREFILL_COMPUTE_DTYPE>(
         a_ptr, b_ptr, a_log_ptr, dt_bias_ptr, g_ptr, beta_compute_ptr,
-        total_tokens, static_cast<int32_t>(num_heads), round_g_to_bf16);
+        total_tokens, static_cast<int32_t>(num_heads),
+        static_cast<int32_t>(tiling_data.vector_task_count),
+        round_g_to_bf16);
     qwen35_e2e_pto::mega_prepare_solve_constants<
         bfloat16_t, GDN_PREFILL_COMPUTE_DTYPE>(
         reinterpret_cast<__gm__ bfloat16_t *>(minus_identity_ptr),

@@ -517,20 +517,21 @@ __aicore__ inline int32_t VectorTaskId()
 template <typename BetaT = bfloat16_t>
 __aicore__ inline void PrepareGate(GM_ADDR aPtr, GM_ADDR bPtr, GM_ADDR aLogPtr, GM_ADDR dtBiasPtr,
                                    GM_ADDR gPtr, GM_ADDR betaPtr, int64_t totalTokens,
-                                   int32_t numHeads, bool roundGToBf16)
+                                   int32_t numHeads, int32_t vectorTaskCount,
+                                   bool roundGToBf16)
 {
 #if defined(__DAV_C220_VEC__) || defined(__DAV_VEC__)
     static_assert(AscendC::IsSameType<BetaT, half>::value ||
                       AscendC::IsSameType<BetaT, bfloat16_t>::value,
                   "Gate beta output supports FP16 or BF16.");
-    if (numHeads <= 0 || numHeads > 64) {
+    if (numHeads <= 0 || numHeads > 64 || vectorTaskCount <= 0) {
         return;
     }
     constexpr int32_t kVectorWidth = 64;
-    constexpr int32_t kVectorTasks = 40;
     constexpr int32_t kRowsPerTile = 16;
     constexpr int32_t kTileElements = kRowsPerTile * kVectorWidth;
 
+    const int32_t taskId = VectorTaskId();
     AscendC::TPipe pipe;
     AscendC::TBuf<AscendC::TPosition::VECCALC> ub;
     pipe.InitBuffer(ub, 98304);
@@ -588,8 +589,8 @@ __aicore__ inline void PrepareGate(GM_ADDR aPtr, GM_ADDR bPtr, GM_ADDR aLogPtr, 
     }
     AscendC::PipeBarrier<PIPE_V>();
 
-    const int32_t taskId = VectorTaskId();
-    const int64_t rowsPerTask = (totalTokens + kVectorTasks - 1) / kVectorTasks;
+    const int64_t rowsPerTask =
+        (totalTokens + vectorTaskCount - 1) / vectorTaskCount;
     const int64_t taskStart = static_cast<int64_t>(taskId) * rowsPerTask;
     const int64_t taskEnd = (taskStart + rowsPerTask < totalTokens)
                                 ? taskStart + rowsPerTask
