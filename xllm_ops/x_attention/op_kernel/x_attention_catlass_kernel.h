@@ -16,11 +16,24 @@ limitations under the License.
 #ifndef X_ATTN_CATLASS_KERNEL_H
 #define X_ATTN_CATLASS_KERNEL_H
 
+// [catlass arch guard]
+// The catlass tile-copy forwarding headers (e.g. gemm/tile/copy_gm_to_l1.hpp)
+// dispatch ONLY when CATLASS_ARCH is explicitly defined as 2201 (AtlasA2/A3) or
+// 3510 (Ascend950/A5); otherwise CopyGmToL1/CopyL1ToL0A/... templates are never
+// defined. The kernel(device) translation unit is NOT given -DCATLASS_ARCH
+// (host-only inject), but the toolchain injects __NPU_ARCH__ (2201 for A2/A3,
+// 3510 for A5). Derive CATLASS_ARCH from it HERE, before ANY catlass include,
+// so this fix works on A3 without affecting the already-validated A5 path.
+#if !defined(CATLASS_ARCH) && defined(__NPU_ARCH__)
+#if (__NPU_ARCH__ == 2201) || (__NPU_ARCH__ == 3510)
+#define CATLASS_ARCH __NPU_ARCH__
+#endif
+#endif
+
 #include "catlass/arch/arch.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
 #include "catlass/arch/resource.hpp"
 #include "catlass/catlass.hpp"
-#include "catlass/debug.hpp"
 #include "catlass/epilogue/block/block_epilogue.hpp"
 #include "catlass/epilogue/dispatch_policy.hpp"
 #include "catlass/gemm/block/block_mmad.hpp"

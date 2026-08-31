@@ -35,10 +35,11 @@ struct mmad<ArchTag, ElementA, ElementB, AccDTypeC, false> {
                     uint32_t kPartActual,
                     bool initC)
     {
-        AscendC::Mmad(l0cTensor,
-                      l0aTensor,
-                      l0bTensor,
-                      AscendC::MmadParams(mTileActual, nTileActual, kPartActual, 0, false, initC));
+        AscendC::MmadParams mmadParams(mTileActual, nTileActual, kPartActual, 0, false, initC);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        mmadParams.disableGemv = true;
+#endif
+        AscendC::Mmad(l0cTensor, l0aTensor, l0bTensor, mmadParams);
     };
 
     __aicore__ mmad(AscendC::LocalTensor<AccDTypeC> l0cTensor,
@@ -53,11 +54,11 @@ struct mmad<ArchTag, ElementA, ElementB, AccDTypeC, false> {
         AscendC::LocalTensor<ElementA> biasTensor;
         biasTensor.InitBuffer(biasBt, mTileActual);
         biasTensor.address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::C2);
-        AscendC::Mmad(l0cTensor,
-                      l0aTensor,
-                      l0bTensor,
-                      biasTensor,
-                      AscendC::MmadParams(mTileActual, nTileActual, kPartActual, 0, false, initC));
+        AscendC::MmadParams mmadParams(mTileActual, nTileActual, kPartActual, 0, false, initC);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        mmadParams.disableGemv = true;
+#endif
+        AscendC::Mmad(l0cTensor, l0aTensor, l0bTensor, biasTensor, mmadParams);
     };
 };
 

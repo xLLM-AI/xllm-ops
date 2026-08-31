@@ -41,13 +41,245 @@ constexpr int32_t NUM2 = 2;
 constexpr int32_t NUM3 = 3;
 constexpr int32_t NUM4 = 4;
 constexpr int32_t UNSHARED_Q_TILE = 128;
-constexpr int32_t UNSHARED_KV_TILE = 256;
-constexpr uint32_t Q_S_BLOCK_TILE = 128;
-constexpr uint32_t BLOCK_SIZE = 128;
-constexpr int32_t WORKSPACE_BLOCK_SIZE_DB = 128 * 128 * 4; // row * col * blockStackNum
-constexpr int32_t UNSHARED_WORKSPACE_BLOCK_SIZE_DB = 128 * 256;   // unshared no pinpong
+constexpr int32_t Q_S_BLOCK_TILE = 128;
+constexpr int32_t BLOCK_SIZE = 128;
 constexpr int32_t FLOAT_BLOCK_SIZE = 8;
 constexpr int32_t SCALE_VALUE_ATTR_INDEX = 0;
+
+#if defined(CATLASS_ARCH) && (CATLASS_ARCH == 3510)
+// ============================================================================
+// A5(Ascend950/DAV_3510) tiling implementation
+// ============================================================================
+constexpr int32_t UNSHARED_KV_TILE = 128;
+constexpr int32_t COMBINE_MAX_ROW_NUM_PER_LOOP = 64;
+
+class TilingXAttentionFunc {
+  public:
+    explicit TilingXAttentionFunc(gert::TilingContext* tiling_context)
+        : tiling_context_(tiling_context) {}
+    ge::graphStatus RunTiling();
+  private:
+    uint64_t GetTilingKey() const;
+  private:
+    XAttentionTilingData tiling_data_;
+    gert::TilingContext* tiling_context_ = nullptr;
+    uint32_t sharedBlockDim = 0;
+    uint32_t unsharedBlockDim = 0;
+    uint32_t cubeCoreNum;
+    uint32_t vecCoreNum;
+    uint64_t ubSize;
+    ge::graphStatus FillBasicTilingData();
+    void FillSharedSplitCoreTilingData();
+    void FillUnsharedSplitCoreTilingData();
+    void FillCombineScaleTilingData();
+    void BalanceAicore();
+    void SetWorkspaces();
+};
+
+
+void TilingXAttentionFunc::BalanceAicore()
+{
+  // Support dynamic calculation based on the amount of computation in the future.
+  sharedBlockDim = cubeCoreNum / 2;
+  unsharedBlockDim = cubeCoreNum - sharedBlockDim;
+  return;
+}
+
+void TilingXAttentionFunc::FillUnsharedSplitCoreTilingData()
+{
+  auto kvBatchStride = tiling_data_.baseInfo.get_beamSize() *
+                       tiling_data_.baseInfo.get_kvHeads() *
+                       tiling_data_.baseInfo.get_maxDecodeStep() *
+                       tiling_data_.baseInfo.get_headDim();
+  tiling_data_.unsharedInfo.set_kvBatchStride(kvBatchStride);
+
+  tiling_data_.unsharedInfo.set_usedCoreNum(unsharedBlockDim);
+  auto groupSize = tiling_data_.baseInfo.get_groupSize();
+  uint32_t totalGroupCount = tiling_data_.baseInfo.get_beamSize() * tiling_data_.baseInfo.get_kvHeads();
+  uint32_t maxGroupCountPerLoop = std::min(UNSHARED_Q_TILE / groupSize, UNSHARED_KV_TILE / tiling_data_.baseInfo.get_maxDecodeStep());
+  while (maxGroupCountPerLoop > 1 && (totalGroupCount % maxGroupCountPerLoop != 0)) {
+    --maxGroupCountPerLoop;
+  }
+  tiling_data_.unsharedInfo.set_groupCountPerLoop(maxGroupCountPerLoop);
+  uint32_t perBatchTaskNum = totalGroupCount / maxGroupCountPerLoop;
+  uint32_t totalTaskNum = perBatchTaskNum * tiling_data_.baseInfo.get_batchSize();
+  uint32_t perCoreTaskNum = (totalTaskNum + unsharedBlockDim - 1) / unsharedBlockDim;
+  tiling_data_.unsharedInfo.set_perBatchTaskNum(perBatchTaskNum);
+  tiling_data_.unsharedInfo.set_perCoreTaskNum(perCoreTaskNum);
+  tiling_data_.unsharedInfo.set_totalTaskNum(totalTaskNum);
+}
+
+void TilingXAttentionFunc::SetWorkspaces()
+{
+  auto platform_info =
+      platform_ascendc::PlatformAscendC(tiling_context_->GetPlatformInfo());
+  size_t systemWorkspaceSize = static_cast<size_t>(platform_info.GetLibApiWorkSpaceSize());
+  size_t userWorkspaceSize = 0;
+
+  auto totalTokensQ = tiling_data_.baseInfo.get_totalTokensQ();
+  auto qHeads = tiling_data_.baseInfo.get_qHeads();
+  auto headDim = tiling_data_.baseInfo.get_headDim();
+  uint64_t qOSize = totalTokensQ * qHeads * headDim * sizeof(float);
+  uint64_t sumMaxSize = totalTokensQ * qHeads * sizeof(float);
+  uint64_t sharedWorkspaceSize = qOSize + sumMaxSize * 2;
+  userWorkspaceSize = sharedWorkspaceSize * 2;
+  tiling_data_.set_qOSize(qOSize);
+  tiling_data_.set_sumMaxSize(sumMaxSize);
+  tiling_data_.set_sharedWorkspaceSize(sharedWorkspaceSize);
+
+  size_t* workspace = tiling_context_->GetWorkspaceSizes(1);
+  workspace[0] = systemWorkspaceSize + userWorkspaceSize;
+}
+
+void TilingXAttentionFunc::FillCombineScaleTilingData()
+{
+  auto totalTokensQ = tiling_data_.baseInfo.get_totalTokensQ();
+  auto headDim = tiling_data_.baseInfo.get_headDim();
+  auto qHeads = tiling_data_.baseInfo.get_qHeads();
+  int32_t rowNum = totalTokensQ * qHeads;
+  int32_t bufferNum = 2;
+  // sharedMax、sharedSum、unsharedMax、unsharedSum
+  uint64_t maxReduceUbSize = COMBINE_MAX_ROW_NUM_PER_LOOP * sizeof(float) * (bufferNum * 4 + 3);
+  uint64_t remainUbSize = ubSize - maxReduceUbSize;
+  int32_t rowPerLoop = remainUbSize / (sizeof(float) * 3 * headDim * bufferNum);
+  if (rowPerLoop > COMBINE_MAX_ROW_NUM_PER_LOOP) {
+    rowPerLoop = COMBINE_MAX_ROW_NUM_PER_LOOP;
+  }
+
+  int32_t totalTaskNum = (rowNum + rowPerLoop - 1) / rowPerLoop;
+  int32_t combineUsedCoreNum;
+  int32_t combineFormerCoreNum;
+  int32_t combineFormerTaskNum;
+  int32_t combineTailTaskNum;
+
+  if (totalTaskNum <= vecCoreNum) {
+    combineUsedCoreNum = totalTaskNum;
+    combineFormerCoreNum = 0;
+    combineFormerTaskNum = 1;
+    combineTailTaskNum = 1;
+  } else {
+    combineUsedCoreNum = vecCoreNum;
+    int32_t taskNumPerCore = totalTaskNum / combineUsedCoreNum;
+    int32_t taskNumTailPerCore = totalTaskNum % combineUsedCoreNum;
+    combineFormerCoreNum = taskNumTailPerCore;
+    combineFormerTaskNum = taskNumPerCore + 1;
+    combineTailTaskNum = taskNumPerCore;
+  }
+
+  tiling_data_.combineInfo.set_rowPerLoop(rowPerLoop);
+  tiling_data_.combineInfo.set_rowNum(rowNum);
+  tiling_data_.combineInfo.set_totalTaskNum(totalTaskNum);
+  tiling_data_.combineInfo.set_formerCoreNum(combineFormerCoreNum);
+  tiling_data_.combineInfo.set_formerTaskNum(combineFormerTaskNum);
+  tiling_data_.combineInfo.set_tailTaskNum(combineTailTaskNum);
+  tiling_data_.combineInfo.set_usedCoreNum(combineUsedCoreNum);
+}
+
+void TilingXAttentionFunc::FillSharedSplitCoreTilingData()
+{
+  tiling_data_.sharedInfo.set_usedCoreNum(sharedBlockDim);
+  auto beamSize = tiling_data_.baseInfo.get_beamSize();
+  auto qHeads = tiling_data_.baseInfo.get_qHeads();
+  auto batchSize = tiling_data_.baseInfo.get_batchSize();
+  int32_t perBatchHeadTaskNum = (beamSize + Q_S_BLOCK_TILE - 1) / Q_S_BLOCK_TILE;
+  int32_t totalTaskNum = perBatchHeadTaskNum * qHeads * batchSize;
+  int32_t perCoreTaskNum = (totalTaskNum + sharedBlockDim - 1) / sharedBlockDim;
+  tiling_data_.sharedInfo.set_totalTaskNum(totalTaskNum);
+  tiling_data_.sharedInfo.set_perBatchHeadTaskNum(perBatchHeadTaskNum);
+  tiling_data_.sharedInfo.set_perCoreTaskNum(perCoreTaskNum);
+}
+
+ge::graphStatus TilingXAttentionFunc::FillBasicTilingData()
+{
+  auto sharedBlockTableShapePtr = tiling_context_->GetOptionalInputShape(InputIndex::SHARED_BLOCK_TABLE);
+  auto unsharedBlockTableShapePtr = tiling_context_->GetOptionalInputShape(InputIndex::UNSHARED_BLOCK_TABLE);
+  bool isSharedPaged = (sharedBlockTableShapePtr != nullptr);
+  bool isUnsharedPaged = (unsharedBlockTableShapePtr != nullptr);
+
+  if (!(!isSharedPaged && isUnsharedPaged)) {
+    OP_LOGE(tiling_context_->GetNodeName(), "xAttention only support unshared_paged and not shared_paged on Ascend950.");
+    return ge::GRAPH_FAILED;
+  }
+
+  auto queryShape = tiling_context_->GetInputShape(QUERY)->GetStorageShape();
+  auto sharedKeyBlockShape = tiling_context_->GetInputShape(SHARED_KEY_BLOCK)->GetStorageShape();
+  auto unsharedKeyBlockShape = tiling_context_->GetInputShape(UNSHARED_KEY_BLOCK)->GetStorageShape();
+  auto unsharedBlockTableShape = tiling_context_->GetOptionalInputShape(UNSHARED_BLOCK_TABLE)->GetStorageShape();
+  auto sharedKvLenShape = tiling_context_->GetInputShape(SHARED_KV_LENS)->GetStorageShape();
+
+
+  int32_t totalTokensQ = queryShape.GetDim(0);
+  int32_t sharedKvTokens = sharedKeyBlockShape.GetDim(0);
+  int32_t qHeads = queryShape.GetDim(1);
+  int32_t kvHeads = sharedKeyBlockShape.GetDim(1);
+  int32_t headDim = queryShape.GetDim(2);
+  int32_t beamSize = unsharedKeyBlockShape.GetDim(1);
+  int32_t maxDecodeStep = unsharedKeyBlockShape.GetDim(3);
+  int32_t batchSize = sharedKvLenShape.GetDim(0);
+  int32_t groupSize = qHeads / kvHeads;
+
+  float scaleValue = static_cast<float>(1.0 / std::sqrt(1.0 * headDim));
+  auto attrs = tiling_context_->GetAttrs();
+  if (attrs != nullptr) {
+    const auto* attr_scale_value = attrs->GetAttrPointer<float>(SCALE_VALUE_ATTR_INDEX);
+    if (attr_scale_value != nullptr && *attr_scale_value > 0.0f) {
+      scaleValue = *attr_scale_value;
+    }
+  }
+
+  tiling_data_.baseInfo.set_batchSize(batchSize);
+  tiling_data_.baseInfo.set_beamSize(beamSize);
+  tiling_data_.baseInfo.set_qHeads(qHeads);
+  tiling_data_.baseInfo.set_kvHeads(kvHeads);
+  tiling_data_.baseInfo.set_groupSize(groupSize);
+  tiling_data_.baseInfo.set_headDim(headDim);
+  tiling_data_.baseInfo.set_scaleValue(scaleValue);
+  tiling_data_.baseInfo.set_totalTokensQ(totalTokensQ);
+  tiling_data_.baseInfo.set_sharedKvTokens(sharedKvTokens);
+  tiling_data_.baseInfo.set_maxDecodeStep(maxDecodeStep);
+  return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus TilingXAttentionFunc::RunTiling()
+{
+  // Get platform hardware information
+  auto platformInfo =
+      platform_ascendc::PlatformAscendC(tiling_context_->GetPlatformInfo());
+  cubeCoreNum = platformInfo.GetCoreNumAic();
+  vecCoreNum = platformInfo.GetCoreNumAiv();
+  platformInfo.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+
+  BalanceAicore();
+  auto ret = FillBasicTilingData();
+  if (ret != ge::GRAPH_SUCCESS) {
+    OP_LOGE(tiling_context_->GetNodeName(), "fill basic tiling failed.");
+    return ge::GRAPH_FAILED;
+  }
+
+  FillSharedSplitCoreTilingData();
+  FillUnsharedSplitCoreTilingData();
+  FillCombineScaleTilingData();
+  SetWorkspaces();
+
+  // Save tilingData
+  tiling_data_.SaveToBuffer(tiling_context_->GetRawTilingData()->GetData(),
+                            tiling_context_->GetRawTilingData()->GetCapacity());
+  tiling_context_->GetRawTilingData()->SetDataSize(tiling_data_.GetDataSize());
+  tiling_context_->SetBlockDim(cubeCoreNum);
+
+  // tiling_context_->SetTilingKey(GetTilingKey());
+
+  return ge::GRAPH_SUCCESS;
+}
+
+#else
+// ============================================================================
+// A3(AtlasA2/A3) tiling implementation
+// ============================================================================
+constexpr int32_t UNSHARED_KV_TILE = 256;
+constexpr uint32_t Q_S_BLOCK_TILE_A3 = 128;
+constexpr int32_t WORKSPACE_BLOCK_SIZE_DB = 128 * 128 * 4; // row * col * blockStackNum
+constexpr int32_t UNSHARED_WORKSPACE_BLOCK_SIZE_DB = 128 * 256;   // unshared no pinpong
 
 class TilingXAttentionFunc {
   public:
@@ -75,7 +307,7 @@ class TilingXAttentionFunc {
     void BalanceAicore();
     void SetWorkspaces();
     uint32_t GetQNBlockTile(int64_t qSeqlen, uint32_t groupSize);
-    
+
 };
 
 
@@ -88,7 +320,7 @@ ge::graphStatus TilingXAttentionFunc::FillBasicTilingData4NewKind()
   // unshared_blk_tb [bs, request_idx]
   auto unsharedKeyBlockShape = tiling_context_->GetInputShape(UNSHARED_KEY_BLOCK)->GetStorageShape();
   auto unsharedBlockTableShape = tiling_context_->GetOptionalInputShape(UNSHARED_BLOCK_TABLE)->GetStorageShape();
-  
+
   int32_t numTokens = queryShape.GetDim(0);
   int32_t qHeadNum = queryShape.GetDim(1);
   int32_t embeddingSize = queryShape.GetDim(2);
@@ -208,14 +440,14 @@ void TilingXAttentionFunc::SetWorkspaces()
       platform_ascendc::PlatformAscendC(tiling_context_->GetPlatformInfo());
   size_t systemWorkspaceSize = static_cast<size_t>(platform_info.GetLibApiWorkSpaceSize());
   size_t userWorkspaceSize = 0;
-  
-  uint64_t qoSize = tiling_data_.get_numTokens() 
+
+  uint64_t qoSize = tiling_data_.get_numTokens()
                     * tiling_data_.get_numHeads()
                     * tiling_data_.get_embeddingSize()
                     * sizeof(int16_t);
   // Attention occupied space
   // TODO: Only apply for one temporary space, affecting preload function, long sequence scenario needs extra processing
-  uint64_t mm1OutSize = (sharedBlockDim * WORKSPACE_BLOCK_SIZE_DB + 
+  uint64_t mm1OutSize = (sharedBlockDim * WORKSPACE_BLOCK_SIZE_DB +
                          unsharedBlockDim * UNSHARED_WORKSPACE_BLOCK_SIZE_DB) * NUM3 * sizeof(float);;
   uint64_t smOnlineOutSize = (sharedBlockDim * WORKSPACE_BLOCK_SIZE_DB +
                               unsharedBlockDim * UNSHARED_WORKSPACE_BLOCK_SIZE_DB) * NUM3 * sizeof(int16_t);
@@ -242,11 +474,11 @@ void TilingXAttentionFunc::SetWorkspaces()
 
 void TilingXAttentionFunc::FillCombineScaleTilingData()
 {
-  uint32_t rowNum = tiling_data_.get_batch() * 
-                    tiling_data_.get_beamSize() * 
+  uint32_t rowNum = tiling_data_.get_batch() *
+                    tiling_data_.get_beamSize() *
                     tiling_data_.get_numHeads();
   uint32_t columnSize = tiling_data_.get_embeddingSize();
-  
+
   uint32_t rowNumPerCore = rowNum / cubeCoreNum;  // number of rows per core
   uint32_t rowNumTailPerCore = rowNum % cubeCoreNum;  // remaining rows, need to be allocated to the first few cores
   tiling_data_.set_combineFormerCoreNum(rowNumTailPerCore);
@@ -263,7 +495,7 @@ void TilingXAttentionFunc::FillSharedSplitCoreTilingData()
   uint32_t curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
   uint32_t qNBlockNumPerGroup = (groupSize + curQNBlockTile - 1) / curQNBlockTile;
   uint32_t curQNBlockNum = qNBlockNumPerGroup * tiling_data_.get_kvHeads();
-  uint32_t curQSBlockTile = Q_S_BLOCK_TILE;
+  uint32_t curQSBlockTile = Q_S_BLOCK_TILE_A3;
   uint32_t curQSBlockNum = (qSeqlen + curQSBlockTile - 1) / curQSBlockTile;
   uint32_t curTaskNum = curQNBlockNum * curQSBlockNum;
   uint32_t firstSharedBatchTaskNum = curTaskNum;
@@ -280,7 +512,7 @@ ge::graphStatus TilingXAttentionFunc::FillBasicTilingData()
   auto sharedKeyBlockShape = tiling_context_->GetInputShape(SHARED_KEY_BLOCK)->GetStorageShape();
   auto unsharedKeyBlockShape = tiling_context_->GetInputShape(UNSHARED_KEY_BLOCK)->GetStorageShape();
   auto sharedBlockTableShape = tiling_context_->GetOptionalInputShape(SHARED_BLOCK_TABLE)->GetStorageShape();
-  
+
   int32_t numTokens = queryShape.GetDim(0);
   int32_t qHeadNum = queryShape.GetDim(1);
   int32_t embeddingSize = queryShape.GetDim(2);
@@ -355,6 +587,7 @@ ge::graphStatus TilingXAttentionFunc::RunTiling()
 
   return ge::GRAPH_SUCCESS;
 }
+#endif
 
 
 static ge::graphStatus TilingFunc(gert::TilingContext* context)

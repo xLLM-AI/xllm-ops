@@ -6,13 +6,23 @@ else()
 endif()
 
 add_op_to_compiled_list()
+
+string(TOLOWER "${SOC_VERSION}" _DGMM_SOC_LOWER)
+string(TOLOWER "${ASCEND_COMPUTE_UNIT}" _DGMM_UNIT_LOWER)
+if(_DGMM_SOC_LOWER MATCHES "ascend950" OR _DGMM_SOC_LOWER MATCHES "ascend310p5"
+   OR _DGMM_UNIT_LOWER MATCHES "ascend950" OR _DGMM_UNIT_LOWER MATCHES "ascend310p5")
+    set(DGMM_CATLASS_ARCH_DEF "-DCATLASS_ARCH=3510")
+else()
+    set(DGMM_CATLASS_ARCH_DEF "-DCATLASS_ARCH=2201")
+endif()
+
 add_ops_compile_options(
         OP_NAME DispatchGmmCombineDecode
         OPTIONS --cce-auto-sync=off
                 -Wno-deprecated-declarations
                 -Werror
                 -DASCENDC_DUMP=0
-                -DCATLASS_ARCH=2201
+                ${DGMM_CATLASS_ARCH_DEF}
                 ${_DISPATCH_GMM_INC_OPTS}
 )
 

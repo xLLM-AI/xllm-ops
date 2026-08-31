@@ -21,6 +21,15 @@
 #include "opdev/tensor_view_utils.h"
 #include "../../quant_lightning_indexer_v2/op_kernel/quant_lightning_indexer_v2_metadata.h"
 
+namespace Ops {
+namespace Base {
+inline std::string GetOpInfo(int errnoVal)
+{
+    return "opapi";
+}
+} // namespace Base
+} // namespace Ops
+
 #ifdef __cplusplus
 extern "C" {
 #endif

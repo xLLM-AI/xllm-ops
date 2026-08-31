@@ -133,6 +133,46 @@ resolve_soc_version_list() {
 }
 
 # ============================================================================
+# Catlass 兼容性补丁
+#
+# 背景：catlass 的 block_epilogue_dequant.hpp 使用 `AscendC::DT_FLOAT` 等写法，
+#   但 DT_FLOAT / DT_FLOAT16 / DT_BF16 在 CANN 的 kernel_type.h 中是预处理宏
+#   (#define DT_FLOAT 0 ...)，宏无法被命名空间限定，`AscendC::DT_FLOAT` 会被
+#   预处理成 `AscendC::0`，编译报 "expected unqualified-id"。
+#   此处在构建前就地剥离 AscendC:: 前缀（仅限 build.log 确认的单文件），幂等。
+# ============================================================================
+patch_catlass_compat() {
+    local target="${BASE_DIR}/third_party/catlass/include/catlass/epilogue/block/block_epilogue_dequant.hpp"
+    if [[ ! -f "${target}" ]]; then
+        echo "[INFO] catlass patch: target not found, skip: ${target}"
+        return 0
+    fi
+
+    # 仅替换 build.log 确认报错的三种模式，避免扩大修改范围
+    # 注意：grep -c 无匹配时退出码为 1 且仍输出 "0"，故用 `|| true` 兜底（勿用 echo 0，
+    # 否则会与 grep 的 "0" 拼成 "0\n0"，导致后续 [[ -eq ]] 解析失败）。
+    local before
+    before=$(grep -cE 'AscendC::DT_(FLOAT16|BF16|FLOAT)' "${target}" 2>/dev/null || true)
+    before=${before:-0}
+    if [[ "${before}" -eq 0 ]]; then
+        echo "[INFO] catlass patch: already patched, skip"
+        return 0
+    fi
+
+    # 顺序：长串优先，避免 AscendC::DT_FLOAT 误吃 AscendC::DT_FLOAT16
+    sed -i \
+        -e 's/AscendC::DT_FLOAT16\b/DT_FLOAT16/g' \
+        -e 's/AscendC::DT_BF16\b/DT_BF16/g' \
+        -e 's/AscendC::DT_FLOAT\b/DT_FLOAT/g' \
+        "${target}"
+
+    local after
+    after=$(grep -cE 'AscendC::DT_(FLOAT16|BF16|FLOAT)' "${target}" 2>/dev/null || true)
+    after=${after:-0}
+    echo "[INFO] catlass patch: fixed $((before - after)) occurrence(s) in block_epilogue_dequant.hpp"
+}
+
+# ============================================================================
 # 环境准备：设置编译器、清理打包产物
 # ============================================================================
 prepare_build_env() {
@@ -148,6 +188,9 @@ prepare_build_env() {
     export CXX=$(which g++)
     $CC --version
     $CXX --version
+
+    # 修正 catlass 第三方依赖的宏不兼容问题（仅限单文件、幂等）
+    patch_catlass_compat
 
     # 保留 BUILD_DIR 以支持增量编译，仅清理打包产物
     rm -rf dist

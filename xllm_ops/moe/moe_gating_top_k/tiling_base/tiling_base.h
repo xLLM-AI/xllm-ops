@@ -21,6 +21,15 @@
 #include "tiling/platform/platform_ascendc.h"
 #include "error_log.h"
 
+#ifndef XLLM_OP_MODULE_ID
+#if defined(OP)
+#define XLLM_OP_MODULE_ID OP
+#else
+// CANN 9.1 中 OP_MODULE_ID 为 log.h 内 constexpr，9.0 中不存在；统一回退固定模块 ID 63（仅影响日志过滤，不影响功能）
+#define XLLM_OP_MODULE_ID 63
+#endif
+#endif
+
 #ifdef ASCENDC_OP_TEST
 #define ASCENDC_EXTERN_C extern "C"
 #else
@@ -152,7 +161,7 @@ protected:
     // 8. Dump Tiling data
     virtual void DumpTilingInfo()
     {
-        int32_t enable = CheckLogLevel(static_cast<int32_t>(OP), DLOG_DEBUG);
+        int32_t enable = CheckLogLevel(static_cast<int32_t>(XLLM_OP_MODULE_ID), DLOG_DEBUG);
         if (enable != 1) {
             return;
         }

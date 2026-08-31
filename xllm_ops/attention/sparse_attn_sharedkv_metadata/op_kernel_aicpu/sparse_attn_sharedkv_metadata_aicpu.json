@@ -6,7 +6,7 @@
             "flagAsync":"False",
             "flagPartial":"False",
             "functionName":"RunCpuKernel",
-            "kernelSo":"libtransformer_aicpu_kernels.so",
+            "kernelSo":"libmath_aicpu_kernels.so",
             "opKernelLib":"CUSTAICPUKernel",
             "userDefined":"True",
             "workspaceSize":"100"

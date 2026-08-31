@@ -10,7 +10,6 @@
 add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
-    set(quant_lightning_indexer_v2_depends attention/lightning_indexer_v2 CACHE INTERNAL "Dependencies for quant_lightning_indexer_v2")
     target_sources(op_host_aclnn PRIVATE
         quant_lightning_indexer_v2_def.cpp
     )

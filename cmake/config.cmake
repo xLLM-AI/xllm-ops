@@ -31,6 +31,29 @@ else()
 endif ()
 message(STATUS "ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH}")
 
+# CANN 版本检测：读取安装目录下 version.info 解析版本号，版本 >= 9.1 时定义编译宏 CANN_GTE_91。
+# 背景：CANN 9.1 将 OP_MODULE_ID 由预处理宏改为 op_common/log/log.h 中的 constexpr，
+#       9.0 中其为公共可见宏；通过编译宏区分以兼容两个版本。
+set(_XLLM_CANN_VERSION_INFO "")
+if(EXISTS "${ASCEND_CANN_PACKAGE_PATH}/compiler/version.info")
+    file(READ "${ASCEND_CANN_PACKAGE_PATH}/compiler/version.info" _XLLM_CANN_VERSION_INFO)
+elseif(EXISTS "${ASCEND_CANN_PACKAGE_PATH}/opp/version.info")
+    file(READ "${ASCEND_CANN_PACKAGE_PATH}/opp/version.info" _XLLM_CANN_VERSION_INFO)
+endif()
+if(_XLLM_CANN_VERSION_INFO)
+    string(REGEX MATCH "Version=([0-9]+)\\.([0-9]+)" _XLLM_CANN_VER_MATCH "${_XLLM_CANN_VERSION_INFO}")
+    set(CANN_VERSION_MAJOR ${CMAKE_MATCH_1})
+    set(CANN_VERSION_MINOR ${CMAKE_MATCH_2})
+    if(CANN_VERSION_MAJOR AND CANN_VERSION_MINOR)
+        math(EXPR _XLLM_CANN_VER_NUM "${CANN_VERSION_MAJOR} * 100 + ${CANN_VERSION_MINOR}")
+        message(STATUS "CANN version: ${CANN_VERSION_MAJOR}.${CANN_VERSION_MINOR} (num=${_XLLM_CANN_VER_NUM})")
+        if(_XLLM_CANN_VER_NUM GREATER_EQUAL 901)
+            add_compile_definitions(CANN_GTE_91)
+            message(STATUS "CANN_GTE_91: enabled")
+        endif()
+    endif()
+endif()
+
 ########################################################################################################################
 # 公共配置
 ########################################################################################################################

@@ -65,7 +65,7 @@ extern "C" __global__ __aicore__ void laser_attention(
     op.Init(q_gm, k_gm, v_gm, score_gm, gm_attention_out, gm_rowsum_diag, gm_rowmax_diag, softmax_log_max_sum,
         y, f, b, n, s1, s2, d, g, qkTriangle, sparseMode, windowLen);
     op.Run();
-#elif __DAV_C220_VEC__
+#elif defined(__DAV_C220_VEC__)
     VectorForward<half, false, half> op;
     op.Init(q_gm, k_gm, v_gm, atten_mask_gm, score_gm, gm_attention_out, softmax_log_max_sum, gm_rowsum_diag,
         gm_rowmax_diag, s1, s2, n, b, y, qkTriangle, windowLen / BASE_BLOCK_SIDE_LEN, maskSeqLength, scale, windowLen);

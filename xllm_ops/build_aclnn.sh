@@ -287,7 +287,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "hc_post"
         "rms_norm_dynamic_quant"
         "inplace_partial_rotary_mul"
-        "dispatch_ffn_combine"
+        # "dispatch_ffn_combine"  # A5 kernel not adapted, catlass epilogue API mismatch
         "dequant_swiglu_quant"  ## 已在 CANN 中内置，删除后会有精度问题，CANN内置见 aarch64-linux/include/aclnnop/aclnn_dequant_swiglu_quant.h
         "scatter_nd_update_v2"
 

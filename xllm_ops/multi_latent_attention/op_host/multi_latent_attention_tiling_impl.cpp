@@ -125,7 +125,7 @@ OpParam::MLA GetParamFromTilingContext(gert::TilingContext *context) {
     param.qSeqLen.reserve(arraySize);
     if (arraySize >= 1 && reinterpret_cast<const int64_t *>(qSeqLen)[0] >= 0) {
         for (size_t i = 0; i < arraySize; ++i) {
-            param.qSeqLen.push_back(static_cast<int32_t>(reinterpret_cast<const int64_t *>(qSeqLen)[i]));
+            param.qSeqLen.push_back(reinterpret_cast<const int64_t *>(qSeqLen)[i]);
         }
     }
 
@@ -134,7 +134,7 @@ OpParam::MLA GetParamFromTilingContext(gert::TilingContext *context) {
     param.kvSeqLen.reserve(arraySize);
     if (arraySize >= 1 && reinterpret_cast<const int64_t *>(kvSeqLenAttr)[0] >= 0) {
         for (size_t i = 0; i < arraySize; ++i) {
-            param.kvSeqLen.push_back(static_cast<int32_t>(reinterpret_cast<const int64_t *>(kvSeqLenAttr)[i]));
+            param.kvSeqLen.push_back(reinterpret_cast<const int64_t *>(kvSeqLenAttr)[i]);
         }
     }
     if (param.kvSeqLen.empty()) {

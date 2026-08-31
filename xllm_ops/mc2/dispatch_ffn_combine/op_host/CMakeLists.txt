@@ -15,6 +15,15 @@ endif()
 
 add_op_to_compiled_list()
 
+string(TOLOWER "${SOC_VERSION}" _DFFN_SOC_LOWER)
+string(TOLOWER "${ASCEND_COMPUTE_UNIT}" _DFFN_UNIT_LOWER)
+if(_DFFN_SOC_LOWER MATCHES "ascend950" OR _DFFN_SOC_LOWER MATCHES "ascend310p5"
+   OR _DFFN_UNIT_LOWER MATCHES "ascend950" OR _DFFN_UNIT_LOWER MATCHES "ascend310p5")
+    set(DFFN_CATLASS_ARCH_DEF "-DCATLASS_ARCH=3510")
+else()
+    set(DFFN_CATLASS_ARCH_DEF "-DCATLASS_ARCH=2201")
+endif()
+
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnnInner PRIVATE
         dispatch_ffn_combine_def.cpp
@@ -28,7 +37,7 @@ add_ops_compile_options(
         -Wno-deprecated-declarations
         -Werror
         -DHCCL_COMM
-        -DCATLASS_ARCH=2201
+        ${DFFN_CATLASS_ARCH_DEF}
         ${_DISPATCH_FFN_INC_OPTS}
         -I${CANN_3RD_LIB_PATH}/catlass/include
 )

@@ -163,7 +163,7 @@ constexpr uint64_t CONST_128 = 128;
 constexpr uint32_t EMBED_SPLIT = 256;
 constexpr uint32_t ROUND_EMBED_SPLIT = 256;
 
-#elif __DAV_C220_VEC__
+#elif defined(__DAV_C220_VEC__)
 constexpr uint32_t HALF_VECTOR_SIZE = 128;
 constexpr uint32_t UB_ALIGN_BYTE = 32;
 constexpr int64_t UB_UINT8_BLOCK_SIZE_MLA = 16384;      // 96 * 128 * 2B // prefill/decoder diff
@@ -923,6 +923,20 @@ private:
                     }
                     WAIT_FLAG(M, MTE1, embed_split_idx % 2);
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+                    // 3510: L0A is NZ fractal. Single LoadData call with mStep=M/16
+                    // handles all M-direction fractals. No manual offset loop needed.
+                    l1_to_l0_a<ArchType::ASCEND_V220, IN_DTYPE, false, DataFormat::VECTOR, DataFormat::VECTOR>(
+                        l0a_buf_tensor[embed_split_idx % 2 * 16384],
+                        l1q_buf_addr_tensor[embed_split_idx * m * 128],
+                        0,
+                        round_embed_split_size / T_BLOCK_SIZE,                                 // repeat (K-direction)
+                        0,
+                        q_load_coeff / BLOCK_SIZE,                            // srcStride (M-direction step)
+                        0,
+                        0                                                     // dstStride
+                    );
+#else
                     for (uint64_t loa_load_idx = 0; loa_load_idx < q_load_coeff / BLOCK_SIZE; ++loa_load_idx) {
                         l1_to_l0_a<ArchType::ASCEND_V220, IN_DTYPE, false, DataFormat::VECTOR, DataFormat::VECTOR>(
                             l0a_buf_tensor[embed_split_idx % 2 * 16384 + loa_load_idx * round_embed_split_size * BLOCK_SIZE],
@@ -935,6 +949,7 @@ private:
                             0                                                     // dstStride
                         );
                     }
+#endif
 
                     SET_FLAG(MTE1, M, embed_split_idx % 2);
 
@@ -1028,6 +1043,18 @@ private:
                     round_embed_split_size = 64;
                     WAIT_FLAG(M, MTE1, embed_split_idx % 2);
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+                        l1_to_l0_a<ArchType::ASCEND_V220, IN_ROPE_DTYPE, false, DataFormat::VECTOR, DataFormat::VECTOR>(
+                            l0a_buf_tensor.template ReinterpretCast<IN_ROPE_DTYPE>()[embed_split_idx % 2 * 16384 * 2],
+                            l1q_rope_buf_addr_tensor[0],
+                            0,
+                            round_embed_split_size / BLOCK_SIZE,                                 // repeat
+                            0,
+                            q_load_coeff / BLOCK_SIZE,                            // srcStride
+                            0,
+                            0                                                     // dstStride
+                        );
+#else
                     for (uint64_t loa_load_idx = 0; loa_load_idx < q_load_coeff / BLOCK_SIZE; ++loa_load_idx) {
                         l1_to_l0_a<ArchType::ASCEND_V220, IN_ROPE_DTYPE, false, DataFormat::VECTOR, DataFormat::VECTOR>(
                             l0a_buf_tensor.template ReinterpretCast<IN_ROPE_DTYPE>()[embed_split_idx % 2 * 16384 * 2 + loa_load_idx * round_embed_split_size * BLOCK_SIZE],
@@ -1040,6 +1067,7 @@ private:
                             0                                                     // dstStride
                         );
                     }
+#endif
 
                     SET_FLAG(MTE1, M, embed_split_idx % 2);
 
@@ -1181,6 +1209,18 @@ private:
                                 0 // dstStride
                             );
                         } else {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+                            l1_to_l0_a<ArchType::ASCEND_V220, IN_DTYPE, false, DataFormat::VECTOR, DataFormat::VECTOR>(
+                                l0a_buf_tensor[l0_p_pingpong_flag * 16384],
+                                l1p_buf_addr_tensor[0],
+                                0,
+                                qk_round_n_2 / T_BLOCK_SIZE,                                 // repeat
+                                0,
+                                p_load_coeff / BLOCK_SIZE,                               // srcStride
+                                0,
+                                0                                                        // dstStride
+                            );
+#else
                             for (uint64_t loa_load_idx = 0; loa_load_idx < p_load_coeff / BLOCK_SIZE; ++loa_load_idx) {
                                 l1_to_l0_a<ArchType::ASCEND_V220, IN_DTYPE, false, DataFormat::VECTOR, DataFormat::VECTOR>(
                                     l0a_buf_tensor[l0_p_pingpong_flag * 16384 + loa_load_idx * qk_round_n_2 * BLOCK_SIZE],
@@ -1193,6 +1233,7 @@ private:
                                     0                                                        // dstStride
                                 );
                             }
+#endif
                         }
                         SET_FLAG(MTE1, MTE2, EVENT_ID7);
                     }
@@ -1362,6 +1403,18 @@ private:
                         }
                         WAIT_FLAG(M, MTE1, embed_split_idx % 2);
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+                        l1_to_l0_a<ArchType::ASCEND_V220, IN_DTYPE, false, DataFormat::VECTOR, DataFormat::VECTOR>(
+                            l0a_buf_tensor[embed_split_idx % 2 * 16384],
+                            l1q_buf_addr_tensor[embed_split_idx * m * 128],
+                            0,
+                            round_embed_split_size / T_BLOCK_SIZE,                                 // repeat
+                            0,
+                            q_load_coeff / BLOCK_SIZE,                            // srcStride
+                            0,
+                            0                                                     // dstStride
+                        );
+#else
                         for (uint64_t loa_load_idx = 0; loa_load_idx < q_load_coeff / BLOCK_SIZE; ++loa_load_idx) {
                             l1_to_l0_a<ArchType::ASCEND_V220, IN_DTYPE, false, DataFormat::VECTOR, DataFormat::VECTOR>(
                                 l0a_buf_tensor[embed_split_idx % 2 * 16384 + loa_load_idx * round_embed_split_size * BLOCK_SIZE],
@@ -1374,6 +1427,7 @@ private:
                                 0                                                     // dstStride
                             );
                         }
+#endif
 
                         SET_FLAG(MTE1, M, embed_split_idx % 2);
                         if (embed_split_idx == 0 || embed_split_idx == 2) {
@@ -1577,6 +1631,18 @@ private:
                         // move p from l1 to l0a
                         WAIT_FLAG(M, MTE1, l0_p_pingpong_flag);
                         uint32_t p_load_coeff = RoundUp<16>(p_move_head_num);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+                        l1_to_l0_a<ArchType::ASCEND_V220, IN_DTYPE, false, DataFormat::VECTOR, DataFormat::VECTOR>(
+                            l0a_buf_tensor[l0_p_pingpong_flag * 16384],
+                            l1p_buf_addr_tensor[l0_p_pingpong_flag * 128 * 128],
+                            0,
+                            qk_round_n_2 / T_BLOCK_SIZE,                                 // repeat
+                            0,
+                            p_load_coeff / BLOCK_SIZE,                               // srcStride
+                            0,
+                            0                                                        // dstStride
+                        );
+#else
                         for (uint64_t loa_load_idx = 0; loa_load_idx < p_load_coeff / BLOCK_SIZE; ++loa_load_idx) {
                             l1_to_l0_a<ArchType::ASCEND_V220, IN_DTYPE, false, DataFormat::VECTOR, DataFormat::VECTOR>(
                                 l0a_buf_tensor[l0_p_pingpong_flag * 16384 + loa_load_idx * qk_round_n_2 * BLOCK_SIZE],
@@ -1589,6 +1655,7 @@ private:
                                 0                                                        // dstStride
                             );
                         }
+#endif
                         SET_FLAG(MTE1, MTE2, l0_p_pingpong_flag + 6);
 
                         SET_FLAG(MTE1, M, l0b_pingpong_flag);
@@ -1834,6 +1901,10 @@ public:
 
     __aicore__ __attribute__((always_inline)) inline void Run()
     {
+        // 3510 guard: AIV block_idx may exceed blockDim (cube count) in MIX_AIC mode.
+        if ((uint32_t)(int32_t)block_idx >= (uint32_t)(int32_t)block_num) {
+            return;
+        }
         SET_FLAG(MTE3, V, EVENT_ID0);
         SET_FLAG(MTE3, MTE2, EVENT_ID0);
         SET_FLAG(MTE3, MTE2, EVENT_ID2);
