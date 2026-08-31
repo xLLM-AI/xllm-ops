@@ -8,15 +8,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-# host 侧 op_api 继续由 op_host 子目录编译(add_modules_sources)
+message(STATUS "=== Debug: start ops.ops-transformer.attention.lightning_indexer_v2.tests.ut.CMakeLists.txt ")
 file(GLOB CURRENT_DIRS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/*)
-list(REMOVE_ITEM CURRENT_DIRS tests)
 foreach(SUB_DIR ${CURRENT_DIRS})
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${SUB_DIR}/CMakeLists.txt")
         add_subdirectory(${SUB_DIR})
     endif()
 endforeach()
-
-# 补充 AICPU kernel 编译与注册(op_kernel_aicpu/*_aicpu*.cpp)
-# macro 取目录名 quant_lightning_indexer_v2_metadata 作为 OP_NAME,并 GLOB op_kernel_aicpu
-add_modules_sources_aicpu(OPTYPE quant_lightning_indexer_v2_metadata ACLNNTYPE aclnn)

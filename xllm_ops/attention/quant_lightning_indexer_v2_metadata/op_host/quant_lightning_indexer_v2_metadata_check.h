@@ -29,6 +29,31 @@ namespace {
 
 static constexpr const char *QLI_V2_ACLNN_OP_NAME = "QuantLightningIndexerV2Metadata";
 
+// NOTE: CANN's opdev CHECK_COND expands to OP_LOGE(ret, fmt, ...) where the first argument is the
+// int error code. In this build environment OP_LOGE(int, ...) wrongly resolves to the context-pointer
+// overload (GetOpInfo<T=int>), causing a compile error. Override CHECK_COND here to pass the opname
+// string as the log target, keeping the (cond, ret, fmt, ...) callsite signature unchanged.
+#undef CHECK_COND
+#define CHECK_COND(cond, ret, fmt, ...)                       \
+    do {                                                      \
+        if (!(cond)) {                                        \
+            OP_LOGE(QLI_V2_ACLNN_OP_NAME, fmt, ##__VA_ARGS__); \
+            return ret;                                       \
+        }                                                     \
+    } while (false)
+
+// NOTE: CANN's opdev CHECK_RET expands to OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER, ...) whose first
+// argument is an int error code, which wrongly resolves to the context-pointer OP_LOGE overload in
+// this build environment. Override CHECK_RET here to log with the opname string instead.
+#undef CHECK_RET
+#define CHECK_RET(cond, ret_value)                                          \
+    do {                                                                    \
+        if (!(cond)) {                                                      \
+            OP_LOGE(QLI_V2_ACLNN_OP_NAME, "check %s failed.", #cond);       \
+            return ret_value;                                              \
+        }                                                                   \
+    } while (false)
+
 inline constexpr int64_t QLI_V2_QUANT_MODE_1 = 1;
 inline constexpr int64_t QLI_V2_QUANT_MODE_2 = 2;
 inline constexpr int64_t QLI_V2_QUANT_MODE_3 = 3;
@@ -417,7 +442,7 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
         }
         // 校验 metadata 元素数
         if (metadata->GetViewShape().GetDim(0) != optiling::QLI_V2_METADATA_TOTAL_SIZE) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The element num of metadata must be %u, but got %lld",
+            OP_LOGE(QLI_V2_ACLNN_OP_NAME, "The element num of metadata must be %u, but got %lld",
                     optiling::QLI_V2_METADATA_TOTAL_SIZE, metadata->GetViewShape().GetDim(0));
             return ACLNN_ERR_PARAM_INVALID;
         }
