@@ -166,9 +166,16 @@ AICORE inline bool CanReuseGroupQk(
   }
 #ifdef MEGA_CHUNK_GDN_MULTI_BATCH_GROUP_QK
   const uint32_t group = num_heads / num_key_heads;
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_REUSE
+  // Variant17 initially validates only the Qwen3.5 value/key-head ratio.
+  if (group != 3) {
+    return false;
+  }
+#else
   if (group < 2 || group > 3) {
     return false;
   }
+#endif
   uint32_t chunk_count = 0;
   for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
     const int64_t seq_start = static_cast<int64_t>(cu_seqlens[seq_idx]);
@@ -177,8 +184,19 @@ AICORE inline bool CanReuseGroupQk(
     if (seq_tokens <= 0) {
       return false;
     }
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_REUSE
+    const uint32_t sequence_chunk_count = static_cast<uint32_t>(
+        (seq_tokens + ChunkSize - 1) / ChunkSize);
+    // A5's precomputed-QS storage supports 64 chunks per sequence. Multiple
+    // sequences may each consume that full range in the same launch.
+    if (sequence_chunk_count > 64) {
+      return false;
+    }
+    chunk_count += sequence_chunk_count;
+#else
     chunk_count += static_cast<uint32_t>(
         (seq_tokens + ChunkSize - 1) / ChunkSize);
+#endif
   }
 #else
   // The group-mailbox schedule is tuned for the Qwen3.5-27B TP2 mapping.
@@ -194,6 +212,54 @@ AICORE inline bool CanReuseGroupQk(
   return num_matrices == chunk_count * num_heads &&
          group_work_count >= get_block_num();
 }
+
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+// Variant18 keeps group-QK synchronization on the producing/consuming DMA
+// pipes. Unlike gdn_sync::Signal/Wait, these helpers intentionally do not
+// inject PIPE_ALL barriers. They are instantiated only by the group branch.
+template <pipe_t ProducerPipe>
+AICORE inline void GroupDirectedSignal(uint16_t config)
+{
+  const uint16_t event_id =
+      (config >> gdn_sync::kEventIdOffset) & gdn_sync::kEventIdMask;
+#if defined(__DAV_CUBE__)
+  set_intra_block(ProducerPipe, event_id);
+  set_intra_block(ProducerPipe, event_id + gdn_sync::kVecCoreIdOffset);
+#elif defined(__DAV_VEC__)
+  set_intra_block(ProducerPipe, event_id);
+#endif
+}
+
+template <pipe_t ConsumerPipe>
+AICORE inline void GroupDirectedWait(uint16_t event_id)
+{
+  wait_intra_block(ConsumerPipe, event_id);
+#if defined(__DAV_CUBE__)
+  wait_intra_block(
+      ConsumerPipe, event_id + gdn_sync::kVecCoreIdOffset);
+#endif
+}
+
+template <bool DirectedSync, pipe_t ProducerPipe>
+AICORE inline void GroupSignal(uint16_t config)
+{
+  if constexpr (DirectedSync) {
+    GroupDirectedSignal<ProducerPipe>(config);
+  } else {
+    gdn_sync::Signal<ProducerPipe>(config);
+  }
+}
+
+template <bool DirectedSync, pipe_t ConsumerPipe>
+AICORE inline void GroupWait(uint16_t event_id)
+{
+  if constexpr (DirectedSync) {
+    GroupDirectedWait<ConsumerPipe>(event_id);
+  } else {
+    gdn_sync::Wait<ConsumerPipe>(event_id);
+  }
+}
+#endif
 
 template <int32_t ChunkSize>
 AICORE inline bool ResolveHoGlobalChunk(
@@ -519,6 +585,12 @@ AICORE inline void WaitHoChunkReady(
   while (true) {
     dcci(ready_cacheline, cache_line_t::SINGLE_CACHE_LINE,
          dcci_dst_t::CACHELINE_OUT);
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+    // Acquire the launch-local doorbell value before testing it. The matching
+    // producer release orders QS and both V_new stripes before this count.
+    dsb(DSB_DDR);
+#endif
     const int32_t ready_count = *ready_ptr;
     if (ready_count >= required_count) {
       break;
@@ -527,7 +599,11 @@ AICORE inline void WaitHoChunkReady(
 #endif
 }
 
-template <int32_t HiddenSize, int32_t ChunkSize>
+template <int32_t HiddenSize, int32_t ChunkSize
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+          , bool DirectedSync = false
+#endif
+          >
 AICORE inline void PublishQKTile(
     __gm__ ComputeT *q_handle, __gm__ ComputeT *k_handle,
     __gm__ ComputeT *qk_mailbox, int64_t core_id,
@@ -618,13 +694,22 @@ AICORE inline void PublishQKTile(
     pipe_barrier(PIPE_ALL);
   }
   if (qk_ready_flag >= 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+    GroupSignal<DirectedSync, PIPE_FIX>(
+        1 | (2 << 4) | (qk_ready_flag << 8));
+#else
     ffts_cross_core_sync(
         PIPE_FIX, 1 | (2 << 4) | (qk_ready_flag << 8));
+#endif
   }
 #endif
 }
 
-template <int32_t HiddenSize, int32_t ChunkSize>
+template <int32_t HiddenSize, int32_t ChunkSize
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+          , bool DirectedSync = false
+#endif
+          >
 AICORE inline void PublishQKVTile(
     __gm__ ComputeT *v_handle,
     __gm__ ComputeT *qk_gated_mailbox,
@@ -657,8 +742,25 @@ AICORE inline void PublishQKVTile(
             ChunkSize, HiddenSize> l0b;
   TASSIGN(l0b, 0x0);
 
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+  // The caller observed H-ready before entering this helper. Drop any clean
+  // lines retained by this AIC from an earlier work item or graph replay.
+  constexpr int32_t DcciCacheLineElems =
+      64 / static_cast<int32_t>(sizeof(ComputeT));
+  for (int32_t row = 0; row < valid_rows; ++row) {
+    for (int32_t r = 0; r < HiddenSize; r += DcciCacheLineElems) {
+      dcci(static_cast<__gm__ void *>(
+               v_handle + v_offset + row * v_stride + r),
+           SINGLE_CACHE_LINE);
+    }
+  }
+  dsb(DSB_DDR);
+#endif
   if (wait_before_v_load != 0) {
-#if defined(PTO_NPU_ARCH_A5)
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+    GroupWait<DirectedSync, PIPE_MTE2>(qk_gated_ready_flag);
+#elif defined(PTO_NPU_ARCH_A5)
     gdn_sync::Wait<PIPE_MTE2>(qk_gated_ready_flag);
 #else
     wait_flag_dev(qk_gated_ready_flag);
@@ -682,7 +784,9 @@ AICORE inline void PublishQKVTile(
   }
 
   if (wait_before_v_load == 0) {
-#if defined(PTO_NPU_ARCH_A5)
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+    GroupWait<DirectedSync, PIPE_MTE2>(qk_gated_ready_flag);
+#elif defined(PTO_NPU_ARCH_A5)
     gdn_sync::Wait<PIPE_MTE2>(qk_gated_ready_flag);
 #else
     wait_flag_dev(qk_gated_ready_flag);
@@ -696,7 +800,9 @@ AICORE inline void PublishQKVTile(
             quarter_idx == 0
                 ? qk_gated_bottom_ready_flag
                 : qk_gated_bottom_tail_ready_flag;
-#if defined(PTO_NPU_ARCH_A5)
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+        GroupWait<DirectedSync, PIPE_MTE2>(gated_ready_flag);
+#elif defined(PTO_NPU_ARCH_A5)
         gdn_sync::Wait<PIPE_MTE2>(gated_ready_flag);
 #else
         wait_flag_dev(gated_ready_flag);
@@ -784,14 +890,22 @@ AICORE inline void PublishQKVTile(
             quarter_idx == 0
                 ? qkv_bottom_ready_flag
                 : qkv_bottom_tail_ready_flag;
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+        GroupSignal<DirectedSync, PIPE_FIX>(
+            1 | (2 << 4) | (ready_flag << 8));
+#else
         ffts_cross_core_sync(
             PIPE_FIX,
             1 | (2 << 4) | (ready_flag << 8));
+#endif
       }
       continue;
     }
     if (half_idx != 0 && split_rows) {
-#if defined(PTO_NPU_ARCH_A5)
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+      GroupWait<DirectedSync, PIPE_MTE2>(
+          qk_gated_bottom_ready_flag);
+#elif defined(PTO_NPU_ARCH_A5)
       gdn_sync::Wait<PIPE_MTE2>(qk_gated_bottom_ready_flag);
 #else
       wait_flag_dev(qk_gated_bottom_ready_flag);
@@ -875,14 +989,23 @@ AICORE inline void PublishQKVTile(
           half_idx == 0 ? qkv_ready_flag
                         : (split_rows ? qkv_bottom_ready_flag
                                       : qkv_ready_flag);
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+      GroupSignal<DirectedSync, PIPE_FIX>(
+          1 | (2 << 4) | (ready_flag << 8));
+#else
       ffts_cross_core_sync(
           PIPE_FIX, 1 | (2 << 4) | (ready_flag << 8));
+#endif
     }
   }
 #endif
 }
 
-template <int32_t HiddenSize, int32_t ChunkSize>
+template <int32_t HiddenSize, int32_t ChunkSize
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+          , bool DirectedSync = false
+#endif
+          >
 AICORE inline void PublishGatedQKTile(
     __gm__ float *g_handle,
     __gm__ ComputeT *qk_mailbox,
@@ -1018,21 +1141,36 @@ AICORE inline void PublishGatedQKTile(
   }
 
   if (wait_for_qk_ready != 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+    GroupWait<DirectedSync, PIPE_MTE2>(qk_ready_flag);
+#else
     wait_flag_dev(qk_ready_flag);
+#endif
   }
   const bool split_rows = qk_gated_bottom_ready_flag >= 0;
   if (split_rows) {
     const int32_t peer_ready_flag =
         vec_id == 0 ? qk_gated_bottom_ready_flag
                     : qk_gated_ready_flag;
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+    GroupSignal<DirectedSync, PIPE_MTE3>(
+        1 | (2 << 4) | (peer_ready_flag << 8));
+#else
     ffts_cross_core_sync(
         PIPE_MTE3,
         1 | (2 << 4) | (peer_ready_flag << 8));
+#endif
     if (qk_gated_bottom_tail_ready_flag >= 0 && vec_id == 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+      GroupSignal<DirectedSync, PIPE_MTE3>(
+          1 | (2 << 4) |
+              (qk_gated_bottom_tail_ready_flag << 8));
+#else
       ffts_cross_core_sync(
           PIPE_MTE3,
           1 | (2 << 4) |
               (qk_gated_bottom_tail_ready_flag << 8));
+#endif
     }
   }
   if (local_rows > 0) {
@@ -1112,10 +1250,16 @@ AICORE inline void PublishGatedQKTile(
         TLOAD(qk_second_bf16, qk_global);
       }
       set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+      GroupSignal<DirectedSync, PIPE_MTE3>(
+          1 | (2 << 4) |
+              (qk_gated_bottom_ready_flag << 8));
+#else
       ffts_cross_core_sync(
           PIPE_MTE3,
           1 | (2 << 4) |
               (qk_gated_bottom_ready_flag << 8));
+#endif
 
       UbND<float, 1, ChunkSize> g_all;
       TASSIGN(g_all, GAllUbAddr);
@@ -1150,9 +1294,14 @@ AICORE inline void PublishGatedQKTile(
 
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
       if (release_qk_mailbox != 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+        GroupSignal<DirectedSync, PIPE_MTE2>(
+            1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+#else
         ffts_cross_core_sync(
             PIPE_MTE2,
             1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+#endif
       }
       TCVT(qk_fp32, qk_second_bf16, pto::RoundMode::CAST_NONE);
       pipe_barrier(PIPE_V);
@@ -1178,10 +1327,16 @@ AICORE inline void PublishGatedQKTile(
                 shape);
         TSTORE(gated_global, qk_second_bf16);
       }
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+      GroupSignal<DirectedSync, PIPE_MTE3>(
+          1 | (2 << 4) |
+              (qk_gated_bottom_tail_ready_flag << 8));
+#else
       ffts_cross_core_sync(
           PIPE_MTE3,
           1 | (2 << 4) |
               (qk_gated_bottom_tail_ready_flag << 8));
+#endif
     } else if (pipeline_qk) {
       UbND<ComputeT, PrefetchRows, ChunkSize,
            PrefetchRows, ChunkSize, PadValue::Zero>
@@ -1224,9 +1379,14 @@ AICORE inline void PublishGatedQKTile(
       TMOV(qk_first, qk_prefetch);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
       if (release_qk_mailbox != 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+        GroupSignal<DirectedSync, PIPE_MTE2>(
+            1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+#else
         ffts_cross_core_sync(
             PIPE_MTE2,
             1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+#endif
       }
 
       UbND<float, HalfChunk, ChunkSize> qk_fp32;
@@ -1286,9 +1446,14 @@ AICORE inline void PublishGatedQKTile(
       set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
       if (release_qk_mailbox != 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+        GroupSignal<DirectedSync, PIPE_MTE2>(
+            1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+#else
         ffts_cross_core_sync(
             PIPE_MTE2,
             1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+#endif
       }
 
       UbND<float, HalfChunk, ChunkSize> qk_fp32;
@@ -1324,24 +1489,38 @@ AICORE inline void PublishGatedQKTile(
       }
     }
   } else if (release_qk_mailbox != 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+    GroupSignal<DirectedSync, PIPE_MTE2>(
+        1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+#else
     ffts_cross_core_sync(
         PIPE_MTE2,
         1 | (2 << 4) | (qk_mailbox_free_flag << 8));
+#endif
   }
   if (!pipeline_bottom_quarters) {
     const int32_t own_ready_flag =
         split_rows && vec_id != 0
             ? qk_gated_bottom_ready_flag
             : qk_gated_ready_flag;
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+    GroupSignal<DirectedSync, PIPE_MTE3>(
+        1 | (2 << 4) | (own_ready_flag << 8));
+#else
     ffts_cross_core_sync(
         PIPE_MTE3,
         1 | (2 << 4) | (own_ready_flag << 8));
+#endif
   }
 #endif
 }
 
 template <int32_t HiddenSize, int32_t ChunkSize,
-          bool FuseGatedRmsNorm>
+          bool FuseGatedRmsNorm
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+          , bool DirectedSync = false
+#endif
+          >
 AICORE inline void ConsumeQKVTile(
     __gm__ ComputeT *precomputed_qs_handle,
     __gm__ ComputeT *qkv_mailbox,
@@ -1387,6 +1566,25 @@ AICORE inline void ConsumeQKVTile(
           precomputed_qs_handle +
           (chunk_idx * num_heads + head_idx) *
               static_cast<int64_t>(HiddenSize) * HiddenSize;
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+      // QK-ready is emitted only after the AIC acquired H-ready in variant21,
+      // so it is the control predecessor for this AIV-side QS acquire.
+      constexpr int32_t DcciCacheLineElems =
+          64 / static_cast<int32_t>(sizeof(ComputeT));
+      for (int32_t row = 0; row < local_rows; ++row) {
+        for (int32_t r = 0; r < HiddenSize;
+             r += DcciCacheLineElems) {
+          dcci(static_cast<__gm__ void *>(
+                   qs_source +
+                       (static_cast<int64_t>(vec_id) * HalfChunk + row) *
+                           HiddenSize +
+                       r),
+               SINGLE_CACHE_LINE);
+        }
+      }
+      dsb(DSB_DDR);
+#endif
       GlobalTensor<ComputeT, decltype(shape),
                    Stride<1, 1, 1, HiddenSize, 1>>
           qs_global(
@@ -1417,9 +1615,17 @@ AICORE inline void ConsumeQKVTile(
     pipe_barrier(PIPE_V);
     TMUL(qs_fp32, qs_fp32, expanded_gates);
 
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+    GroupWait<DirectedSync, PIPE_MTE2>(qkv_ready_flag);
+#else
     wait_flag_dev(qkv_ready_flag);
+#endif
     if (split_rows && vec_id != 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+      GroupWait<DirectedSync, PIPE_MTE2>(qkv_bottom_ready_flag);
+#else
       wait_flag_dev(qkv_bottom_ready_flag);
+#endif
     }
 
     UbND<ComputeT, HalfChunk, HiddenSize,
@@ -1448,7 +1654,11 @@ AICORE inline void ConsumeQKVTile(
       }
       set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+      GroupWait<DirectedSync, PIPE_MTE2>(qkv_bottom_tail_ready_flag);
+#else
       wait_flag_dev(qkv_bottom_tail_ready_flag);
+#endif
       {
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> shape;
         shape.shape[3] = QuarterChunk;
@@ -1475,9 +1685,14 @@ AICORE inline void ConsumeQKVTile(
       }
       set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
       if (qkv_mailbox_free_flag >= 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+        GroupSignal<DirectedSync, PIPE_MTE2>(
+            1 | (2 << 4) | (qkv_mailbox_free_flag << 8));
+#else
         ffts_cross_core_sync(
             PIPE_MTE2,
             1 | (2 << 4) | (qkv_mailbox_free_flag << 8));
+#endif
       }
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
@@ -1506,9 +1721,14 @@ AICORE inline void ConsumeQKVTile(
       }
       set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
       if (qkv_mailbox_free_flag >= 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+        GroupSignal<DirectedSync, PIPE_MTE2>(
+            1 | (2 << 4) | (qkv_mailbox_free_flag << 8));
+#else
         ffts_cross_core_sync(
             PIPE_MTE2,
             1 | (2 << 4) | (qkv_mailbox_free_flag << 8));
+#endif
       }
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     }
@@ -1529,23 +1749,48 @@ AICORE inline void ConsumeQKVTile(
         output_handle, z_handle, output_offset, output_stride,
         local_rows);
     if (split_rows && vec_id == 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+      GroupWait<DirectedSync, PIPE_MTE2>(qkv_bottom_ready_flag);
+#else
       wait_flag_dev(qkv_bottom_ready_flag);
+#endif
       if (qkv_bottom_tail_ready_flag >= 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+        GroupWait<DirectedSync, PIPE_MTE2>(qkv_bottom_tail_ready_flag);
+#else
         wait_flag_dev(qkv_bottom_tail_ready_flag);
+#endif
       }
     }
   } else {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+    GroupWait<DirectedSync, PIPE_MTE2>(qkv_ready_flag);
+#else
     wait_flag_dev(qkv_ready_flag);
+#endif
     if (split_rows) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+      GroupWait<DirectedSync, PIPE_MTE2>(qkv_bottom_ready_flag);
+#else
       wait_flag_dev(qkv_bottom_ready_flag);
+#endif
       if (qkv_bottom_tail_ready_flag >= 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+        GroupWait<DirectedSync, PIPE_MTE2>(qkv_bottom_tail_ready_flag);
+#else
         wait_flag_dev(qkv_bottom_tail_ready_flag);
+#endif
       }
     }
     if (qkv_mailbox_free_flag >= 0) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+      GroupSignal<DirectedSync, PIPE_MTE3>(
+          1 | (2 << 4) | (qkv_mailbox_free_flag << 8));
+#else
       ffts_cross_core_sync(
           PIPE_MTE3,
           1 | (2 << 4) | (qkv_mailbox_free_flag << 8));
+#endif
     }
   }
 #endif
@@ -1617,35 +1862,86 @@ AICORE void GDN_CHUNK_O_KERNEL(
   // block_num = total number of AI cores running this kernel in parallel.
   auto block_num = get_block_num();
   int64_t h_o_chunk_count = 0;
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+  bool h_o_multibatch_ragged = false;
+  int64_t h_o_first_sequence_tokens = -1;
+#endif
   if (cu_seqlens != nullptr) {
     for (int64_t si = 0; si < batch_size; ++si) {
       const int64_t bos = static_cast<int64_t>(cu_seqlens[si]);
       const int64_t eos = static_cast<int64_t>(cu_seqlens[si + 1]);
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+      const int64_t sequence_tokens = eos - bos;
+      h_o_chunk_count +=
+          (sequence_tokens + ChunkSize - 1) / ChunkSize;
+      if (si == 0) {
+        h_o_first_sequence_tokens = sequence_tokens;
+      } else if (sequence_tokens != h_o_first_sequence_tokens) {
+        h_o_multibatch_ragged = true;
+      }
+#else
       h_o_chunk_count += (eos - bos + ChunkSize - 1) / ChunkSize;
+#endif
     }
   } else {
     h_o_chunk_count =
         batch_size * ((seq_len + ChunkSize - 1) / ChunkSize);
   }
+#if defined(MEGA_CHUNK_GDN_A5_GROUP_QK_REUSE) || \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+  const bool use_precomputed_qs =
+      precompute_qs != 0 && ChunkSize == HiddenSize && H >= 8 &&
+      batch_size >= 1 && cu_seqlens != nullptr &&
+      h_o_chunk_count >= 4 &&
+      h_o_chunk_count <= batch_size * static_cast<int64_t>(64);
+#else
   const bool use_precomputed_qs =
       precompute_qs != 0 && ChunkSize == HiddenSize && H >= 8 &&
       batch_size >= 1 && cu_seqlens != nullptr &&
       h_o_chunk_count >= 4 && h_o_chunk_count <= 64;
+#endif
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+  // QS must not be fetched by either AIV before the corresponding ready
+  // counter is acquired. The first safe candidate keeps QK behind ready.
+  constexpr bool decouple_qk_h_ready = false;
+#else
   const bool decouple_qk_h_ready =
       use_precomputed_qs &&
       H > static_cast<int32_t>(block_num);
+#endif
   constexpr int64_t H_O_READY_STRIDE = 16;
   AscendC::GlobalTensor<int32_t> h_o_ready_gm;
   h_o_ready_gm.SetGlobalBuffer(h_o_ready_handle);
 
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+  const int64_t h_o_heavy_core_count =
+      (batch_size * static_cast<int64_t>(H)) %
+      static_cast<int64_t>(block_num);
+#else
   const int64_t h_o_heavy_core_count =
       H % static_cast<int64_t>(block_num);
+#endif
   const int64_t h_o_light_core_count =
       static_cast<int64_t>(block_num) - h_o_heavy_core_count;
   const int64_t h_o_total_items = h_o_chunk_count * H;
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+  // Ragged sequences give each H producer a different chunk weight. Keep the
+  // overlap protocol, but use the exact round-robin consumer map instead of
+  // applying the uniform-batch heavy/light rebalance heuristic.
+  const bool rebalance_h_o_consumers =
+      use_precomputed_qs && !h_o_multibatch_ragged &&
+      h_o_heavy_core_count > 0 &&
+      h_o_total_items >= static_cast<int64_t>(block_num);
+#else
   const bool rebalance_h_o_consumers =
       use_precomputed_qs && h_o_heavy_core_count > 0 &&
       h_o_total_items >= static_cast<int64_t>(block_num);
+#endif
   const int64_t h_o_delta_o_items =
       (13 * h_o_chunk_count + 8) / 17;
   const int64_t h_o_shifted_items =
@@ -1654,9 +1950,9 @@ AICORE void GDN_CHUNK_O_KERNEL(
       h_o_shifted_items > static_cast<int64_t>(block_num)
           ? h_o_shifted_items / static_cast<int64_t>(block_num)
           : 1;
-  // Cores [0, H % block_num) own one extra H head. Once QK no longer waits
-  // for H-ready, their QKV wait becomes the tail; move one O item from each
-  // heavy core to the light-core pool.
+  // The heavy prefix is derived from the H producer assignment (variant21
+  // flattens batch_size * H; earlier variants use H). Once QK no longer waits
+  // for H-ready, move one O item from each heavy core to the light-core pool.
   const int64_t h_o_heavy_quota =
       decouple_qk_h_ready && h_o_heavy_quota_base > 1
           ? h_o_heavy_quota_base - 1
@@ -1810,10 +2106,16 @@ AICORE void GDN_CHUNK_O_KERNEL(
           (chunk_token_start * static_cast<int64_t>(Hg) +
            static_cast<int64_t>(head_g)) *
           static_cast<int64_t>(HiddenSize);
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+      int64_t v_off =
+          (static_cast<int64_t>(head_idx) * total_tokens +
+           chunk_token_start) * static_cast<int64_t>(HiddenSize);
+#else
       int64_t v_off =
           (chunk_token_start * static_cast<int64_t>(H) +
            static_cast<int64_t>(head_idx)) *
           static_cast<int64_t>(HiddenSize);
+#endif
 
       int64_t chunk_global_idx = seq_idx * chunks_per_seq + ci;
       int64_t s_offset =
@@ -1973,7 +2275,11 @@ AICORE void GDN_CHUNK_O_KERNEL(
         TASSIGN(_l1, 131072);
         Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
         _gs.shape[3] = valid_rows; _gs.shape[4] = HiddenSize;
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+        GmStride2D _stride(HiddenSize);
+#else
         GmStride2D _stride(BSND_V_STRIDE);
+#endif
         GmTensor2D<ComputeT> _gm(V_handle + v_off, _gs, _stride);
         TLOAD(_l1, _gm);
         if (valid_rows != ChunkSize) TFILLPAD(_l1, _l1);
@@ -2021,6 +2327,21 @@ AICORE void GDN_CHUNK_O_KERNEL(
     }
   } else if (use_precomputed_qs && reuse_group_qk != 0) {
     const int64_t group_work_count = h_o_chunk_count * Hg;
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_REUSE
+    // A5 exposes intra-block event IDs 0..10. H and O are separated by a full
+    // MIX barrier; reserve event 3 exclusively for the outer O-completion
+    // handshake and drain the eight group events inside this branch.
+    constexpr int32_t GroupFlowFlag = 0;
+    constexpr int32_t GatedSlot0ReadyFlag = 1;
+    constexpr int32_t QkvSlot0ReadyFlag = 2;
+    constexpr int32_t GatedSlot1ReadyFlag = 4;
+    constexpr int32_t QkvSlot1ReadyFlag = 5;
+    constexpr int32_t GatedBottomReadyFlag = 6;
+    constexpr int32_t QkvBottomReadyFlag = 7;
+    constexpr int32_t QkvSlot2ReadyFlag = 8;
+    static_assert(QkvSlot2ReadyFlag <= 10,
+                  "A5 group-QK events must fit IDs 0..10");
+#else
     constexpr int32_t GroupFlowFlag = 8;
     constexpr int32_t GatedSlot0ReadyFlag = 9;
     constexpr int32_t QkvSlot0ReadyFlag = 10;
@@ -2029,11 +2350,20 @@ AICORE void GDN_CHUNK_O_KERNEL(
     constexpr int32_t GatedBottomReadyFlag = 13;
     constexpr int32_t QkvBottomReadyFlag = 14;
     constexpr int32_t QkvSlot2ReadyFlag = 15;
+#endif
     constexpr int32_t QkMailboxFreeFlag = QkvSlot2ReadyFlag;
     const bool use_inplace_lane2 = GROUP == 3;
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DOUBLE_MAILBOX
+    // Variant20 keeps the KKT workspace's second per-core tile for the
+    // lookahead QK. Variant19 no longer publishes H/O ready counters, so the
+    // first KKT tile is free after the full H-to-O MIX barrier and can hold
+    // lane2's in-place gated/QKV data without expanding workspace.
+    __gm__ ComputeT *lane2_mailbox = workspace_ping_qk_handle;
+#else
     __gm__ ComputeT *lane2_mailbox =
         workspace_ping_qk_handle +
         static_cast<int64_t>(block_num) * WsQKSize;
+#endif
     const int64_t regular_group_rounds =
         group_work_count / static_cast<int64_t>(block_num);
     const bool rebalance_group_owners =
@@ -2046,7 +2376,11 @@ AICORE void GDN_CHUNK_O_KERNEL(
         group_prefix_rounds * static_cast<int64_t>(block_num);
     const int64_t group_tail_owner_shift =
         h_o_heavy_core_count % h_o_light_core_count;
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DOUBLE_MAILBOX
+    bool current_qk_published = false;
+#else
     bool first_group = true;
+#endif
     int64_t group_owned_idx = 0;
     int64_t group_work = GetHoOwnedItem(
         group_owned_idx, group_work_count, static_cast<int64_t>(cid),
@@ -2056,10 +2390,26 @@ AICORE void GDN_CHUNK_O_KERNEL(
         group_tail_owner_shift);
 
     while (group_work < group_work_count) {
+#ifndef MEGA_CHUNK_GDN_A5_GROUP_QK_DOUBLE_MAILBOX
       if (!first_group) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+        // QK is overwritten by PIPE_FIX. Wait there for both AIV siblings to
+        // finish their PIPE_MTE2 mailbox reads without stalling unrelated DMA.
+        GroupDirectedWait<PIPE_FIX>(QkMailboxFreeFlag);
+#else
         wait_flag_dev(QkMailboxFreeFlag);
+#endif
       }
       __gm__ ComputeT *current_qk_mailbox = workspace_qk_handle;
+#else
+      const int32_t current_qk_slot =
+          static_cast<int32_t>(group_owned_idx & 1);
+      __gm__ ComputeT *current_qk_mailbox =
+          current_qk_slot == 0
+              ? workspace_qk_handle
+              : workspace_ping_qk_handle +
+                    static_cast<int64_t>(block_num) * WsQKSize;
+#endif
 
       const int64_t global_chunk_idx = group_work / Hg;
       const int32_t head_group =
@@ -2081,11 +2431,95 @@ AICORE void GDN_CHUNK_O_KERNEL(
       const int64_t qk_offset =
           (chunk_token_start * static_cast<int64_t>(Hg) + head_group) *
           static_cast<int64_t>(HiddenSize);
-      PublishQKTile<HiddenSize, ChunkSize>(
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DOUBLE_MAILBOX
+      // Only the first round computes its current QK here. Later rounds use
+      // the QK written by the preceding round's one-item lookahead.
+      if (!current_qk_published) {
+        if (group_owned_idx >= 2) {
+          GroupDirectedWait<PIPE_FIX>(QkMailboxFreeFlag);
+        }
+        PublishQKTile<HiddenSize, ChunkSize, true>(
+            Q_handle, K_handle, current_qk_mailbox,
+            static_cast<int64_t>(cid), qk_offset,
+            BSND_QK_STRIDE, valid_rows, -1, 0u);
+      }
+
+      const int64_t next_owned_idx = group_owned_idx + 1;
+      const int64_t next_group_work = GetHoOwnedItem(
+          next_owned_idx, group_work_count,
+          static_cast<int64_t>(cid),
+          static_cast<int64_t>(block_num), rebalance_group_owners,
+          group_balanced_span, h_o_heavy_core_count,
+          h_o_light_core_count, group_prefix_rounds,
+          group_tail_owner_shift);
+      bool next_qk_published = false;
+      int64_t next_qk_offset = 0;
+      int32_t next_valid_rows = 0;
+      __gm__ ComputeT *next_qk_mailbox = workspace_qk_handle;
+      if (next_group_work < group_work_count) {
+        const int64_t next_global_chunk_idx = next_group_work / Hg;
+        const int32_t next_head_group = static_cast<int32_t>(
+            next_group_work - next_global_chunk_idx * Hg);
+        int64_t next_seq_idx = 0;
+        int64_t next_bos = 0;
+        int64_t next_slen = 0;
+        int64_t next_local_chunk_idx = 0;
+        if (ResolveHoGlobalChunk<ChunkSize>(
+                next_global_chunk_idx, batch_size, cu_seqlens,
+                next_seq_idx, next_bos, next_slen,
+                next_local_chunk_idx)) {
+          const int64_t next_chunk_start =
+              next_local_chunk_idx * ChunkSize;
+          const int64_t next_remaining =
+              next_slen - next_chunk_start;
+          next_valid_rows = static_cast<int32_t>(
+              next_remaining < ChunkSize ? next_remaining : ChunkSize);
+          const int64_t next_chunk_token_start =
+              next_bos + next_chunk_start;
+          next_qk_offset =
+              (next_chunk_token_start * static_cast<int64_t>(Hg) +
+               next_head_group) *
+              static_cast<int64_t>(HiddenSize);
+          const int32_t next_qk_slot =
+              static_cast<int32_t>(next_owned_idx & 1);
+          next_qk_mailbox =
+              next_qk_slot == 0
+                  ? workspace_qk_handle
+                  : workspace_ping_qk_handle +
+                        static_cast<int64_t>(block_num) * WsQKSize;
+          next_qk_published = true;
+        }
+      }
+
+      // event8 is deliberately a single, slot-agnostic token. Consume the
+      // free token for QK[i-1] before event0 admits the AIVs to QK[i]; this
+      // prevents free(i-1) and free(i) from ever being simultaneously live.
+      if (group_owned_idx > 0) {
+        GroupDirectedWait<PIPE_FIX>(QkMailboxFreeFlag);
+      }
+      GroupDirectedSignal<PIPE_FIX>(
+          1 | (2 << 4) | (GroupFlowFlag << 8));
+
+      // Prewrite exactly one QK without publishing its ready token. The next
+      // round's PIPE_FIX event0 signal orders this TSTORE before either AIV's
+      // MTE2 read, while current gated/QKV processing remains strictly serial.
+      if (next_qk_published) {
+        PublishQKTile<HiddenSize, ChunkSize, true>(
+            Q_handle, K_handle, next_qk_mailbox,
+            static_cast<int64_t>(cid), next_qk_offset,
+            BSND_QK_STRIDE, next_valid_rows, -1, 0u);
+      }
+#else
+      PublishQKTile<HiddenSize, ChunkSize
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+                    , true
+#endif
+                    >(
           Q_handle, K_handle, current_qk_mailbox,
           static_cast<int64_t>(cid), qk_offset,
           BSND_QK_STRIDE, valid_rows, -1, 0u);
 
+#ifndef MEGA_CHUNK_GDN_A5_GROUP_QK_SKIP_HO_READY
       for (int32_t group_lane = 0; group_lane < GROUP; ++group_lane) {
         const int32_t head_idx = head_group * GROUP + group_lane;
         WaitHoChunkReady<ChunkSize>(
@@ -2093,11 +2527,24 @@ AICORE void GDN_CHUNK_O_KERNEL(
             static_cast<int32_t>(seq_idx * H + head_idx),
             local_chunk_idx);
       }
+#endif
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+      GroupDirectedSignal<PIPE_FIX>(
+          1 | (2 << 4) | (GroupFlowFlag << 8));
+#else
       ffts_cross_core_sync(
           PIPE_FIX, 1 | (2 << 4) | (GroupFlowFlag << 8));
+#endif
+#endif
 
       for (int32_t group_lane = 0; group_lane < GROUP; ++group_lane) {
         const int32_t head_idx = head_group * GROUP + group_lane;
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+        constexpr int32_t v_row_stride = HiddenSize;
+        const int64_t v_offset =
+            (static_cast<int64_t>(head_idx) * total_tokens +
+             chunk_token_start) * static_cast<int64_t>(HiddenSize);
+#else
         const bool use_packed_v =
             batch_size == 1 && (slen % ChunkSize) == 0;
         const int32_t v_row_stride =
@@ -2109,6 +2556,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
                 : (chunk_token_start * static_cast<int64_t>(H) +
                    head_idx) *
                       static_cast<int64_t>(HiddenSize);
+#endif
         const int32_t slot = group_lane & 1;
         const bool inplace_lane2 =
             use_inplace_lane2 && group_lane == 2;
@@ -2123,7 +2571,11 @@ AICORE void GDN_CHUNK_O_KERNEL(
                 : (slot == 0 ? workspace_qs_qkv_handle
                              : workspace_ping_qs_qkv_handle);
         if (group_lane >= 2 && !inplace_lane2) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+          GroupDirectedWait<PIPE_MTE2>(GroupFlowFlag);
+#else
           wait_flag_dev(GroupFlowFlag);
+#endif
         }
         const int32_t gated_ready_flag =
             inplace_lane2
@@ -2135,13 +2587,22 @@ AICORE void GDN_CHUNK_O_KERNEL(
                 ? QkvSlot2ReadyFlag
                 : (slot == 0 ? QkvSlot0ReadyFlag
                              : QkvSlot1ReadyFlag);
-        PublishQKVTile<HiddenSize, ChunkSize>(
+        PublishQKVTile<HiddenSize, ChunkSize
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+                       , true
+#endif
+                       >(
             V_handle, gated_mailbox, qkv_mailbox,
             static_cast<int64_t>(cid), v_offset,
             v_row_stride,
             valid_rows, gated_ready_flag, qkv_ready_flag,
             GatedBottomReadyFlag, QkvBottomReadyFlag);
       }
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DOUBLE_MAILBOX
+      current_qk_published = next_qk_published;
+      ++group_owned_idx;
+      group_work = next_group_work;
+#else
       first_group = false;
       ++group_owned_idx;
       group_work = GetHoOwnedItem(
@@ -2151,6 +2612,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
           group_balanced_span, h_o_heavy_core_count,
           h_o_light_core_count, group_prefix_rounds,
           group_tail_owner_shift);
+#endif
     }
 
   } else if (use_precomputed_qs && batch_size == 1) {
@@ -2160,6 +2622,10 @@ AICORE void GDN_CHUNK_O_KERNEL(
     const int64_t bos = static_cast<int64_t>(cu_seqlens[0]);
     const int64_t eos = static_cast<int64_t>(cu_seqlens[1]);
     const int64_t slen = eos - bos;
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+    constexpr int32_t v_row_stride = HiddenSize;
+#else
     const bool use_packed_v = (slen % ChunkSize) == 0;
     const int32_t v_row_stride =
         use_packed_v ? HiddenSize : BSND_V_STRIDE;
@@ -2173,6 +2639,7 @@ AICORE void GDN_CHUNK_O_KERNEL(
             : HiddenSize;
     const int64_t v_chunk_stride =
         static_cast<int64_t>(H) * ChunkSize * HiddenSize;
+#endif
     int64_t owned_idx = 0;
     int64_t current_item = GetHoOwnedItem(
         0, h_o_total_items, static_cast<int64_t>(cid),
@@ -2196,9 +2663,16 @@ AICORE void GDN_CHUNK_O_KERNEL(
           (chunk_token_start * static_cast<int64_t>(Hg) +
            head_group) *
           static_cast<int64_t>(HiddenSize);
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+      const int64_t v_offset =
+          (static_cast<int64_t>(head_idx) * total_tokens +
+           chunk_token_start) * static_cast<int64_t>(HiddenSize);
+#else
       const int64_t v_offset =
           v_sequence_base + ci * v_chunk_stride +
           static_cast<int64_t>(head_idx) * v_head_stride;
+#endif
       const int32_t slot = static_cast<int32_t>(owned_idx & 1);
       __gm__ ComputeT *qk_mailbox =
           slot == 0
@@ -2356,6 +2830,10 @@ AICORE void GDN_CHUNK_O_KERNEL(
                     AscendC::DcciDst::CACHELINE_OUT>(
                     h_o_ready_gm[ready_offset]);
                 __asm__ __volatile__("");
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+                dsb(DSB_DDR);
+#endif
                 const int32_t ready_count =
                     h_o_ready_gm.GetValue(ready_offset);
                 if (ready_count >= required_count) {
@@ -2378,10 +2856,16 @@ AICORE void GDN_CHUNK_O_KERNEL(
                 (chunk_token_start * static_cast<int64_t>(Hg) +
                  static_cast<int64_t>(head_g)) *
                 static_cast<int64_t>(HiddenSize);
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+            int64_t v_off =
+                (static_cast<int64_t>(head_idx) * total_tokens +
+                 chunk_token_start) * static_cast<int64_t>(HiddenSize);
+#else
             int64_t v_off =
                 (chunk_token_start * static_cast<int64_t>(H) +
                  static_cast<int64_t>(head_idx)) *
                 static_cast<int64_t>(HiddenSize);
+#endif
             int64_t s_offset =
                 (chunk_global_idx * H + head_idx) *
                 static_cast<int64_t>(HiddenSize) *
@@ -2510,11 +2994,31 @@ AICORE void GDN_CHUNK_O_KERNEL(
             }
             // Load V
             {
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+              if (use_precomputed_qs) {
+                constexpr int32_t DcciCacheLineElems =
+                    64 / static_cast<int32_t>(sizeof(ComputeT));
+                for (int32_t row = 0; row < valid_rows; ++row) {
+                  for (int32_t r = 0; r < HiddenSize;
+                       r += DcciCacheLineElems) {
+                    dcci(static_cast<__gm__ void *>(
+                             V_handle + v_off + row * HiddenSize + r),
+                         SINGLE_CACHE_LINE);
+                  }
+                }
+                dsb(DSB_DDR);
+              }
+#endif
               L1Mat<ComputeT, ChunkSize, HiddenSize, DYNAMIC, DYNAMIC> _l1(valid_rows, HiddenSize);
               TASSIGN(_l1, 131072);
               Shape<1, 1, 1, DYNAMIC, DYNAMIC> _gs;
               _gs.shape[3] = valid_rows; _gs.shape[4] = HiddenSize;
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+              GmStride2D _stride(HiddenSize);
+#else
               GmStride2D _stride(BSND_V_STRIDE);
+#endif
               GmTensor2D<ComputeT> _gm(V_handle + v_off, _gs, _stride);
               TLOAD(_l1, _gm);
               if (valid_rows != ChunkSize) TFILLPAD(_l1, _l1);
@@ -2831,6 +3335,18 @@ AICORE void GDN_CHUNK_O_KERNEL(
     }
   } else if (use_precomputed_qs && reuse_group_qk != 0) {
     const int64_t group_work_count = h_o_chunk_count * Hg;
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_REUSE
+    constexpr int32_t GroupFlowFlag = 0;
+    constexpr int32_t GatedSlot0ReadyFlag = 1;
+    constexpr int32_t QkvSlot0ReadyFlag = 2;
+    constexpr int32_t GatedSlot1ReadyFlag = 4;
+    constexpr int32_t QkvSlot1ReadyFlag = 5;
+    constexpr int32_t GatedBottomReadyFlag = 6;
+    constexpr int32_t QkvBottomReadyFlag = 7;
+    constexpr int32_t QkvSlot2ReadyFlag = 8;
+    static_assert(QkvSlot2ReadyFlag <= 10,
+                  "A5 group-QK events must fit IDs 0..10");
+#else
     constexpr int32_t GroupFlowFlag = 8;
     constexpr int32_t GatedSlot0ReadyFlag = 9;
     constexpr int32_t QkvSlot0ReadyFlag = 10;
@@ -2839,11 +3355,16 @@ AICORE void GDN_CHUNK_O_KERNEL(
     constexpr int32_t GatedBottomReadyFlag = 13;
     constexpr int32_t QkvBottomReadyFlag = 14;
     constexpr int32_t QkvSlot2ReadyFlag = 15;
+#endif
     constexpr int32_t QkMailboxFreeFlag = QkvSlot2ReadyFlag;
     const bool use_inplace_lane2 = GROUP == 3;
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DOUBLE_MAILBOX
+    __gm__ ComputeT *lane2_mailbox = workspace_ping_qk_handle;
+#else
     __gm__ ComputeT *lane2_mailbox =
         workspace_ping_qk_handle +
         static_cast<int64_t>(block_num) * WsQKSize;
+#endif
     const int64_t regular_group_rounds =
         group_work_count / static_cast<int64_t>(block_num);
     const bool rebalance_group_owners =
@@ -2868,7 +3389,17 @@ AICORE void GDN_CHUNK_O_KERNEL(
         group_tail_owner_shift);
 
     while (group_work < group_work_count) {
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DOUBLE_MAILBOX
+      const int32_t current_qk_slot =
+          static_cast<int32_t>(group_owned_idx & 1);
+      __gm__ ComputeT *current_qk_mailbox =
+          current_qk_slot == 0
+              ? workspace_qk_handle
+              : workspace_ping_qk_handle +
+                    static_cast<int64_t>(block_num) * WsQKSize;
+#else
       __gm__ ComputeT *current_qk_mailbox = workspace_qk_handle;
+#endif
       const int64_t global_chunk_idx = group_work / Hg;
       const int32_t head_group =
           static_cast<int32_t>(group_work - global_chunk_idx * Hg);
@@ -2909,7 +3440,11 @@ AICORE void GDN_CHUNK_O_KERNEL(
             slot == 0 ? GateSlot0Addr : GateSlot1Addr;
 
         if (group_lane == 0) {
-          PublishGatedQKTile<HiddenSize, ChunkSize>(
+          PublishGatedQKTile<HiddenSize, ChunkSize
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+                             , true
+#endif
+                             >(
               G_handle, current_qk_mailbox,
               workspace_qk_gated_handle, static_cast<int64_t>(cid),
               total_tokens, chunk_token_start, head_idx, valid_rows,
@@ -2935,7 +3470,11 @@ AICORE void GDN_CHUNK_O_KERNEL(
               next_slot == 0 ? GateSlot0Addr : GateSlot1Addr;
           const bool next_releases_qk =
               next_lane + 1 == GROUP;
-          PublishGatedQKTile<HiddenSize, ChunkSize>(
+          PublishGatedQKTile<HiddenSize, ChunkSize
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+                             , true
+#endif
+                             >(
               G_handle, current_qk_mailbox,
               next_gated_mailbox, static_cast<int64_t>(cid),
               total_tokens, chunk_token_start, next_head_idx,
@@ -2953,7 +3492,11 @@ AICORE void GDN_CHUNK_O_KERNEL(
         const bool release_group_flow =
             !use_inplace_lane2 &&
             (group_lane + 2 < GROUP || group_lane + 1 == GROUP);
-        ConsumeQKVTile<HiddenSize, ChunkSize, FuseGatedRmsNorm>(
+        ConsumeQKVTile<HiddenSize, ChunkSize, FuseGatedRmsNorm
+#ifdef MEGA_CHUNK_GDN_A5_GROUP_QK_DIRECTED_SYNC
+                       , true
+#endif
+                       >(
             S_handle, qkv_mailbox, O_handle, z_handle,
             static_cast<int64_t>(cid), global_chunk_idx,
             chunk_token_start,
@@ -3251,6 +3794,24 @@ AICORE void GDN_CHUNK_O_KERNEL(
                       S_handle +
                       (chunk_global_idx * H + head_idx) *
                           static_cast<int64_t>(HiddenSize) * HiddenSize;
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+                  constexpr int32_t DcciCacheLineElems =
+                      64 / static_cast<int32_t>(sizeof(ComputeT));
+                  for (int32_t row = 0; row < local_rows; ++row) {
+                    for (int32_t r = 0; r < HiddenSize;
+                         r += DcciCacheLineElems) {
+                      dcci(static_cast<__gm__ void *>(
+                               qs_source +
+                                   (static_cast<int64_t>(vid) * HalfChunk +
+                                    row) *
+                                       HiddenSize +
+                                   r),
+                           SINGLE_CACHE_LINE);
+                    }
+                  }
+                  dsb(DSB_DDR);
+#endif
                 }
                 GlobalTensor<ComputeT, decltype(_gs), pto::Stride<1, 1, 1, HiddenSize, 1>> _gm(
                     qs_source +

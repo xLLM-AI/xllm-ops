@@ -857,11 +857,28 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
         GDN_STAGE_SYNC();
     }
 
-#if defined(GDN_A5_KERNEL)
-    // The group-QK schedule uses eight simultaneously live FFTS flag IDs,
-    // including 11..15.  A5 intra-block events only provide IDs 0..10, so
-    // keep this optional schedule on the legacy path until it has an A5
-    // event-allocation scheme.  The regular H/O pipeline uses IDs 0..7.
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_GROUP_QK_REUSE)
+    // Variant17 remaps the group schedule onto A5's intra-block event range.
+    // Limit reuse to the chunk range accepted by chunk O's precomputed-QS
+    // path; outside it variant16 remains the correctness fallback.
+    const uint32_t group_qk_chunk_count =
+        H > 0 && (num_matrices % static_cast<uint32_t>(H)) == 0
+            ? num_matrices / static_cast<uint32_t>(H)
+            : 0;
+    const uint64_t max_group_qk_chunk_count =
+        batch_size > 0 ? static_cast<uint64_t>(batch_size) * 64u : 0u;
+    const bool reuse_group_qk =
+        EnableHoPipeline && H >= 8 && D == C &&
+        static_cast<uint32_t>(H) == 3u * num_key_heads &&
+        group_qk_chunk_count >= 4 &&
+        static_cast<uint64_t>(group_qk_chunk_count) <=
+            max_group_qk_chunk_count &&
+        mk_o::CanReuseGroupQk<C>(
+            batch_size, total_tokens, static_cast<uint32_t>(H),
+            num_key_heads, num_matrices,
+            reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr));
+#elif defined(GDN_A5_KERNEL)
     constexpr bool reuse_group_qk = false;
 #else
     const bool reuse_group_qk =
@@ -949,7 +966,9 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
     return;
 #endif
 
+#ifndef MEGA_CHUNK_GDN_A5_SINGLE_POST_SOLVE_SYNC
     GDN_STAGE_SYNC();
+#endif
 #ifdef MEGA_STOP_AFTER_SYNC_BEFORE_WY
     return;
 #endif
@@ -982,16 +1001,64 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
     const uint32_t expected_h_o_matrices =
         h_o_chunk_count * static_cast<uint32_t>(H);
 #if defined(GDN_A5_KERNEL)
-    // PR #41's A5 intra-block protocol covers the regular chunk-H/O flow.
-    // The newer overlap schedule has a separate readiness protocol which
-    // still assumes the legacy FFTS execution model, so keep it A2/A3-only.
+#if defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+    bool h_o_sequences_valid = cu_seqlens_ptr != nullptr;
+    uint64_t scanned_h_o_chunks = 0;
+    if (h_o_sequences_valid) {
+        auto *h_o_cu_seqlens =
+            reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr);
+        for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
+            const int64_t seq_start =
+                static_cast<int64_t>(h_o_cu_seqlens[seq_idx]);
+            const int64_t seq_end =
+                static_cast<int64_t>(h_o_cu_seqlens[seq_idx + 1]);
+            const int64_t seq_tokens = seq_end - seq_start;
+            if (seq_start < 0 || seq_end > total_tokens ||
+                seq_tokens <= 0) {
+                h_o_sequences_valid = false;
+                break;
+            }
+            const uint64_t seq_chunks =
+                static_cast<uint64_t>((seq_tokens + C - 1) / C);
+            if (seq_chunks > 64u) {
+                h_o_sequences_valid = false;
+                break;
+            }
+            scanned_h_o_chunks += seq_chunks;
+        }
+    }
+    constexpr uint64_t H_O_READY_STRIDE_BYTES =
+        16u * static_cast<uint64_t>(sizeof(int32_t));
+    const uint64_t h_o_ready_bytes =
+        batch_size > 0 && H > 0
+            ? static_cast<uint64_t>(batch_size) *
+                  static_cast<uint64_t>(H) * H_O_READY_STRIDE_BYTES
+            : 0u;
+    // Variant16's regular O path starts its ping QK mailbox in the second
+    // KKT tile. The first tile is dead after WY and can hold the ready lines.
+    const uint64_t h_o_ready_capacity_bytes =
+        static_cast<uint64_t>(get_block_num()) * C * C * sizeof(ComputeT);
+    const bool use_h_o_pipeline =
+        EnableHoPipeline && H >= 8 && D == C && batch_size >= 1 &&
+        h_o_sequences_valid && h_o_chunk_count >= 4 &&
+        scanned_h_o_chunks == static_cast<uint64_t>(h_o_chunk_count) &&
+        num_matrices == expected_h_o_matrices &&
+        h_o_ready_bytes <= h_o_ready_capacity_bytes;
+#else
+    // Keep the validated A5 full MIX barrier unless an A5-only candidate
+    // explicitly enables the per-chunk H/O readiness protocol.
     constexpr bool use_h_o_pipeline = false;
+#endif
 #else
     const bool use_h_o_pipeline =
         EnableHoPipeline && H >= 8 && D == C && batch_size >= 1 &&
         cu_seqlens_ptr != nullptr && h_o_chunk_count >= 4 &&
         h_o_chunk_count <= 64 &&
         num_matrices == expected_h_o_matrices;
+#endif
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_GROUP_QK_REUSE)
+    const bool precompute_qs = use_h_o_pipeline || reuse_group_qk;
 #endif
 #if defined(__DAV_C220_VEC__)
     if (use_h_o_pipeline && get_subblockid() == 0) {
@@ -1013,6 +1080,12 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
                 h_o_ready_gm[ready_offset]);
             __asm__ __volatile__("");
         }
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+        // The zero generation belongs to this launch. Flush it before the
+        // following full MIX rendezvous releases H on graph replay.
+        dsb(DSB_DDR);
+#endif
     }
 #endif
     GDN_STAGE_SYNC();
@@ -1031,7 +1104,12 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
         reinterpret_cast<__gm__ ComputeT *>(h_ws_ptr),
         reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size,
         seq_len, total_tokens, static_cast<uint32_t>(H), num_key_heads,
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_GROUP_QK_REUSE)
+        precompute_qs ? 1u : 0u,
+#else
         use_h_o_pipeline ? 1u : 0u,
+#endif
         reinterpret_cast<__gm__ int32_t *>(kkt_ws_ptr), ffts_addr,
         reinterpret_cast<__gm__ float *>(initial_state_cache_ptr),
         reinterpret_cast<__gm__ int32_t *>(initial_state_indices_ptr),
@@ -1040,7 +1118,28 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
         state_index_stride, state_cache_slots);
 
     if (use_h_o_pipeline && EnableHoOverlap) {
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+        // H and O reuse event IDs 0..7. A local 1-AIC/2-AIV rendezvous closes
+        // every H event before this physical MIX block enters O, without
+        // waiting for other physical blocks that are still executing H.
+        constexpr uint16_t H_O_LOCAL_BARRIER_EVENT = 8;
+        static_assert(H_O_LOCAL_BARRIER_EVENT <= 10,
+                      "A5 H/O local barrier must fit event IDs 0..10");
+        constexpr uint16_t H_O_LOCAL_BARRIER_CONFIG =
+            static_cast<uint16_t>(
+                1u | (2u << SYNC_MODE_SHIFT_VALUE) |
+                (H_O_LOCAL_BARRIER_EVENT << SYNC_FLAG_SHIFT_VALUE));
+#if defined(GDN_A5_CUBE_KERNEL)
+        gdn_sync::Wait<PIPE_MTE2>(H_O_LOCAL_BARRIER_EVENT);
+        gdn_sync::Signal<PIPE_FIX>(H_O_LOCAL_BARRIER_CONFIG);
+#elif defined(GDN_A5_VECTOR_KERNEL)
+        gdn_sync::Signal<PIPE_MTE3>(H_O_LOCAL_BARRIER_CONFIG);
+        gdn_sync::Wait<PIPE_MTE2>(H_O_LOCAL_BARRIER_EVENT);
+#endif
+#else
         pipe_barrier(PIPE_ALL);
+#endif
     } else {
 #if defined(__DAV_C220_VEC__)
         // O consumes H's GM state/workspace. Cross-core rendezvous alone does
@@ -1066,7 +1165,12 @@ AICORE inline void mega_kernel_impl(GM_ADDR q_ptr, GM_ADDR k_ptr, GM_ADDR v_ptr,
         reinterpret_cast<__gm__ GDN_PUBLIC_DTYPE *>(o_ptr),
         reinterpret_cast<__gm__ int32_t *>(cu_seqlens_ptr), batch_size, seq_len, total_tokens,
         static_cast<uint32_t>(H), num_key_heads,
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_GROUP_QK_REUSE)
+        precompute_qs ? 1u : 0u,
+#else
         use_h_o_pipeline ? 1u : 0u,
+#endif
         reinterpret_cast<__gm__ int32_t *>(kkt_ws_ptr), ffts_addr,
         reinterpret_cast<__gm__ GDN_PUBLIC_DTYPE *>(z_ptr),
         reinterpret_cast<__gm__ GDN_PUBLIC_DTYPE *>(norm_weight_ptr));

@@ -683,6 +683,7 @@ AICORE PTO_INLINE void paired_vec_finish(
   constexpr int32_t DD = D * D;
   constexpr int64_t H_O_READY_STRIDE = 16;
   wait_flag_dev(FlagBase + 2);
+#ifndef MEGA_CHUNK_GDN_A5_GROUP_QK_SKIP_HO_READY
   if (emit_precomputed_qs && vid == 0) {
     const int64_t ready_offset = head * H_O_READY_STRIDE;
     h_o_ready_ub.SetValue(0, ci + 1);
@@ -694,6 +695,7 @@ AICORE PTO_INLINE void paired_vec_finish(
                                      ready_shape, ready_stride);
     TSTORE(ready_global, h_o_ready_ub);
   }
+#endif
   {
     GmShape2D kv_shape(HalfC, D);
     GmStride2D kv_stride(D);
@@ -925,6 +927,18 @@ AICORE void chunk_h_kernel(
   AscendC::GlobalTensor<int32_t> h_o_ready_gm;
   h_o_ready_gm.SetGlobalBuffer(h_o_ready_handle);
 
+#if defined(GDN_A5_VECTOR_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
+  if constexpr (LoadInitialStateCache) {
+    if (has_initial_state != 0) {
+      // Acquire both the slot metadata and FP32 payload once per AIV before
+      // any work item can dereference an index cached by an earlier launch.
+      dcci((__gm__ void *)0, ENTIRE_DATA_CACHE);
+      dsb(DSB_DDR);
+    }
+  }
+#endif
+
   int64_t num_seqs = batch_size;
   int64_t total_work = num_seqs * H;
   const int64_t paired_core_count = total_work - block_num;
@@ -1118,6 +1132,13 @@ AICORE void chunk_h_kernel(
     const bool emit_precomputed_qs =
         precompute_qs != 0 && C == D && H >= 8 &&
         cu_seqlens != nullptr;
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+    // Variant16 keeps the private V_new tensor in [H,T,D].
+    constexpr int32_t v_stride = D;
+    const int64_t v_head_base =
+        (head * total_tokens + bos) * static_cast<int64_t>(D);
+    constexpr int64_t v_chunk_stride = static_cast<int64_t>(C) * D;
+#else
     const bool use_packed_v =
         emit_precomputed_qs && batch_size == 1 && (slen % C) == 0;
     const int32_t v_stride =
@@ -1129,6 +1150,7 @@ AICORE void chunk_h_kernel(
             : (bos * H + head) * static_cast<int64_t>(D);
     const int64_t v_chunk_stride =
         static_cast<int64_t>(H) * C * D;
+#endif
     const int64_t ws_core_offset =
         static_cast<int64_t>(cid) * WS_FIELD_STRIDE;
     const int64_t ws_field_span =
@@ -1153,7 +1175,12 @@ AICORE void chunk_h_kernel(
       int64_t valid = slen - static_cast<int64_t>(ci) * C;
       if (valid > C) valid = C;
 
-#if defined(GDN_A5_KERNEL)
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
+      // S and W are both producer-published before this chunk begins. One
+      // full clean+invalidate replaces thousands of scalar cacheline DCCIs.
+      dcci((__gm__ void *)0, ENTIRE_DATA_CACHE);
+#elif defined(GDN_A5_KERNEL)
       // Consumer-side invalidate for the Vec-published state: A5 Cube MTE2
       // loads can return clean stale lines left by a previous launch.
       for (int32_t r = 0; r < D * D; r += 16) {
@@ -1176,8 +1203,15 @@ AICORE void chunk_h_kernel(
         TLOAD(s_l1_load, s_global);
       }
 
-      int64_t w_offset = ((chunk_start) * H + head) * D;
-#if defined(GDN_A5_KERNEL)
+      int64_t w_offset;
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+      w_offset = (head * total_tokens + chunk_start) *
+                 static_cast<int64_t>(D);
+#else
+      w_offset = ((chunk_start) * H + head) * D;
+#endif
+#if defined(GDN_A5_KERNEL) && \
+    !defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
       // W is published by the WY stage Vector cores; same stale-line hazard.
       // Rows are BSND-strided, so invalidate row by row.
       for (int32_t row = 0; row < valid; ++row) {
@@ -1192,7 +1226,11 @@ AICORE void chunk_h_kernel(
       wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
       {
         GmShape2D w_shape(static_cast<int32_t>(valid), D);
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+        GmStride2D w_stride(D);
+#else
         GmStride2D w_stride(BSND_QKV_STRIDE);
+#endif
         GmTensor2D<ComputeT> w_global(W_handle + w_offset, w_shape, w_stride);
         DynMatL1<ComputeT, C, D> w_l1_load(static_cast<int32_t>(valid), D);
         TASSIGN(w_l1_load, D * D * static_cast<int32_t>(sizeof(ComputeT)));
@@ -1256,7 +1294,17 @@ AICORE void chunk_h_kernel(
       wait_flag_dev(1);
 #endif
 
-#if defined(GDN_A5_KERNEL)
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
+      // k_tilde and V_new become visible at the same producer boundary.
+      dcci((__gm__ void *)0, ENTIRE_DATA_CACHE);
+#if defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+      // In variant21 event 2 is also the release predecessor for QS. Make
+      // the Cube-published snapshot visible before that event can reach AIV0,
+      // which publishes the GM ready counter.
+      dsb(DSB_DDR);
+#endif
+#elif defined(GDN_A5_KERNEL)
       // Consumer-side invalidate for the Vec-published k_tilde tile before the
       // KV GEMM; a stale line here corrupts the state update (final_state).
       for (int32_t r = 0; r < D * C; r += 16) {
@@ -1278,7 +1326,8 @@ AICORE void chunk_h_kernel(
         TLOAD(k_l1_load, k_global);
       }
 
-#if defined(GDN_A5_KERNEL)
+#if defined(GDN_A5_KERNEL) && \
+    !defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
       // V_new is published by this stage's Vector cores earlier in the chunk
       // loop; the Cube MTE2 load can still hold a stale line from a previous
       // work item or launch, which corrupts the KV product (final_state).
@@ -1471,6 +1520,12 @@ AICORE void chunk_h_kernel(
     const bool emit_precomputed_qs =
         precompute_qs != 0 && C == D && H >= 8 &&
         cu_seqlens != nullptr;
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+    constexpr int32_t v_stride = D;
+    const int64_t v_head_base =
+        (head * total_tokens + bos) * static_cast<int64_t>(D);
+    constexpr int64_t v_chunk_stride = static_cast<int64_t>(C) * D;
+#else
     const bool use_packed_v =
         emit_precomputed_qs && batch_size == 1 && (slen % C) == 0;
     const int32_t v_stride =
@@ -1482,6 +1537,7 @@ AICORE void chunk_h_kernel(
             : (bos * H + head) * static_cast<int64_t>(D);
     const int64_t v_chunk_stride =
         static_cast<int64_t>(H) * C * D;
+#endif
     const int64_t ws_core_offset =
         static_cast<int64_t>(cid) * WS_FIELD_STRIDE;
     const int64_t ws_field_span =
@@ -1493,11 +1549,30 @@ AICORE void chunk_h_kernel(
 
     if (has_initial_state != 0) {
       if constexpr (LoadInitialStateCache) {
+#if defined(GDN_A5_VECTOR_KERNEL) && \
+    !defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
+        dcci(static_cast<__gm__ void *>(initial_state_indices + seq_idx),
+             SINGLE_CACHE_LINE);
+        dsb(DSB_DDR);
+#endif
         const int32_t state_index = initial_state_indices[seq_idx];
         if (state_index >= 0 && state_index < state_cache_slots) {
           const int64_t cache_offset =
               (static_cast<int64_t>(state_index) * H + head) * DD +
               vid * HalfC * D;
+#if defined(GDN_A5_KERNEL) && \
+    !defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
+          for (int32_t r = 0; r < HalfC * D; r += 16) {
+            dcci(static_cast<__gm__ void *>(
+                     initial_state_cache + cache_offset + r),
+                 SINGLE_CACHE_LINE);
+          }
+          dsb(DSB_DDR);
+#endif
+#if defined(GDN_A5_VECTOR_KERNEL)
+          set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+          wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+#endif
           GmShape2D cache_shape(HalfC, D);
           GmStride2D cache_stride(D);
           GmTensor2D<float> cache_global(initial_state_cache + cache_offset,
@@ -1570,8 +1645,14 @@ AICORE void chunk_h_kernel(
 
     int64_t k_offset_0 =
         (chunk_start_0 * Hg + head_g) * D + vid * HalfC * BSND_K_STRIDE;
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
+    // Initial K and G are consumed from the same completed frontend stage.
+    dcci((__gm__ void *)0, ENTIRE_DATA_CACHE);
+#endif
     if (valid_rows_0 > 0) {
-#if defined(GDN_A5_KERNEL)
+#if defined(GDN_A5_KERNEL) && \
+    !defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
       // K only feeds the state update (final_state); a stale line here does
       // not show up in the main output, so it must be invalidated explicitly.
       for (int32_t row = 0; row < valid_rows_0; ++row) {
@@ -1602,7 +1683,8 @@ AICORE void chunk_h_kernel(
     }
 
     {
-#if defined(GDN_A5_KERNEL)
+#if defined(GDN_A5_KERNEL) && \
+    !defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
       // g (log-sigmoid gate) only feeds the state recurrence; same
       // consumer-side stale-line hazard as K.
       for (int32_t r = 0; r < valid0 * 4; r += 32) {
@@ -1643,10 +1725,22 @@ AICORE void chunk_h_kernel(
       // is the key fix that keeps ragged tails and dense varlen boundary mixes
       // from reading or writing beyond the live rows in this stripe.
 
-      int64_t u_offset = (chunk_start * H + head) * D + vid * HalfC * BSND_QKV_STRIDE;
+      int64_t u_offset;
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+      u_offset =
+          (head * total_tokens + chunk_start +
+           static_cast<int64_t>(vid) * HalfC) * D;
+#else
+      u_offset = (chunk_start * H + head) * D +
+                 vid * HalfC * BSND_QKV_STRIDE;
+#endif
       if (valid_rows > 0) {
         GmShape2D u_shape(valid_rows, D);
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+        GmStride2D u_stride(D);
+#else
         GmStride2D u_stride(BSND_QKV_STRIDE);
+#endif
         GmTensor2D<ComputeT> u_global(U_handle + u_offset, u_shape, u_stride);
         DynVecTile<ComputeT, HalfC, D, pto::PadValue::Zero> u_load(valid_rows, D);
         TASSIGN(u_load, U_UB_HALF);
@@ -1705,7 +1799,10 @@ AICORE void chunk_h_kernel(
       TCVT(u_ub, u_ub_half, pto::RoundMode::CAST_NONE);
 
       wait_flag_dev(0);
-#if defined(GDN_A5_KERNEL)
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
+      dcci((__gm__ void *)0, ENTIRE_DATA_CACHE);
+#elif defined(GDN_A5_KERNEL)
       // A5 Vector MTE2 loads can return clean stale lines when the workspace
       // addresses were read by a previous launch.  Invalidate the Cube
       // product rows on the consumer immediately before loading them.
@@ -1782,6 +1879,23 @@ AICORE void chunk_h_kernel(
         TSTORE(k_global, k_store);
       }
 
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+      // Both AIV siblings own disjoint V_new row stripes. Drain and clean
+      // each stripe before event 1; Cube joins both event-1 releases and
+      // propagates them through event 2 to the ready-counter publisher.
+      constexpr int32_t DcciCacheLineElems =
+          64 / static_cast<int32_t>(sizeof(ComputeT));
+      pipe_barrier(PIPE_ALL);
+      for (int32_t row = 0; row < valid_rows; ++row) {
+        for (int32_t r = 0; r < D; r += DcciCacheLineElems) {
+          dcci(static_cast<__gm__ void *>(
+                   V_handle + v_offset + row * v_stride + r),
+               SINGLE_CACHE_LINE);
+        }
+      }
+      dsb(DSB_DDR);
+#endif
       ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (1 << 8));
 
       set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
@@ -1815,8 +1929,13 @@ AICORE void chunk_h_kernel(
 
         int64_t nk_off =
             (next_start * Hg + head_g) * D + vid * HalfC * BSND_K_STRIDE;
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
+        dcci((__gm__ void *)0, ENTIRE_DATA_CACHE);
+#endif
         if (next_valid_rows > 0) {
-#if defined(GDN_A5_KERNEL)
+#if defined(GDN_A5_KERNEL) && \
+    !defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
           // Same stale-line invalidation for the prefetched K rows.
           for (int32_t row = 0; row < next_valid_rows; ++row) {
             for (int32_t r = 0; r < D; r += 16) {
@@ -1847,7 +1966,8 @@ AICORE void chunk_h_kernel(
         }
 
         {
-#if defined(GDN_A5_KERNEL)
+#if defined(GDN_A5_KERNEL) && \
+    !defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
           // Same stale-line invalidation for the prefetched gate row.
           for (int32_t r = 0; r < next_valid * 4; r += 32) {
             dcci(static_cast<__gm__ void *>(
@@ -1873,6 +1993,7 @@ AICORE void chunk_h_kernel(
       }
 
       wait_flag_dev(2);
+#ifndef MEGA_CHUNK_GDN_A5_GROUP_QK_SKIP_HO_READY
       if (emit_precomputed_qs && vid == 0) {
         const int64_t ready_offset =
             (seq_idx * H + head) * H_O_READY_STRIDE;
@@ -1883,8 +2004,18 @@ AICORE void chunk_h_kernel(
             AscendC::DcciDst::CACHELINE_ALL>(
             h_o_ready_gm[ready_offset]);
         __asm__ __volatile__("");
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_HO_OVERLAP)
+        // This is the doorbell release. QS and both V_new stripes reached
+        // DDR before event 2, so only the counter line remains to publish.
+        dsb(DSB_DDR);
+#endif
       }
-#if defined(GDN_A5_KERNEL)
+#endif
+#if defined(GDN_A5_KERNEL) && \
+    defined(MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI)
+      dcci((__gm__ void *)0, ENTIRE_DATA_CACHE);
+#elif defined(GDN_A5_KERNEL)
       // Same consumer-side invalidation for the k_tilde^T @ v_new product
       // published by the Cube stage; without it the recurrence can fold in a
       // stale line from a previous launch and corrupt the final state.

@@ -390,10 +390,9 @@ AICORE void GDN_WY_FAST_KERNEL(
   }
 
 #if defined(__DAV_C310_VEC__)
-  // A5: Vector0 gathers strided BSND operands and applies column weights in
-  // 16x128 UB tiles. Cube consumes two contiguous workspace tiles below.
-  // The second Vector subblock participates only in the local ready/release
-  // events because its long fp16/fp32 expression path is not reliable.
+  // A5: gather strided BSND operands and apply column weights in 16x128 UB
+  // tiles. The optional dual-AIV schedule gives each sibling alternating row
+  // bands and rendezvouses both before Cube consumes a packed workspace.
   static_assert(HiddenSize == ChunkSize,
                 "A5 WY packed path expects D == chunk size");
   constexpr int32_t A5Rows = 16;
@@ -414,6 +413,16 @@ AICORE void GDN_WY_FAST_KERNEL(
   TASSIGN(a5_half, A1HalfUbAddr);
   TASSIGN(a5_float, A1UbAddr);
   TASSIGN(a5_weight_2d, Beta2dUbAddr);
+
+#ifdef MEGA_CHUNK_GDN_A5_DUAL_AIV_WY
+  constexpr bool A5VectorOwner = true;
+  const int32_t a5_first_row = static_cast<int32_t>(vid) * A5Rows;
+  constexpr int32_t A5RowStride = 2 * A5Rows;
+#else
+  constexpr bool A5VectorOwner = false;
+  constexpr int32_t a5_first_row = 0;
+  constexpr int32_t A5RowStride = A5Rows;
+#endif
 
   int64_t a5_work = 0;
   for (int64_t seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
@@ -440,7 +449,7 @@ AICORE void GDN_WY_FAST_KERNEL(
         __gm__ ComputeT *packed_weighted =
             workspace_a2_handle + static_cast<int64_t>(cid) * WsA2Size;
 
-        if (vid == 0) {
+        if (vid == 0 || A5VectorOwner) {
           // Contiguous beta vector for A2 = A * beta[None, :].
           {
             GmShape2D beta_shape(1, valid_rows);
@@ -464,8 +473,8 @@ AICORE void GDN_WY_FAST_KERNEL(
           TCOLEXPAND(a5_weight_2d, beta_ub);
           pipe_barrier(PIPE_V);
 
-          for (int32_t tile_row = 0; tile_row < ChunkSize;
-               tile_row += A5Rows) {
+          for (int32_t tile_row = a5_first_row; tile_row < ChunkSize;
+               tile_row += A5RowStride) {
             const int32_t live_rows =
                 valid_rows > tile_row
                     ? min(valid_rows - tile_row, A5Rows)
@@ -534,15 +543,21 @@ AICORE void GDN_WY_FAST_KERNEL(
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
           }
         }
-        if (vid == 0) {
+        if (vid == 0 || A5VectorOwner) {
+#ifdef MEGA_CHUNK_GDN_A5_DUAL_AIV_WY
+          set_intra_block(PIPE_MTE3,
+                          0 + vid * SYNC_FLAG_ID_MAX);
+#else
           set_intra_block(PIPE_MTE3, 0);
+#endif
         }
         wait_intra_block(PIPE_MTE2, 1);
 
-        if (vid == 0) {
+        if (vid == 0 || A5VectorOwner) {
+#ifndef MEGA_CHUNK_GDN_A5_PACKED_WUV
           // Scatter contiguous U back to BSND.
-          for (int32_t tile_row = 0; tile_row < valid_rows;
-               tile_row += A5Rows) {
+          for (int32_t tile_row = a5_first_row; tile_row < valid_rows;
+               tile_row += A5RowStride) {
             const int32_t live_rows =
                 min(valid_rows - tile_row, A5Rows);
             A5PackedGlobal u_src(packed_weighted + tile_row * HiddenSize);
@@ -562,6 +577,7 @@ AICORE void GDN_WY_FAST_KERNEL(
             set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
           }
+#endif
 
           // Build exp(g) * beta and A1 = A * weight[None, :].
           {
@@ -589,8 +605,8 @@ AICORE void GDN_WY_FAST_KERNEL(
           pipe_barrier(PIPE_V);
 
           const int32_t key_head = head_idx / GROUP;
-          for (int32_t tile_row = 0; tile_row < ChunkSize;
-               tile_row += A5Rows) {
+          for (int32_t tile_row = a5_first_row; tile_row < ChunkSize;
+               tile_row += A5RowStride) {
             const int32_t live_rows =
                 valid_rows > tile_row
                     ? min(valid_rows - tile_row, A5Rows)
@@ -658,14 +674,20 @@ AICORE void GDN_WY_FAST_KERNEL(
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
           }
         }
-        if (vid == 0) {
+        if (vid == 0 || A5VectorOwner) {
+#ifdef MEGA_CHUNK_GDN_A5_DUAL_AIV_WY
+          set_intra_block(PIPE_MTE3,
+                          2 + vid * SYNC_FLAG_ID_MAX);
+#else
           set_intra_block(PIPE_MTE3, 2);
+#endif
         }
         wait_intra_block(PIPE_MTE2, 3);
 
-        if (vid == 0) {
-          for (int32_t tile_row = 0; tile_row < valid_rows;
-               tile_row += A5Rows) {
+        if (vid == 0 || A5VectorOwner) {
+#ifndef MEGA_CHUNK_GDN_A5_PACKED_WUV
+          for (int32_t tile_row = a5_first_row; tile_row < valid_rows;
+               tile_row += A5RowStride) {
             const int32_t live_rows =
                 min(valid_rows - tile_row, A5Rows);
             A5PackedGlobal w_src(packed_weighted + tile_row * HiddenSize);
@@ -685,9 +707,15 @@ AICORE void GDN_WY_FAST_KERNEL(
             set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
           }
+#endif
         }
-        if (vid == 0) {
+        if (vid == 0 || A5VectorOwner) {
+#ifdef MEGA_CHUNK_GDN_A5_DUAL_AIV_WY
+          set_intra_block(PIPE_MTE3,
+                          4 + vid * SYNC_FLAG_ID_MAX);
+#else
           set_intra_block(PIPE_MTE3, 4);
+#endif
         }
         wait_intra_block(PIPE_MTE2, 5);
       }
@@ -710,10 +738,7 @@ AICORE void GDN_WY_FAST_KERNEL(
     const int64_t slen = eos - bos;
     const int64_t num_chunks = (slen + ChunkSize - 1) / ChunkSize;
     for (int64_t chunk_idx = 0; chunk_idx < num_chunks; ++chunk_idx) {
-      (void)bos;
-      (void)chunk_idx;
       for (int32_t head_idx = 0; head_idx < H; ++head_idx, ++a5_work) {
-        (void)head_idx;
         if (a5_work % static_cast<int64_t>(block_num) !=
             static_cast<int64_t>(cid)) {
           continue;
@@ -726,6 +751,9 @@ AICORE void GDN_WY_FAST_KERNEL(
         GmStride2D packed_stride(HiddenSize);
 
         wait_intra_block(PIPE_S, 0);
+#ifdef MEGA_CHUNK_GDN_A5_DUAL_AIV_WY
+        wait_intra_block(PIPE_S, 0 + SYNC_FLAG_ID_MAX);
+#endif
         GmTensor2D<ComputeT> a2_global(packed_weighted, packed_shape,
                                    packed_stride);
         GmTensor2D<ComputeT> v_global(packed_rhs, packed_shape,
@@ -735,13 +763,38 @@ AICORE void GDN_WY_FAST_KERNEL(
         gemm_v0<ComputeT, float, ChunkSize, HiddenSize, ChunkSize,
                 ChunkSize, HiddenSize, ChunkSize, KTail, false, false>(
             a2_l1, v_l1, u_l0, true);
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+        // W/U are private intermediates.  Persist them as [H,T,D] so the
+        // following H stage can issue contiguous loads instead of gathering
+        // the BSND rows which the AIV path used to scatter here.
+        {
+          const int64_t token_start = bos + chunk_idx * ChunkSize;
+          const int32_t valid_rows = static_cast<int32_t>(
+              min(static_cast<int64_t>(ChunkSize), slen - chunk_idx * ChunkSize));
+          GmShape2D u_shape(valid_rows, HiddenSize);
+          GmStride2D u_stride(HiddenSize);
+          GmTensor2D<ComputeT> u_global(
+              U_handle +
+                  (static_cast<int64_t>(head_idx) * total_tokens +
+                   token_start) * HiddenSize,
+              u_shape, u_stride);
+          DynAccTile<float, ChunkSize, HiddenSize> u_store(valid_rows,
+                                                            HiddenSize);
+          TASSIGN(u_store, 0);
+          TSTORE(u_global, u_store);
+        }
+#else
         GmTensor2D<ComputeT> u_global(packed_weighted, packed_shape,
                                   packed_stride);
         TSTORE(u_global, u_l0);
+#endif
         set_intra_block(PIPE_FIX, 1);
         set_intra_block(PIPE_FIX, 1 + SYNC_FLAG_ID_MAX);
 
         wait_intra_block(PIPE_S, 2);
+#ifdef MEGA_CHUNK_GDN_A5_DUAL_AIV_WY
+        wait_intra_block(PIPE_S, 2 + SYNC_FLAG_ID_MAX);
+#endif
         TLOAD(a2_l1, a2_global);
         TLOAD(v_l1, v_global);
         set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
@@ -749,11 +802,33 @@ AICORE void GDN_WY_FAST_KERNEL(
         gemm_v0<ComputeT, float, ChunkSize, HiddenSize, ChunkSize,
                 ChunkSize, HiddenSize, ChunkSize, KTail, false, false>(
             a2_l1, v_l1, u_l0, true);
+#ifdef MEGA_CHUNK_GDN_A5_PACKED_WUV
+        {
+          const int64_t token_start = bos + chunk_idx * ChunkSize;
+          const int32_t valid_rows = static_cast<int32_t>(
+              min(static_cast<int64_t>(ChunkSize), slen - chunk_idx * ChunkSize));
+          GmShape2D w_shape(valid_rows, HiddenSize);
+          GmStride2D w_stride(HiddenSize);
+          GmTensor2D<ComputeT> w_global(
+              W_handle +
+                  (static_cast<int64_t>(head_idx) * total_tokens +
+                   token_start) * HiddenSize,
+              w_shape, w_stride);
+          DynAccTile<float, ChunkSize, HiddenSize> w_store(valid_rows,
+                                                            HiddenSize);
+          TASSIGN(w_store, 0);
+          TSTORE(w_global, w_store);
+        }
+#else
         TSTORE(u_global, u_l0);
+#endif
         set_intra_block(PIPE_FIX, 3);
         set_intra_block(PIPE_FIX, 3 + SYNC_FLAG_ID_MAX);
 
         wait_intra_block(PIPE_S, 4);
+#ifdef MEGA_CHUNK_GDN_A5_DUAL_AIV_WY
+        wait_intra_block(PIPE_S, 4 + SYNC_FLAG_ID_MAX);
+#endif
         set_intra_block(PIPE_S, 5);
         set_intra_block(PIPE_S, 5 + SYNC_FLAG_ID_MAX);
       }

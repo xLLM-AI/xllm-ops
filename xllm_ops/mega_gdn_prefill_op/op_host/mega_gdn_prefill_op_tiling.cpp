@@ -19,8 +19,10 @@ constexpr uint64_t kFloatBytes = 4;
 constexpr uint64_t kHWorkspacePadBytes = 8192;
 constexpr uint64_t kHWorkspaceAlignmentBytes = 16 * 1024 * 1024;
 constexpr uint64_t kHWorkspaceMaxPhaseBytes = 8 * 1024 * 1024;
-constexpr uint32_t kVectorCoreCount = 40;
+constexpr uint32_t kA2A3VectorTaskCount = 40;
+constexpr uint32_t kA5VectorTaskCount = 56;
 constexpr uint32_t kPreferredBaseDim = 3072;
+constexpr uint32_t kPackedHeadDim = 128;
 
 enum class GdnTargetArch : uint32_t {
     A2A3 = 0,
@@ -29,6 +31,7 @@ enum class GdnTargetArch : uint32_t {
 
 struct GdnArchPolicy {
     GdnTargetArch target;
+    uint32_t vector_task_count;
 };
 
 bool ResolveArchPolicy(platform_ascendc::SocVersion soc_version,
@@ -40,10 +43,10 @@ bool ResolveArchPolicy(platform_ascendc::SocVersion soc_version,
     switch (soc_version) {
         case platform_ascendc::SocVersion::ASCEND910B:
         case platform_ascendc::SocVersion::ASCEND910_93:
-            *policy = {GdnTargetArch::A2A3};
+            *policy = {GdnTargetArch::A2A3, kA2A3VectorTaskCount};
             return true;
         case platform_ascendc::SocVersion::ASCEND950:
-            *policy = {GdnTargetArch::A5};
+            *policy = {GdnTargetArch::A5, kA5VectorTaskCount};
             return true;
         default:
             return false;
@@ -74,6 +77,45 @@ enum InputIndex {
 uint32_t CeilDiv(uint32_t value, uint32_t divisor)
 {
     return divisor == 0 ? 0 : (value + divisor - 1) / divisor;
+}
+
+struct ConvChannelTiling {
+    uint32_t base_dim;
+    uint32_t base_dim_count;
+};
+
+ConvChannelTiling ResolveConvChannelTiling(uint32_t conv_dim,
+                                           const GdnArchPolicy &policy)
+{
+    if (policy.target != GdnTargetArch::A5) {
+        const uint32_t base_dim =
+            std::min<uint32_t>(conv_dim, kPreferredBaseDim);
+        return {base_dim, CeilDiv(conv_dim, base_dim)};
+    }
+
+    // A5 exposes 56 AIV tasks for the 28 MIX blocks. Select the smallest
+    // factor of 56 that keeps a channel tile within the causal-conv UB limit.
+    // Keeping the channel count a factor of 56 lets the remaining dimension
+    // use every AIV, while 128-element alignment keeps Q/K head normalization
+    // boundaries intact. For V24/K8 this changes 3072+2048 on 40 tasks into
+    // two equal 2560-channel tiles on 2*28 tasks.
+    constexpr uint32_t kA5ChannelCounts[] = {1, 2, 4, 7, 8, 14, 28, 56};
+    for (const uint32_t channel_count : kA5ChannelCounts) {
+        uint32_t base_dim = CeilDiv(conv_dim, channel_count);
+        base_dim = CeilDiv(base_dim, kPackedHeadDim) * kPackedHeadDim;
+        if (base_dim > kPreferredBaseDim ||
+            CeilDiv(conv_dim, base_dim) != channel_count) {
+            continue;
+        }
+        return {base_dim, channel_count};
+    }
+
+    // Shape validation currently caps the packed QKV width below the range
+    // that reaches this fallback. Keep a complete, correctness-first tiling
+    // for future larger shapes instead of returning a partial AIV grid.
+    const uint32_t base_dim =
+        std::min<uint32_t>(conv_dim, kPreferredBaseDim);
+    return {base_dim, CeilDiv(conv_dim, base_dim)};
 }
 
 uint64_t AlignWorkspace(uint64_t bytes)
@@ -291,11 +333,13 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context)
         return ge::GRAPH_FAILED;
     }
 
-    const uint32_t base_dim =
-        std::min<uint32_t>(conv_dim, kPreferredBaseDim);
-    const uint32_t base_dim_count = CeilDiv(conv_dim, base_dim);
+    const ConvChannelTiling conv_channel_tiling =
+        ResolveConvChannelTiling(conv_dim, arch_policy);
+    const uint32_t base_dim = conv_channel_tiling.base_dim;
+    const uint32_t base_dim_count = conv_channel_tiling.base_dim_count;
     const uint32_t token_core_budget =
-        std::max<uint32_t>(kVectorCoreCount / base_dim_count, 1);
+        std::max<uint32_t>(
+            arch_policy.vector_task_count / base_dim_count, 1);
     const uint32_t token_block_size =
         CeilDiv(tokens, token_core_budget);
     const uint32_t token_block_count =

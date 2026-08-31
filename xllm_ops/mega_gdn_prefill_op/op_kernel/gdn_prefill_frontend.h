@@ -21,12 +21,18 @@
 #include "lib/matmul_intf.h"
 
 #define CAUSAL_CONV1D_SKIP_TPL_REGISTRATION
+#if defined(GDN_PREFILL_ARCH_A5)
+#define CAUSAL_CONV1D_DISABLE_LEGACY_PACKED_QKV_MAPPING
+#endif
 #ifndef GDN_PREFILL_PACKED_QKV_DTYPE
 #define GDN_PREFILL_PACKED_QKV_DTYPE bfloat16_t
 #endif
 #define DTYPE_Y GDN_PREFILL_PACKED_QKV_DTYPE
 #include "../../causal_conv1d/op_kernel/causal_conv1d_fn.h"
 #undef DTYPE_Y
+#if defined(GDN_PREFILL_ARCH_A5)
+#undef CAUSAL_CONV1D_DISABLE_LEGACY_PACKED_QKV_MAPPING
+#endif
 #undef CAUSAL_CONV1D_SKIP_TPL_REGISTRATION
 
 struct GdnPrefillFrontendTilingData {
@@ -169,9 +175,19 @@ public:
         }
     }
 
+#if defined(GDN_PREFILL_ARCH_A5)
+    __aicore__ inline void ProcessSingle(int32_t readCacheIndex,
+                                         int32_t writeCacheIndex,
+                                         bool separateSource = false)
+#else
     __aicore__ inline void ProcessSingle(int32_t readCacheIndex,
                                          int32_t writeCacheIndex)
+#endif
     {
+#if defined(GDN_PREFILL_ARCH_A5)
+        const int32_t processReadCacheIndex =
+            separateSource && readCacheIndex >= 0 ? 0 : readCacheIndex;
+#endif
         const int32_t blockIdx = static_cast<int32_t>(AscendC::GetBlockIdx());
         const int32_t tokenCount = static_cast<int32_t>(this->tilingData_->cuSeqlen);
         const auto task = NsCausalConv1d::ResolveFnPackedQkvBlockTask(
@@ -185,7 +201,11 @@ public:
             static_cast<int32_t>(this->tilingData_->packedVDim));
         if (task.valid) {
             this->ProcessFnChunk(
+#if defined(GDN_PREFILL_ARCH_A5)
+                processReadCacheIndex, writeCacheIndex, readCacheIndex >= 0, 0,
+#else
                 readCacheIndex, writeCacheIndex, readCacheIndex >= 0, 0,
+#endif
                 tokenCount, task.tokenStart, task.tokenEnd - task.tokenStart,
                 task.channelStart, task.baseDimSize,
                 static_cast<int32_t>(this->tilingData_->dim));
@@ -196,10 +216,19 @@ public:
                     task.channelStart, task.baseDimSize);
             }
             if (task.tokenTileId == 0) {
+#if defined(GDN_PREFILL_ARCH_A5)
+                CopyCheckpointTail(processReadCacheIndex, writeCacheIndex,
+                                   task.channelStart, task.baseDimSize,
+                                   separateSource);
+                if (readCacheIndex >= 0 &&
+                    (separateSource ||
+                     readCacheIndex != writeCacheIndex)) {
+#else
                 CopyCheckpointTail(readCacheIndex, writeCacheIndex,
                                    task.channelStart, task.baseDimSize, false);
                 if (readCacheIndex >= 0 &&
                     readCacheIndex != writeCacheIndex) {
+#endif
                     CleanConvStateRows(
                         writeCacheIndex,
                         static_cast<int32_t>(this->tilingData_->width) - 1,
@@ -434,7 +463,26 @@ __aicore__ inline void RunConv(GM_ADDR mixedQkv, GM_ADDR convWeight,
     auto readIndices = reinterpret_cast<__gm__ int32_t *>(readStateIndices);
     auto writeIndices = reinterpret_cast<__gm__ int32_t *>(writeStateIndices);
     if (batchSize == 1) {
+#if defined(GDN_PREFILL_ARCH_A5)
+        const int32_t readCacheIndex = readIndices[0];
+        const int32_t writeCacheIndex = writeIndices[0];
+        const bool useCompactSnapshot =
+            compactConvStateSnapshot != nullptr && readCacheIndex >= 0 &&
+            readCacheIndex < static_cast<int32_t>(
+                                 frontendTiling.conv_state_slots) &&
+            readCacheIndex == writeCacheIndex;
+        if (useCompactSnapshot) {
+            op.SnapshotInitialStates(compactConvStateSnapshot, readIndices, 1);
+            // No token tile may read or overwrite the aliased cache slot until
+            // every channel slice of sequence 0 has reached the snapshot.
+            pto::SYNCALL<pto::SyncCoreType::AIVOnly>();
+            op.UseCompactSnapshot(compactConvStateSnapshot);
+        }
+        op.ProcessSingle(readCacheIndex, writeCacheIndex,
+                         useCompactSnapshot);
+#else
         op.ProcessSingle(readIndices[0], writeIndices[0]);
+#endif
     } else {
         const bool useCompactSnapshot =
             compactConvStateSnapshot != nullptr &&

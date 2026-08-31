@@ -69,9 +69,13 @@ __aicore__ inline FnDirectBlockTask ResolveFnPackedQkvBlockTask(int32_t blockIdx
     if (!task.valid) {
         return task;
     }
+#if defined(CAUSAL_CONV1D_DISABLE_LEGACY_PACKED_QKV_MAPPING)
+    constexpr bool useLegacyTwoBlockMapping = false;
+#else
     const bool useLegacyTwoBlockMapping = baseDimCnt == 2 && dim == CAUSAL_CONV1D_PACKED_QKV_LEGACY_DIM &&
                                           qDim + kDim == CAUSAL_CONV1D_PACKED_QK_LEGACY_DIM &&
                                           vDim == CAUSAL_CONV1D_PACKED_V_LEGACY_DIM;
+#endif
     if (useLegacyTwoBlockMapping) {
         if (task.baseDimIdx == 0) {
             task.channelStart = 0;
