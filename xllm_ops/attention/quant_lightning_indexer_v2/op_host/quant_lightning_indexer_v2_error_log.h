@@ -13,8 +13,8 @@
 #include "log/log.h"
 
 #ifndef OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON
-#define OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opname, param, actual, reason) \
-    OP_LOGE(opname, "Invalid argument for %s, actual: %s, reason: %s", param, actual, reason)
+#define OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opname, param, reason) \
+    OP_LOGE(opname, "Invalid argument for %s, reason: %s", param, reason)
 #endif
 
 #ifndef OP_LOGE_FOR_INVALID_DTYPE

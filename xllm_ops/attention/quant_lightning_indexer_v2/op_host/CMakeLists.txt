@@ -10,7 +10,7 @@
 add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
-    set(quant_lightning_indexer_v2_depends attention/lightning_indexer_v2 CACHE INTERNAL "Dependencies for quant_lightning_indexer_v2")
+    # 已解除对 lightning_indexer_v2 的源码级强依赖，不再声明 depends。
     target_sources(op_host_aclnn PRIVATE
         quant_lightning_indexer_v2_def.cpp
     )
