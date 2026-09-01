@@ -217,13 +217,9 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context)
         return ge::GRAPH_FAILED;
     }
     const uint32_t block_dim = aic_core_count;
-    // On A5, the 1:2 mixed-kernel launch schedules one alternating AIV
-    // sub-block for each AIC block, so the number of active vector tasks is
-    // the mixed block count rather than the platform's physical AIV count.
-    const uint32_t vector_task_count =
-        arch_policy.target == GdnTargetArch::A5
-            ? std::min(aiv_core_count, aic_core_count)
-            : aiv_core_count;
+    // AscendC::GetBlockIdx() is already flattened on the AIV side of a MIX
+    // kernel, so every platform AIV is an independently schedulable task.
+    const uint32_t vector_task_count = aiv_core_count;
     if (vector_task_count == 0) {
         return ge::GRAPH_FAILED;
     }

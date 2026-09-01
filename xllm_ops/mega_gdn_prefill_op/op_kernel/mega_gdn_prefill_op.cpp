@@ -62,6 +62,10 @@ struct MegaGdnPrefillOpKernelTilingData {
 
 #if defined(GDN_PREFILL_ARCH_A5)
 #define MEGA_CHUNK_GDN_A5_DUAL_AIV_SOLVE
+// Qwen GQA shares one K head across several value heads.  Build each K*K^T
+// tile once per key head for packed multi-sequence prefill instead of
+// repeating the identical Cube GEMM for every value head.
+#define MEGA_CHUNK_GDN_MULTI_BATCH_GROUP_KK
 #if MEGA_GDN_A5_SOLVE_VARIANT != 4 && MEGA_GDN_A5_SOLVE_VARIANT != 5 && \
     MEGA_GDN_A5_SOLVE_VARIANT != 6 && MEGA_GDN_A5_SOLVE_VARIANT != 7 && \
     MEGA_GDN_A5_SOLVE_VARIANT != 8 && MEGA_GDN_A5_SOLVE_VARIANT != 9 && \
@@ -188,6 +192,7 @@ struct MegaGdnPrefillOpKernelTilingData {
 #undef MEGA_CHUNK_GDN_HELPER_NAMESPACE
 #undef MEGA_CHUNK_GDN_HELPERS_ONLY
 #if defined(GDN_PREFILL_ARCH_A5)
+#undef MEGA_CHUNK_GDN_MULTI_BATCH_GROUP_KK
 #undef MEGA_CHUNK_GDN_A5_SPLIT64_SOLVE
 #undef MEGA_CHUNK_GDN_A5_HO_OVERLAP
 #undef MEGA_CHUNK_GDN_A5_GROUP_QK_DOUBLE_MAILBOX
