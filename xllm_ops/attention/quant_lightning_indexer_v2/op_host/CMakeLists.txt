@@ -22,6 +22,7 @@ add_ops_compile_options(
             -Werror
             -mllvm -cce-vf-remove-membar=false
             -mllvm -cce-aicore-hoist-movemask=false
+            -I${ASCEND_CANN_PACKAGE_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_transformer/ascendc
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
