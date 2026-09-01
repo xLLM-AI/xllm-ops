@@ -111,6 +111,7 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
 
     CUSTOM_OPS_ARRAY=(
         "sparse_flash_attention"
+        "sparse_flash_attention_lse"
         "moe_init_routing_custom"
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
@@ -185,6 +186,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     
     CUSTOM_OPS_ARRAY=(
         "sparse_flash_attention"
+        "sparse_flash_attention_lse"
         "moe_init_routing_custom"
         "moe_gating_top_k"
         "moe_gating_top_k_hash"

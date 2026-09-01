@@ -64,7 +64,7 @@ constexpr uint32_t BYTE_BLOCK = 32;
 const uint32_t SFA_MAX_AIC_CORE_NUM = 26; // 25 + 1 保证数组8字节对齐
 
 // ------------------公共定义--------------------------
-enum class SFALayout : uint32_t {
+enum class SFALSELayout : uint32_t {
     BSND = 0,
     TND = 1,
     PA_BSND = 2,
@@ -72,7 +72,7 @@ enum class SFALayout : uint32_t {
     NTG = 4
 };
 
-struct SFATilingShapeCompareParam {
+struct SFALSETilingShapeCompareParam {
     int64_t B = 1;
     int64_t S = 1;
     int64_t N = 1;
@@ -227,12 +227,12 @@ std::string SFAShape2String(const T &shape)
 
 static std::string GetShapeStr(gert::Shape shape);
 static std::string SFADataTypeToSerialString(ge::DataType type);
-std::string SFATensorDesc2String(const gert::StorageShape *shape, const gert::CompileTimeTensorDesc *tensor);
-std::string SFADebugTilingContext(const gert::TilingContext *context);
-std::string SFALayoutToSerialString(SFALayout layout);
+std::string SFALSETensorDesc2String(const gert::StorageShape *shape, const gert::CompileTimeTensorDesc *tensor);
+std::string SFALSEDebugTilingContext(const gert::TilingContext *context);
+std::string SFALSELayoutToSerialString(SFALSELayout layout);
 
 // -----------算子Tiling入参信息类---------------
-struct SFATilingInfo {
+struct SFALSETilingInfo {
     const char *opName = nullptr;
     fe::PlatFormInfos *platformInfo = nullptr;
     SFAParaInfo opParamInfo;
@@ -285,12 +285,12 @@ struct SFATilingInfo {
 
     KvStorageMode kvStorageMode = KvStorageMode::BATCH_CONTINUOUS;
 
-    SFALayout qLayout = SFALayout::BSND;
-    SFALayout topkLayout = SFALayout::BSND;
-    SFALayout outLayout = SFALayout::BSND;
-    SFALayout kvLayout = SFALayout::BSND;
-    SFALayout softmaxMaxLayout = SFALayout::BNSG;
-    SFALayout softmaxSumLayout = SFALayout::BNSG;
+    SFALSELayout qLayout = SFALSELayout::BSND;
+    SFALSELayout topkLayout = SFALSELayout::BSND;
+    SFALSELayout outLayout = SFALSELayout::BSND;
+    SFALSELayout kvLayout = SFALSELayout::BSND;
+    SFALSELayout softmaxMaxLayout = SFALSELayout::BNSG;
+    SFALSELayout softmaxSumLayout = SFALSELayout::BNSG;
 
     ge::DataType inputQRopeType = ge::DT_FLOAT16;
     ge::DataType inputKRopeType = ge::DT_FLOAT16;
@@ -299,10 +299,10 @@ struct SFATilingInfo {
 };
 
 // ---------------算子Tiling类---------------
-class SFAMlaTiling {
+class SFALSEMlaTiling {
 public:
-    explicit SFAMlaTiling(gert::TilingContext *context) : context_(context) {}
-    ge::graphStatus DoOpTiling(SFATilingInfo *sfaInfo);
+    explicit SFALSEMlaTiling(gert::TilingContext *context) : context_(context) {}
+    ge::graphStatus DoOpTiling(SFALSETilingInfo *sfaInfo);
 
 private:
     ge::graphStatus SetBlockDim(uint32_t blockDim) const;
@@ -376,14 +376,14 @@ private:
     uint32_t mBaseSize_ = 128;
     uint32_t mFdBaseSize_ = 8;
 
-    SFATilingInfo *sfaInfo_ = nullptr;
+    SFALSETilingInfo *sfaInfo_ = nullptr;
 };
 
 // -----------算子Tiling入参信息解析及Check类---------------
-class SFATilingCheck {
+class SFALSETilingCheck {
 public:
-    explicit SFATilingCheck(const SFATilingInfo &sfaInfo) : sfaInfo_(sfaInfo) {};
-    ~SFATilingCheck() = default;
+    explicit SFALSETilingCheck(const SFALSETilingInfo &sfaInfo) : sfaInfo_(sfaInfo) {};
+    ~SFALSETilingCheck() = default;
     virtual ge::graphStatus Process();
 private:
     void Init();
@@ -397,15 +397,15 @@ private:
         const T &actualValue, const std::string &name) const;
     ge::graphStatus CheckDimNumSupport(const gert::StorageShape *shape,
         const std::vector<size_t> &expectDimNumList, const std::string &name) const;
-    ge::graphStatus CheckDimNumInLayoutSupport(const SFALayout &layout,
+    ge::graphStatus CheckDimNumInLayoutSupport(const SFALSELayout &layout,
         const gert::StorageShape *shape, const std::string &name) const;
-    void LogErrorLayoutSupport(const std::vector<SFALayout> &expectLayoutList,
-        const SFALayout &actualLayout, const std::string &name) const;
+    void LogErrorLayoutSupport(const std::vector<SFALSELayout> &expectLayoutList,
+        const SFALSELayout &actualLayout, const std::string &name) const;
     ge::graphStatus GetExpectedShape(gert::Shape &shapeExpected,
-    const SFATilingShapeCompareParam &param, const SFALayout &layout) const;
-    ge::graphStatus CompareShape(SFATilingShapeCompareParam &param,
-        const gert::Shape &shape, const SFALayout &layout, const std::string &name) const;
-    ge::graphStatus CheckLayoutSupport(const SFALayout &actualLayout, const std::string &name) const;
+    const SFALSETilingShapeCompareParam &param, const SFALSELayout &layout) const;
+    ge::graphStatus CompareShape(SFALSETilingShapeCompareParam &param,
+        const gert::Shape &shape, const SFALSELayout &layout, const std::string &name) const;
+    ge::graphStatus CheckLayoutSupport(const SFALSELayout &actualLayout, const std::string &name) const;
     ge::graphStatus CheckSingleParaQuery() const;
     ge::graphStatus CheckSingleParaKey() const;
     ge::graphStatus CheckSingleParaValue() const;
@@ -434,7 +434,7 @@ private:
     ge::graphStatus CheckParaExistenceMla() const;
     ge::graphStatus CheckParaExistence();
     ge::graphStatus GetActualSeqLenSize(uint32_t &size, const gert::Tensor *tensor,
-        const SFALayout &layout, const std::string &name) const;
+        const SFALSELayout &layout, const std::string &name) const;
     void SetSFAShapeCompare();
     ge::graphStatus CheckQRope();
     ge::graphStatus CheckQRopeShape();
@@ -477,7 +477,7 @@ private:
     const char *opName_;
     fe::PlatFormInfos *platformInfo_;
     SFAParaInfo opParamInfo_;
-    const SFATilingInfo &sfaInfo_;
+    const SFALSETilingInfo &sfaInfo_;
 
     uint32_t bSize_ = 0;
     uint32_t n1Size_ = 0;
@@ -494,12 +494,12 @@ private:
     uint32_t sparseBlockCount_ = 0;
     int64_t sparseBlockSize_ = 0;
 
-    SFALayout qLayout_ = SFALayout::BSND;
-    SFALayout topkLayout_ = SFALayout::BSND;
-    SFALayout outLayout_ = SFALayout::BSND;
-    SFALayout kvLayout_ = SFALayout::BSND;
-    SFALayout softmaxMaxLayout_ = SFALayout::BNSG;
-    SFALayout softmaxSumLayout_ = SFALayout::BNSG;
+    SFALSELayout qLayout_ = SFALSELayout::BSND;
+    SFALSELayout topkLayout_ = SFALSELayout::BSND;
+    SFALSELayout outLayout_ = SFALSELayout::BSND;
+    SFALSELayout kvLayout_ = SFALSELayout::BSND;
+    SFALSELayout softmaxMaxLayout_ = SFALSELayout::BNSG;
+    SFALSELayout softmaxSumLayout_ = SFALSELayout::BNSG;
 
     uint32_t maxBlockNumPerBatch_ = 0;
     int64_t blockSize_ = 0;
@@ -527,17 +527,17 @@ private:
     gert::Shape softmaxSumShapeCmp_{};
 };
 
-class SFAInfoParser {
+class SFALSEInfoParser {
 public:
-    explicit SFAInfoParser(const gert::TilingContext *context) : context_(context) {}
-    ~SFAInfoParser() = default;
+    explicit SFALSEInfoParser(const gert::TilingContext *context) : context_(context) {}
+    ~SFALSEInfoParser() = default;
 
     ge::graphStatus CheckRequiredInOutExistence() const;
     ge::graphStatus CheckRequiredAttrExistence() const;
     ge::graphStatus CheckRequiredParaExistence() const;
 
     ge::graphStatus GetActualSeqLenSize(uint32_t &size, const gert::Tensor *tensor,
-        SFALayout &layout, const std::string &name) const;
+        SFALSELayout &layout, const std::string &name) const;
     ge::graphStatus GetActualSeqLenQSize(uint32_t &size);
     ge::graphStatus GetOpName();
     ge::graphStatus GetNpuInfo();
@@ -572,13 +572,13 @@ public:
     ge::graphStatus GetGSize();
     ge::graphStatus GetSparseBlockCount();
     ge::graphStatus GetActualseqInfo();
-    void GenerateInfo(SFATilingInfo &sfaInfo);
-    ge::graphStatus Parse(SFATilingInfo &sfaInfo);
+    void GenerateInfo(SFALSETilingInfo &sfaInfo);
+    ge::graphStatus Parse(SFALSETilingInfo &sfaInfo);
 
 public:
-    bool HasAxis(const SFAAxis &axis, const SFALayout &layout, const gert::Shape &shape) const;
-    size_t GetAxisIdx(const SFAAxis &axis, const SFALayout &layout) const;
-    uint32_t GetAxisNum(const gert::Shape &shape, const SFAAxis &axis,const SFALayout &layout) const;
+    bool HasAxis(const SFAAxis &axis, const SFALSELayout &layout, const gert::Shape &shape) const;
+    size_t GetAxisIdx(const SFAAxis &axis, const SFALSELayout &layout) const;
+    uint32_t GetAxisNum(const gert::Shape &shape, const SFAAxis &axis,const SFALSELayout &layout) const;
 
     const gert::TilingContext *context_ = nullptr;
 
@@ -601,12 +601,12 @@ public:
     KvStorageMode kvStorageMode_ = KvStorageMode::BATCH_CONTINUOUS;
     uint32_t sparseBlockCount_ = 0;
 
-    SFALayout qLayout_ = SFALayout::BSND;
-    SFALayout topkLayout_ = SFALayout::BSND;
-    SFALayout outLayout_ = SFALayout::BSND;
-    SFALayout kvLayout_ = SFALayout::BSND;
-    SFALayout softmaxMaxLayout_ = SFALayout::BNSG;
-    SFALayout softmaxSumLayout_ = SFALayout::BNSG;
+    SFALSELayout qLayout_ = SFALSELayout::BSND;
+    SFALSELayout topkLayout_ = SFALSELayout::BSND;
+    SFALSELayout outLayout_ = SFALSELayout::BSND;
+    SFALSELayout kvLayout_ = SFALSELayout::BSND;
+    SFALSELayout softmaxMaxLayout_ = SFALSELayout::BNSG;
+    SFALSELayout softmaxSumLayout_ = SFALSELayout::BNSG;
     uint32_t maxBlockNumPerBatch_ = 0;
     uint32_t blockSize_ = 0;
 
