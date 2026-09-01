@@ -187,21 +187,38 @@ aclnnStatus CheckSingleParamQliV2(int64_t numHeadsQ, int64_t numHeadsK, int64_t 
     // 校验 A2/A3 参数
     if (socVersion.find("Ascend950") == std::string::npos) {
         // num_heads_q 校验
-        CHECK_COND(numHeadsQ == QLI_V2_NUM_HEADS_Q_UPPER_BOUND, ACLNN_ERR_PARAM_INVALID,
-                   "num_heads_q should be %lld, but got %lld", QLI_V2_NUM_HEADS_Q_UPPER_BOUND, numHeadsQ);
+        if (numHeadsQ != QLI_V2_NUM_HEADS_Q_UPPER_BOUND) {
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "num_heads_q", std::to_string(numHeadsQ),
+                                                  "num_heads_q should be " +
+                                                      std::to_string(QLI_V2_NUM_HEADS_Q_UPPER_BOUND));
+            return ACLNN_ERR_PARAM_INVALID;
+        }
         // topk 校验
-        CHECK_COND(topk >= QLI_V2_TOPK_LOWER_BOUND && topk <= QLI_V2_A3_TOPK_UPPER_BOUND, ACLNN_ERR_PARAM_INVALID,
-                   "topk should be [%lld, %lld], but got %lld", QLI_V2_TOPK_LOWER_BOUND, QLI_V2_A3_TOPK_UPPER_BOUND,
-                   topk);
+        if (!(topk >= QLI_V2_TOPK_LOWER_BOUND && topk <= QLI_V2_A3_TOPK_UPPER_BOUND)) {
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "topk", std::to_string(topk),
+                                                  "topk should be in range [" +
+                                                      std::to_string(QLI_V2_TOPK_LOWER_BOUND) + ", " +
+                                                      std::to_string(QLI_V2_A3_TOPK_UPPER_BOUND) + "]");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
         // quant_mode 校验
-        CHECK_COND(quantMode == QLI_V2_QUANT_MODE_2, ACLNN_ERR_PARAM_INVALID, "quant_mode should be 2, but got %lld",
-                   quantMode);
+        if (quantMode != QLI_V2_QUANT_MODE_2) {
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "quant_mode", std::to_string(quantMode),
+                                                  "quant_mode should be 2");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
         // cmp_ratio 校验
-        CHECK_COND((cmpRatio >= QLI_V2_CMP_RATIO_LOWER_BOUND) && (cmpRatio <= QLI_V2_CMP_RATIO_UPPER_BOUND) &&
-                       ((cmpRatio & (cmpRatio - 1)) == 0),
-                   ACLNN_ERR_PARAM_INVALID, "cmp_ratio should be 1/2/4/8/16/32/64/128, but got %lld", cmpRatio);
-        CHECK_COND(strcmp(layoutKOptional, "PA_BBND") == 0, ACLNN_ERR_PARAM_INVALID,
-                   "layout_k must be PA_BBND, but got %s", layoutKOptional);
+        if (!((cmpRatio >= QLI_V2_CMP_RATIO_LOWER_BOUND) && (cmpRatio <= QLI_V2_CMP_RATIO_UPPER_BOUND) &&
+              ((cmpRatio & (cmpRatio - 1)) == 0))) {
+           OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "cmp_ratio", std::to_string(cmpRatio),
+                                                  "cmp_ratio should be 1/2/4/8/16/32/64/128");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+        if (strcmp(layoutKOptional, "PA_BBND") != 0) {
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "layout_k", layoutKOptional,
+                                                  "layout_k must be PA_BBND");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
     } else { // 校验 A5参数
         // num_heads_q 校验
         if (numHeadsQ < QLI_V2_NUM_HEADS_Q_LOWER_BOUND || numHeadsQ > QLI_V2_NUM_HEADS_Q_UPPER_BOUND) {
@@ -260,12 +277,28 @@ aclnnStatus CheckSingleParamQliV2(int64_t numHeadsQ, int64_t numHeadsK, int64_t 
         return ACLNN_ERR_PARAM_INVALID;
     }
     // 核心数校验
-    CHECK_COND(aicCoreNum > 0, ACLNN_ERR_PARAM_INVALID, "AIC num should be larger than 0, but got %u", aicCoreNum);
-    CHECK_COND(aicCoreNum <= optiling::AIC_CORE_MAX_NUM, ACLNN_ERR_PARAM_INVALID,
-               "The maximum supported AIC num is %u, but got %u", optiling::AIC_CORE_MAX_NUM, aicCoreNum);
-    CHECK_COND(aivCoreNum > 0, ACLNN_ERR_PARAM_INVALID, "AIV num should be larger than 0, but got %u", aivCoreNum);
-    CHECK_COND(aivCoreNum <= optiling::AIV_CORE_MAX_NUM, ACLNN_ERR_PARAM_INVALID,
-               "The maximum supported AIV num is %u, but got %u", optiling::AIV_CORE_MAX_NUM, aivCoreNum);
+    if (!(aicCoreNum > 0)) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "aic_core_num", std::to_string(aicCoreNum),
+                                              "AIC num should be larger than 0");
+        return ACLNN_ERR_PARAM_INVALID;
+  }
+    if (!(aicCoreNum <= optiling::AIC_CORE_MAX_NUM)) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "aic_core_num", std::to_string(aicCoreNum),
+                                              "The maximum supported AIC num is " +
+                                                  std::to_string(optiling::AIC_CORE_MAX_NUM));
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    if (!(aivCoreNum > 0)) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "aiv_core_num", std::to_string(aivCoreNum),
+                                              "AIV num should be larger than 0");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    if (!(aivCoreNum <= optiling::AIV_CORE_MAX_NUM)) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "aiv_core_num", std::to_string(aivCoreNum),
+                                              "The maximum supported AIV num is " +
+                                                  std::to_string(optiling::AIV_CORE_MAX_NUM));
+        return ACLNN_ERR_PARAM_INVALID;
+    }
     return ACLNN_SUCCESS;
 }
 
@@ -417,8 +450,9 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
         }
         // 校验 metadata 元素数
         if (metadata->GetViewShape().GetDim(0) != optiling::QLI_V2_METADATA_TOTAL_SIZE) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The element num of metadata must be %u, but got %lld",
-                    optiling::QLI_V2_METADATA_TOTAL_SIZE, metadata->GetViewShape().GetDim(0));
+            OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                QLI_V2_ACLNN_OP_NAME, "metadata", std::to_string(metadata->GetViewShape().GetDim(0)),
+                "The element num of metadata must be " + std::to_string(optiling::QLI_V2_METADATA_TOTAL_SIZE));
             return ACLNN_ERR_PARAM_INVALID;
         }
     }
@@ -455,11 +489,6 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
     // 校验TND场景q维度一致性
     if (strcmp(layoutQOptional, "TND") == 0 && IsTensorExistQliV2(sequsedQOptional)) {
         int64_t cuSeqlensQBatchSize = cuSeqlensQOptional->GetViewShape().GetDim(0) - 1;
-        CHECK_COND(
-            cuSeqlensQBatchSize == queryBatchSize, ACLNN_ERR_PARAM_INVALID,
-            "When layout_q is TND and seqused_q is passed, The batch_size obtained from cu_seqlens_q should be the "
-            "same as that obtained from seqused_q, but got %lld and %lld",
-            cuSeqlensQBatchSize, queryBatchSize);
         if (cuSeqlensQBatchSize != queryBatchSize) {
             OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
                 QLI_V2_ACLNN_OP_NAME, "cu_seqlens_q and seqused_q",
@@ -513,16 +542,22 @@ aclnnStatus ParamsCheckQliV2(const aclTensor *cuSeqlensQOptional, const aclTenso
     auto ret =
         CheckSingleParamQliV2(numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK,
                               layoutQOptional, layoutKOptional, maskMode, cmpRatio, aicCoreNum, aivCoreNum, socVersion);
-    CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+    if (ret != ACLNN_SUCCESS) {
+        return ACLNN_ERR_PARAM_INVALID;
+    }
 
     ret = CheckExistenceQliV2(maskMode, cmpRatio, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional,
                               sequsedKOptional, cmpResidualKOptional, maxSeqlenQ, maxSeqlenK, layoutQOptional,
                               layoutKOptional, metadata);
-    CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+    if (ret != ACLNN_SUCCESS) {
+        return ACLNN_ERR_PARAM_INVALID;
+    }
 
     ret = CheckConsistencyQliV2(batchSize, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional,
                                 cmpResidualKOptional, layoutQOptional, layoutKOptional, metadata);
-    CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+    if (ret != ACLNN_SUCCESS) {
+        return ACLNN_ERR_PARAM_INVALID;
+    }
 
     return ACLNN_SUCCESS;
 }
@@ -531,3 +566,34 @@ aclnnStatus ParamsCheckQliV2(const aclTensor *cuSeqlensQOptional, const aclTenso
 #ifdef __cplusplus
 }
 #endif
+
+// ============================================================================
+// 恢复 opdev 整数版日志宏链, 避免污染 include 本头文件的 aclnn_*.cpp
+// 背景: 本头文件依赖 error_log.h 的字符串风格 OP_LOGE_FOR_* 宏(其底层为 log/log.h
+//   的字符串版 OP_LOGE(opName,...))。aclnn 入口 .cpp 先 include opdev/op_log.h(整数版),
+//   再 include 本头文件, 而本头文件的 log/log.h 会覆盖 OP_LOGE / D_OP_LOGE / OpLogErrSub
+//   为字符串版, 且 opdev/op_log.h 因 include guard 无法在本头文件内重新定义整数版,
+//   导致 aclnn 主体的 OP_LOGE(errno,...) / CHECK_RET 被误判为字符串版而编译失败。
+// 本头文件内部所有 OP_LOGE_FOR_* 调用点均在本恢复块之前, 已按字符串版正确展开;
+//   本块仅影响 include 本头文件之后的代码(即 aclnn 主体), 恢复整数版语义。
+// ============================================================================
+#undef OP_LOGE
+#undef OP_LOGE_WITHOUT_REPORT
+#undef D_OP_LOGE
+#undef OpLogErrSub
+#undef REPORT_ERROR_MESSAGE
+// opdev 整数版: OpLogErrSub 底层为 DOplogSub, 与 log/log.h 的 DlogRecord 底层不同名, 可安全恢复
+#define OpLogErrSub(moduleId, level, op_info, errno, fmt, ...)                                                       \
+    DOplogSub(static_cast<int32_t>(moduleId), OPAPI_SUBMOD_NAME, level, "[%s][%lu] errno[%d] %s" fmt, __FUNCTION__,  \
+              op::OpLog::GetTid(), errno, op_info, ##__VA_ARGS__)
+#define D_OP_LOGE(opname, errno, fmt, ...) OpLogErrSub(OP_ID, OP_LOG_ERROR, opname, errno, fmt, ##__VA_ARGS__)
+#define REPORT_ERROR_MESSAGE(code, ...)                            \
+    do {                                                           \
+        ReportErrorMessage(std::to_string(code).c_str(), __VA_ARGS__); \
+    } while (0)
+#define OP_LOGE_WITHOUT_REPORT(errno, ...) D_OP_LOGE(GetOpName().c_str(), errno, __VA_ARGS__)
+#define OP_LOGE(errno, ...)                         \
+    do {                                            \
+        OP_LOGE_WITHOUT_REPORT(errno, __VA_ARGS__); \
+        REPORT_ERROR_MESSAGE(errno, __VA_ARGS__);   \
+    } while (false)

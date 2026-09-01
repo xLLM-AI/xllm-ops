@@ -16,11 +16,8 @@
 #define QUANT_LIGHTNING_INDEXER_V2_VECTOR1_H
 
 #include "kernel_operator.h"
-#if __has_include("../../../lightning_indexer_v2/arch35/vf/common/lightning_indexer_v2_vector1_base.h")
-#include "../../../lightning_indexer_v2/arch35/vf/common/lightning_indexer_v2_vector1_base.h"
-#else
-#include "../../../../lightning_indexer_v2/op_kernel/arch35/vf/common/lightning_indexer_v2_vector1_base.h"
-#endif
+// 已解除对 lightning_indexer_v2 的源码级强依赖，改为使用本算子自有内联副本。
+#include "common/quant_lightning_indexer_v2_vector1_base.h"
 
 namespace vector1 {
 __simd_vf__ void UIntToFloatReturnValueVF(__ubuf__ bfloat16_t *outBuf, __ubuf__ uint16_t *inBuf, uint16_t vfLoop)

@@ -23,7 +23,7 @@
 #include "register/tilingdata_base.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "tiling/tiling_api.h"
-#include "op_host/tiling_util.h"
+// 移除源仓遗留的无用 include（op_host/tiling_util.h 在 xllm-ops 中不可解析且本算子未使用其符号）。
 
 namespace optiling {
 // ------------------公共定义--------------------------
