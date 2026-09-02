@@ -46,9 +46,9 @@ struct MegaGdnPrefillOpKernelTilingData {
 //  10: direct recursive Cube solve with a fused MIX completion handoff
 //  11: direct BSND recursive Cube solve with fp32 final handoff
 //  12: variant 11 with the solve buffer copied to the public output
-//  13: variant 11 with one fp32-accumulated Cube Newton refinement
+//  13: variant 11 compatibility alias (Newton refinement removed)
 //  14: variant 13 with the final BSND scatter striped across both AIVs
-//  15: variant 14 with selective refine and A5 vector/cache optimizations
+//  15: variant 14 with A5 vector/cache optimizations
 //  16: variant 15 with head-major packed W/U/V_new internal data flow
 //  17: variant 16 with A5 multi-batch group-QK reuse
 //  18: variant 17 with directed A5 group-QK intra-block synchronization
@@ -109,13 +109,6 @@ struct MegaGdnPrefillOpKernelTilingData {
     MEGA_GDN_A5_SOLVE_VARIANT == 21 || MEGA_GDN_A5_SOLVE_VARIANT == 22
 #define MEGA_CHUNK_GDN_A5_DIRECT_RECURSIVE_CUBE_FP32_SOLVE
 #endif
-#if MEGA_GDN_A5_SOLVE_VARIANT == 13 || MEGA_GDN_A5_SOLVE_VARIANT == 14 || \
-    MEGA_GDN_A5_SOLVE_VARIANT == 15 || MEGA_GDN_A5_SOLVE_VARIANT == 16 || \
-    MEGA_GDN_A5_SOLVE_VARIANT == 17 || MEGA_GDN_A5_SOLVE_VARIANT == 18 || \
-    MEGA_GDN_A5_SOLVE_VARIANT == 19 || MEGA_GDN_A5_SOLVE_VARIANT == 20 || \
-    MEGA_GDN_A5_SOLVE_VARIANT == 21 || MEGA_GDN_A5_SOLVE_VARIANT == 22
-#define MEGA_CHUNK_GDN_A5_CUBE_NEWTON_REFINE
-#endif
 #if MEGA_GDN_A5_SOLVE_VARIANT == 14 || MEGA_GDN_A5_SOLVE_VARIANT == 15 || \
     MEGA_GDN_A5_SOLVE_VARIANT == 16 || MEGA_GDN_A5_SOLVE_VARIANT == 17 || \
     MEGA_GDN_A5_SOLVE_VARIANT == 18 || MEGA_GDN_A5_SOLVE_VARIANT == 19 || \
@@ -127,7 +120,6 @@ struct MegaGdnPrefillOpKernelTilingData {
     MEGA_GDN_A5_SOLVE_VARIANT == 17 || MEGA_GDN_A5_SOLVE_VARIANT == 18 || \
     MEGA_GDN_A5_SOLVE_VARIANT == 19 || MEGA_GDN_A5_SOLVE_VARIANT == 20 || \
     MEGA_GDN_A5_SOLVE_VARIANT == 21 || MEGA_GDN_A5_SOLVE_VARIANT == 22
-#define MEGA_CHUNK_GDN_A5_SELECTIVE_NEWTON_REFINE
 #define MEGA_CHUNK_GDN_A5_SINGLE_POST_SOLVE_SYNC
 #define MEGA_CHUNK_GDN_A5_DUAL_AIV_WY
 #define MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI
@@ -204,9 +196,7 @@ struct MegaGdnPrefillOpKernelTilingData {
 #undef MEGA_CHUNK_GDN_A5_ENTIRE_CACHE_DCCI
 #undef MEGA_CHUNK_GDN_A5_DUAL_AIV_WY
 #undef MEGA_CHUNK_GDN_A5_SINGLE_POST_SOLVE_SYNC
-#undef MEGA_CHUNK_GDN_A5_SELECTIVE_NEWTON_REFINE
 #undef MEGA_CHUNK_GDN_A5_DUAL_FP32_SCATTER
-#undef MEGA_CHUNK_GDN_A5_CUBE_NEWTON_REFINE
 #undef MEGA_CHUNK_GDN_A5_DUMP_SOLVE_OUTPUT
 #undef MEGA_CHUNK_GDN_A5_DIRECT_RECURSIVE_CUBE_FP32_SOLVE
 #undef MEGA_CHUNK_GDN_A5_REFERENCE_RECURSIVE_CUBE_SYNC_SOLVE

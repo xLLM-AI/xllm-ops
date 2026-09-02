@@ -1407,11 +1407,8 @@ AICORE inline bool CanUseA5Split64Solve(
     if constexpr (MatrixSize != 128) {
         return false;
     }
-    // Variant 16 keeps one full-matrix fp32 Newton correction below twelve
-    // local value heads.  Until split64 has an equivalent correction, keep
-    // those TP geometries on the byte-identical variant-16 path.
-    if (cu_seqlens == nullptr || num_bsnd_heads < 12 ||
-        total_tiles == 0 || total_tiles % num_bsnd_heads != 0) {
+    if (cu_seqlens == nullptr || total_tiles == 0 ||
+        total_tiles % num_bsnd_heads != 0) {
         return false;
     }
 
@@ -1975,7 +1972,6 @@ AICORE inline void TriInvA5PackedRecursiveKernel(
         }
 
         GlobalIn global_in(packed_in);
-        uint32_t solve_valid_size = MatrixSize;
         if constexpr (DirectBsndInput) {
             const BSNDVarlenTileInfo tile_info =
                 cu_seqlens != nullptr
@@ -1987,7 +1983,6 @@ AICORE inline void TriInvA5PackedRecursiveKernel(
                                                  num_bsnd_heads,
                                                  MatrixSize),
                           MatrixSize};
-            solve_valid_size = tile_info.valid_size;
             const uint32_t row_stride = MatrixSize * num_bsnd_heads;
             if (tile_info.valid_size < MatrixSize) {
                 DynamicTileL1AB dynamic_input(tile_info.valid_size,
@@ -2023,80 +2018,6 @@ AICORE inline void TriInvA5PackedRecursiveKernel(
             0, is_lower != 0);
 
         constexpr uint32_t FinalBuffer = MatrixSize > FractalSize ? 1 : 0;
-#ifdef MEGA_CHUNK_GDN_A5_CUBE_NEWTON_REFINE
-#ifdef MEGA_CHUNK_GDN_A5_SELECTIVE_NEWTON_REFINE
-        // Complete chunks with at least 12 local value heads meet the model
-        // tolerance without a correction.  Keep Newton for the smaller TP
-        // geometries and ragged tails, where the correction is still needed.
-        if (num_bsnd_heads < 12 || solve_valid_size < MatrixSize) {
-#endif
-        /*
-         * One Newton-Schulz correction, retaining the recursive result in
-         * fp32 L0C:
-         *
-         * The solver input M is the strict triangular part, so the actual
-         * coefficient matrix is I + M:
-         *
-         *   R  = I - (I + M) X = I - X + (-M) X
-         *   X' = X + X R
-         *
-         * Only X and the small residual R cross L0C -> L1 in fp16.  The
-        * original fp32 X remains in c_l0_tile[FinalBuffer] and receives the
-        * correction directly, avoiding another low-precision final write.
-         */
-        constexpr uint32_t RefineBuffer = FinalBuffer ^ 1;
-        set_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
-        wait_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
-        TMOV(x_l1_tile, c_l0_tile[FinalBuffer]);
-        set_flag(PIPE_FIX, PIPE_MTE1, EVENT_ID0);
-        set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-        wait_flag(PIPE_FIX, PIPE_MTE1, EVENT_ID0);
-        wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-
-        TMOV(a_l0_tile[0], i_l1_tile);
-        TMOV(b_l0_tile[0], i_l1_tile);
-        set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-        wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-        TMATMUL(c_l0_tile[RefineBuffer], a_l0_tile[0], b_l0_tile[0]);
-
-        set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-        wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-        TMOV(a_l0_tile[0], i_neg_l1_tile);
-        TMOV(b_l0_tile[0], x_l1_tile);
-        set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-        wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-        TMATMUL_ACC(c_l0_tile[RefineBuffer], c_l0_tile[RefineBuffer],
-                    a_l0_tile[0], b_l0_tile[0]);
-
-        set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-        wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-        TMOV(a_l0_tile[0], m_neg_l1_tile);
-        TMOV(b_l0_tile[0], x_l1_tile);
-        set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-        wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-        TMATMUL_ACC(c_l0_tile[RefineBuffer], c_l0_tile[RefineBuffer],
-                    a_l0_tile[0], b_l0_tile[0]);
-
-        set_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
-        wait_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
-        TMOV(y_l1_tile, c_l0_tile[RefineBuffer]);
-        set_flag(PIPE_FIX, PIPE_MTE1, EVENT_ID0);
-        set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-        wait_flag(PIPE_FIX, PIPE_MTE1, EVENT_ID0);
-        wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-
-        TMOV(a_l0_tile[0], x_l1_tile);
-        TMOV(b_l0_tile[0], y_l1_tile);
-        set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-        wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-        TMATMUL_ACC(c_l0_tile[FinalBuffer], c_l0_tile[FinalBuffer],
-                    a_l0_tile[0], b_l0_tile[0]);
-        set_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
-        wait_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
-#ifdef MEGA_CHUNK_GDN_A5_SELECTIVE_NEWTON_REFINE
-        }
-#endif
-#endif
 #ifdef MEGA_CHUNK_GDN_A5_PACKED_RECURSIVE_IDENTITY_PROBE
         pipe_barrier(PIPE_ALL);
         TLOAD(y_l1_tile, global_in);
