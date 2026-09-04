@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -62,6 +62,93 @@ constexpr uint32_t PERFORMANCE_ROW_LEN = 128;
 constexpr uint32_t MIN_CORE = 12;
 const int64_t DYNAMIC_INT_X_FLOAT32_BIAS_QUANT_D_PERFORMANCE = 30013;
 
+// Vectorised-row fast path (see op_kernel/dequant_swiglu_quant_vecrow.hpp).
+// It removes the per-row V_S sync + GetValue/SetValue round-trip the other
+// dynamic classes pay, which only dominates once there are many rows: measured
+// at colLen=256, rows<=512 is a wash or a small loss (bf16 256 rows +31%) while
+// rows>=1024 wins steadily (int32 2048 rows -32%, bf16 8192 rows -21%).
+// The win also shrinks as colLen grows, because the path spills the fp32 SwiGLU
+// result to UB and reads it back -- by colLen=1024 it is a wash.
+const int64_t DYNAMIC_VECROW_INT32 = 30020;
+const int64_t DYNAMIC_VECROW_FLOAT16 = 30021;
+const int64_t DYNAMIC_VECROW_BFLOAT16 = 30022;
+constexpr uint32_t VECROW_COL_LEN = 512;
+constexpr uint32_t VECROW_MIN_ROW_LEN = 1024;
+
+// Restored legacy Row-VF kernel (see op_kernel/dequant_swiglu_quant_vecrow_legacy.hpp):
+// shapes that the frozen baseline routed to 30020-30022 keep the original
+// MicroAPI kernel under fresh keys, freeing 30020-30022 for the new kernel.
+const int64_t DYNAMIC_VECROW_LEGACY_INT32 = 30023;
+const int64_t DYNAMIC_VECROW_LEGACY_FLOAT16 = 30024;
+const int64_t DYNAMIC_VECROW_LEGACY_BFLOAT16 = 30025;
+
+// S1-R2-SPLIT four-way dispatch boundaries (accepted S1-R3-DYNPIPE contract).
+constexpr uint32_t ROW_VF_CORE_NUM = 72;
+constexpr uint32_t ROW_VF_MAX_TILE_ROWS = 64;
+constexpr uint32_t ROW_VF_SWI_GUARD_BYTES = 256;
+constexpr int64_t ROW_VF_UB_REVERSE = 1024;
+constexpr uint64_t SPLIT_SMALL_ROW_LEN = 128;
+constexpr uint64_t SPLIT_VECROW_NEW_COL_LEN = 2048;
+constexpr uint64_t SPLIT_VECROW_NEW_MIN_ROW_LEN = 1023;
+// Wide-column guard for the new Row-VF int32 kernel: the kernel spills the
+// fp32 SwiGLU result to UB and reads it back, so its win over the baseline
+// dynamic kernel shrinks as colLen grows. Registered-path A/B on Ascend950
+// (CANN 9.0) measured the new kernel LOSING at rows <= 2048 with colLen >=
+// 3584 (1024x7168 0.90x, 2048x8192 0.87x) while winning at colLen == 2048
+// for any qualifying rows and at colLen >= 3584 once rows >= 4096. Keep the
+// new kernel only for those winning regions; wide-column small-row shapes
+// fall back to the baseline dynamic kernel.
+constexpr uint64_t SPLIT_VECROW_NEW_WIDE_COL_LEN = 2048;
+constexpr uint64_t SPLIT_VECROW_NEW_MIN_ROW_LEN_WIDE = 4096;
+// The registered kernel entry guards on a non-null workspace, so the new
+// Row-VF path requests the minimal registered workspace instead of the
+// direct-launch zero; the kernel itself never touches the workspace.
+constexpr uint64_t SPLIT_VECROW_WORKSPACE = 32;
+
+// Host-side UB peak equation for the new Row-VF kernel, ported line-by-line
+// from the accepted direct-launch host tiling (S1-R3-DYNPIPE). The kernel
+// takes tileRows from the tiling as the sole UB-capacity authority.
+static uint64_t CalculateRowVfPeakBytes(
+    uint32_t tileRows, uint64_t hidden, ge::DataType xType, bool hasQuantScale)
+{
+    const uint64_t s = AlignUp<uint64_t>(hidden, 64U);
+    const uint64_t r = tileRows;
+    const uint64_t inputBytes = xType == ge::DT_INT32 ? 4U : 2U;
+    auto a32 = [](uint64_t bytes) { return AlignUp<uint64_t>(bytes, 32U); };
+
+    uint64_t peak = 2U * a32(2U * r * s * inputBytes) +
+        a32(4U * r * s + ROW_VF_SWI_GUARD_BYTES) +
+        a32(r * s) + a32(4U * r) + static_cast<uint64_t>(ROW_VF_UB_REVERSE);
+    if (xType == ge::DT_INT32) {
+        // Kernel lays out activation-scale ping/pong as two independently
+        // aligned halves so both MTE2 destinations start on 32-byte UB bases.
+        peak += 2U * a32(4U * s) + 2U * a32(4U * r);
+    }
+    if (hasQuantScale) {
+        peak += a32(4U * s);
+    }
+    return peak;
+}
+
+static bool SolveRowVfTileRows(
+    uint64_t ubSize, uint64_t rows, uint64_t hidden, ge::DataType xType,
+    bool hasQuantScale, uint32_t& tileRowsOut)
+{
+    const uint32_t usedCores = static_cast<uint32_t>(
+        std::min<uint64_t>(rows, ROW_VF_CORE_NUM));
+    const uint32_t rowsPerCore = static_cast<uint32_t>(DivCeil<uint64_t>(rows, usedCores));
+    uint32_t candidate = std::min<uint32_t>(ROW_VF_MAX_TILE_ROWS, rowsPerCore);
+    while (candidate > 0 &&
+           CalculateRowVfPeakBytes(candidate, hidden, xType, hasQuantScale) > ubSize) {
+        --candidate;
+    }
+    if (candidate == 0) {
+        return false;
+    }
+    tileRowsOut = candidate;
+    return true;
+}
+
 // Tiling优选参数
 struct GluSingleTilingOptParam {
     // Maximum amount of data that can be transferred by an operator UB at a time. Unit:element
@@ -95,7 +182,12 @@ protected:
     {
         auto shapeGroupIndex = context_->GetOptionalInputShape(6);
         if (shapeGroupIndex == nullptr) {
-            return true;
+            // This template only carries last-axis semantics (SetTotalShape
+            // always splits on the last dim). Dynamic-quant shapes whose
+            // activate_dim is not the last axis fall through to the registered
+            // V35NlastTiling template (priority 2000), matching the accepted
+            // dispatch where non-last axes take the V35 non-last path.
+            return !IsNonLastDynamicActivateDim();
         }
         return false;
     }
@@ -146,6 +238,8 @@ private:
 
     bool isPerformanceBranch();
 
+    bool IsNonLastDynamicActivateDim();
+
     int64_t getTilingKeyStatic(
         const int32_t inputDtype, const ge::DataType biasType, const int64_t scaleSize) const;
 
@@ -170,6 +264,12 @@ private:
     ge::DataType xInputDataType;
 
     bool isPerfBranch = false;
+    // S1-R2-SPLIT four-way dispatch flags (accepted S1-R3-DYNPIPE contract):
+    // isNewVecRow routes to the new Row-VF kernel (30020-30022, tileRows from
+    // the host UB equation); isLegacyVecRow routes to the restored legacy
+    // Row-VF kernel (30023-30025) with the original host fields.
+    bool isNewVecRow = false;
+    bool isLegacyVecRow = false;
 
     ge::DataType biasDataType = ge::DT_FLOAT;
     uint64_t quantScaleShapeSize = 0;
@@ -590,6 +690,45 @@ ge::graphStatus DequantSwigluQuantTiling::DoOpTiling()
         return ge::GRAPH_FAILED;
     }
     isPerfBranch = isPerformanceBranch();
+    // S1-R2-SPLIT four-way dispatch for the last-axis / no-bias / no-group /
+    // no-quant-offset dynamic INT8 family. Fixed judgment order: (1) smallRows
+    // -> vecrow-new, (2) legacyVecrow -> vecrow-legacy, (3)/(4) the remaining
+    // int32 and float splits. smallRows takes precedence over every other
+    // branch. Everything outside the family keeps the frozen baseline routing.
+    // The Row-VF kernels (30020-30025) are arch35 (Ascend950) builds only, so
+    // non-950 platforms keep both flags down and stay on the frozen baseline
+    // routing (same contract as the add_rms_norm_bias A2/A3 tiling gate).
+    const bool isAscend950 = curShortSocName_ == platform_ascendc::SocVersion::ASCEND950;
+    const bool splitFamily = (quantMode == 1) &&
+        context_->GetOptionalInputShape(INDEX_IN_BIAS) == nullptr &&
+        context_->GetOptionalInputShape(INDEX_IN_QUANT_OFFSET) == nullptr;
+    const bool smallRows = splitFamily && tilingData.get_rowLen() < SPLIT_SMALL_ROW_LEN;
+    isLegacyVecRow = isAscend950 && splitFamily && tilingData.get_is32BAligned() == 1 &&
+        tilingData.get_baseColLen() == tilingData.get_colLen() &&
+        tilingData.get_colLen() <= VECROW_COL_LEN &&
+        tilingData.get_rowLen() >= VECROW_MIN_ROW_LEN;
+    const bool int32NewVecRow = splitFamily && xInputDataType == ge::DT_INT32 &&
+        tilingData.get_colLen() >= SPLIT_VECROW_NEW_COL_LEN &&
+        tilingData.get_rowLen() >= SPLIT_VECROW_NEW_MIN_ROW_LEN &&
+        (tilingData.get_colLen() <= SPLIT_VECROW_NEW_WIDE_COL_LEN ||
+         tilingData.get_rowLen() >= SPLIT_VECROW_NEW_MIN_ROW_LEN_WIDE);
+    isNewVecRow = isAscend950 && (smallRows || (!isLegacyVecRow && int32NewVecRow));
+    if (isNewVecRow) {
+        // vecrow-new host contract: literal 72 cores, the host UB peak
+        // equation tile size, and no meaningful workspace.
+        totalUsedCoreNum = static_cast<uint32_t>(
+            std::min<uint64_t>(tilingData.get_rowLen(), static_cast<uint64_t>(ROW_VF_CORE_NUM)));
+        uint32_t rowVfTileRows = 0;
+        if (!SolveRowVfTileRows(aicoreParams_.ubSize, tilingData.get_rowLen(), tilingData.get_colLen(),
+                                xInputDataType, quantScaleShapeSize != 0, rowVfTileRows)) {
+            OP_LOGE(context_->GetNodeName(),
+                    "Row-VF tile does not fit one row in runtime UB, rowLen:%lu, colLen:%lu",
+                    tilingData.get_rowLen(), tilingData.get_colLen());
+            return ge::GRAPH_FAILED;
+        }
+        tilingData.set_usedCoreNum(totalUsedCoreNum);
+        tilingData.set_tileRows(rowVfTileRows);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -642,6 +781,28 @@ int64_t DequantSwigluQuantTiling::getTilingKeyStatic(
 int64_t DequantSwigluQuantTiling::getTilingKeyDynamic(
     const int32_t inputDtype, const ge::DataType biasType, const int64_t scaleSize) const
 {
+    // S1-R2-SPLIT four-way dispatch (accepted S1-R3-DYNPIPE contract): the new
+    // Row-VF kernel owns 30020-30022 and the restored legacy Row-VF kernel owns
+    // 30023-30025. Both flags are only raised inside the dynamic / no-bias /
+    // no-quant-offset family, so every other case keeps the frozen baseline keys.
+    if (isNewVecRow) {
+        if (inputDtype == ge::DT_FLOAT16) {
+            return DYNAMIC_VECROW_FLOAT16;
+        }
+        if (inputDtype == ge::DT_BF16) {
+            return DYNAMIC_VECROW_BFLOAT16;
+        }
+        return DYNAMIC_VECROW_INT32;
+    }
+    if (isLegacyVecRow) {
+        if (inputDtype == ge::DT_FLOAT16) {
+            return DYNAMIC_VECROW_LEGACY_FLOAT16;
+        }
+        if (inputDtype == ge::DT_BF16) {
+            return DYNAMIC_VECROW_LEGACY_BFLOAT16;
+        }
+        return DYNAMIC_VECROW_LEGACY_INT32;
+    }
     if (inputDtype != ge::DT_INT32) {
         if (inputDtype == ge::DT_FLOAT16) {
             if (scaleSize == 1) {
@@ -671,6 +832,8 @@ int64_t DequantSwigluQuantTiling::getTilingKeyDynamic(
         if (biasType == ge::DT_INT32) {
             return DYNAMIC_INT_X_INT_BIAS_QUANT_D;
         } else if (biasType == ge::DT_FLOAT) {
+            // The four-way flags already guarantee no bias is present when set
+            // (biasType defaults to DT_FLOAT when the optional input is absent).
             if(isPerfBranch) {
                 return DYNAMIC_INT_X_FLOAT32_BIAS_QUANT_D_PERFORMANCE;
             }
@@ -695,6 +858,41 @@ bool DequantSwigluQuantTiling::isPerformanceBranch() {
     return false;
 }
 
+// True when quant_mode is dynamic and activate_dim resolves to a non-last
+// axis of x: those shapes are served by the registered V35NlastTiling template
+// (priority 2000) instead of this last-axis-only template, matching the
+// accepted dispatch where non-last axes take the V35 non-last path. Static
+// quant and last-axis shapes keep the legacy route.
+bool DequantSwigluQuantTiling::IsNonLastDynamicActivateDim() {
+    auto* attrs = context_->GetAttrs();
+    if (attrs == nullptr) {
+        return false;
+    }
+    // attr index 1 = quant_mode (op def order, see SetAttr).
+    const char* quantModeStr = attrs->GetAttrPointer<char>(1);
+    if (quantModeStr == nullptr) {
+        return false;
+    }
+    std::string quantModeAttr{quantModeStr};
+    std::transform(quantModeAttr.begin(), quantModeAttr.end(), quantModeAttr.begin(), ::tolower);
+    if (quantModeAttr != "dynamic") {
+        return false;
+    }
+    auto xShapePtr = context_->GetInputShape(0);
+    if (xShapePtr == nullptr) {
+        return false;
+    }
+    const int64_t rank = static_cast<int64_t>(xShapePtr->GetStorageShape().GetDimNum());
+    if (rank <= 0) {
+        return false;
+    }
+    // attr index 4 = activate_dim.
+    auto* attrActivateDim = attrs->GetAttrPointer<int>(4);
+    int64_t activateDim = attrActivateDim != nullptr ? *attrActivateDim : -1;
+    activateDim = activateDim < 0 ? activateDim + rank : activateDim;
+    return activateDim >= 0 && activateDim < rank - 1;
+}
+
 uint64_t DequantSwigluQuantTiling::GetTilingKey() const
 {
     if (quantMode == 0) { // static
@@ -707,6 +905,15 @@ uint64_t DequantSwigluQuantTiling::GetTilingKey() const
 ge::graphStatus DequantSwigluQuantTiling::GetWorkspaceSize()
 {
     // 计算workspace大小，无需workspace临时空间，不存在多核同步，预留固定大小即可
+    if (isNewVecRow) {
+        // vecrow-new host contract: no meaningful workspace. The registered
+        // kernel entry guards on a non-null workspace pointer, so the minimal
+        // registered workspace (same as the group/non-last templates) is
+        // requested instead of the direct-launch zero; the Row-VF kernel never
+        // touches it.
+        workspaceSize_ = SPLIT_VECROW_WORKSPACE;
+        return ge::GRAPH_SUCCESS;
+    }
     workspaceSize_ = USER_WORKSPACE;
     if (quantMode == 1 && (tilingData.get_colLen() > tilingData.get_baseColLen())) {
         workspaceSize_ += (totalUsedCoreNum * tilingData.get_colLen() * sizeof(float));

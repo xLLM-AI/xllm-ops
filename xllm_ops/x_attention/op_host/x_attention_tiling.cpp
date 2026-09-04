@@ -138,7 +138,6 @@ void TilingXAttentionFunc::FillCombineScaleTilingData()
   auto qHeads = tiling_data_.baseInfo.get_qHeads();
   int32_t rowNum = totalTokensQ * qHeads;
   int32_t bufferNum = 2;
-  // sharedMax、sharedSum、unsharedMax、unsharedSum
   uint64_t maxReduceUbSize = COMBINE_MAX_ROW_NUM_PER_LOOP * sizeof(float) * (bufferNum * 4 + 3);
   uint64_t remainUbSize = ubSize - maxReduceUbSize;
   int32_t rowPerLoop = remainUbSize / (sizeof(float) * 3 * headDim * bufferNum);

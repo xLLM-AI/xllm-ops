@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -79,6 +79,7 @@ TILING_DATA_FIELD_DEF(float, eps);
 TILING_DATA_FIELD_DEF_STRUCT(SoftMaxTiling, softmaxTilingData);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(MoeGatingTopKHash_10000, MoeGatingTopKHashRegbaseTilingData)
+REGISTER_TILING_DATA_CLASS(MoeGatingTopKHash_20000, MoeGatingTopKHashRegbaseTilingData)
 struct MoeGatingTopKHashCompileInfo {};
 } // namespace optiling
 #endif // AIR_CXX_RUNTIME_V2_OP_IMPL_MOE_GATING_TOP_K_H

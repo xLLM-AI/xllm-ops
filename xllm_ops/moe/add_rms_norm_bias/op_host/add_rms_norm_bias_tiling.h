@@ -1,6 +1,6 @@
 /**
  * This program is free software, you can redistribute it and/or modify.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -39,6 +39,9 @@ TILING_DATA_FIELD_DEF(uint32_t, mul_tail_fp16);
 TILING_DATA_FIELD_DEF(uint32_t, dst_rep_stride_fp16);
 TILING_DATA_FIELD_DEF(uint32_t, is_performance);
 TILING_DATA_FIELD_DEF(uint32_t, nullptr_beta);
+TILING_DATA_FIELD_DEF(uint32_t, bin_add_quotient);
+TILING_DATA_FIELD_DEF(uint32_t, ub_loop);
+TILING_DATA_FIELD_DEF(uint32_t, col_bufer_length);
 END_TILING_DATA_DEF;
 
 struct AddRmsNormBiasCompileInfo {

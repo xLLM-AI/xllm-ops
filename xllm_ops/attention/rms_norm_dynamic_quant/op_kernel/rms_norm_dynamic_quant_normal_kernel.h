@@ -1,6 +1,6 @@
 /**
  * This program is free software, you can redistribute it and/or modify.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -128,6 +128,16 @@ private:
 
     __aicore__ inline void ComputeRmsNorm(int32_t nums, int32_t elementCount, LocalTensor<T>& gammaLocal)
     {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        // registration-build adaptation: opc also instantiates the int4 quant-output variant
+        // (T_Y = integer_sub_type<4, true>); AscendC::Reg TypeGet has no sub-byte specialization
+        // and the validated direct-invoke acceptance covered T_Y = int8_t only -> keep the
+        // baseline implementation for non-int8 instantiations
+        if constexpr (is_same<T_Y, int8_t>::value) {
+            ComputeRmsNormVf(nums, gammaLocal);
+            return;
+        }
+#endif
         LocalTensor<float> xLocalFp32 = xBufFp32.Get<float>(); // xLocalFp32 <-- x
         LocalTensor<T> xInputLocal = inRowsQue.template DeQue<T>();
         LocalTensor<float> yLocalFp32 = yBufFp32.Get<float>();
@@ -161,7 +171,7 @@ private:
         }
 
         if (this->betaFlag == 1) {
-            LocalTensor<T> betaLocal = weightBuf04.template Get<T>();
+            LocalTensor<T> betaLocal = weightBuf04.Get<T>();
             Cast(yLocalFp32, betaLocal, RoundMode::CAST_NONE, this->numLastDim); // yLocalFp32 <- gamma
             for (int32_t rid = 0; rid < nums; ++rid) {
                 auto roundOffset = rid * this->numLastDimAligned;
@@ -173,12 +183,135 @@ private:
         inRowsQue.FreeTensor(xInputLocal);
     }
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+    __aicore__ inline void ComputeRmsNormVf(int32_t nums, LocalTensor<T>& gammaLocal)
+    {
+        LocalTensor<T> xInputLocal = inRowsQue.template DeQue<T>();
+        LocalTensor<float> xLocalFp32 = xBufFp32.Get<float>();
+        __ubuf__ T* xInBase = (__ubuf__ T*)xInputLocal.GetPhyAddr();
+        __ubuf__ T* gammaBase = (__ubuf__ T*)gammaLocal.GetPhyAddr();
+        __ubuf__ float* outBase = (__ubuf__ float*)xLocalFp32.GetPhyAddr();
+
+        // beta branch resolved outside the __VEC_SCOPE__: runtime branches with live vector
+        // values inside a vector function are not lowerable on this backend
+        if (this->betaFlag == 1) {
+            LocalTensor<T> betaLocal = weightBuf04.Get<T>();
+            ComputeRmsNormVfImpl<true>(nums, xInBase, gammaBase, (__ubuf__ T*)betaLocal.GetPhyAddr(), outBase);
+        } else {
+            ComputeRmsNormVfImpl<false>(nums, xInBase, gammaBase, nullptr, outBase);
+        }
+        inRowsQue.FreeTensor(xInputLocal);
+    }
+
+    template <bool HAS_BETA>
+    __aicore__ inline void ComputeRmsNormVfImpl(
+        int32_t nums, __ubuf__ T* xInBase, __ubuf__ T* gammaBase, __ubuf__ T* betaBase, __ubuf__ float* outBase)
+    {
+        // xasc_combined standard form: function-scope static constexpr CastTrait (cast probe verified)
+        static constexpr AscendC::Reg::CastTrait kTraitB16ToB32 = {
+            AscendC::Reg::RegLayout::ZERO,
+            AscendC::Reg::SatMode::UNKNOWN,
+            AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::UNKNOWN};
+
+        const uint32_t h = static_cast<uint32_t>(this->numLastDim);
+        const uint32_t ha = static_cast<uint32_t>(this->numLastDimAligned);
+        const uint16_t loopCnt = static_cast<uint16_t>((h + ELEM_PER_REP_FP32 - 1) / ELEM_PER_REP_FP32);
+        const float aveNum = this->aveNum;
+        const float eps = this->eps;
+
+        __VEC_SCOPE__
+        {
+            AscendC::Reg::RegTensor<T> xB16Reg;
+            AscendC::Reg::RegTensor<T> wB16Reg;
+            AscendC::Reg::RegTensor<float> xReg;
+            AscendC::Reg::RegTensor<float> wReg;
+            AscendC::Reg::RegTensor<float> sqReg;
+            AscendC::Reg::RegTensor<float> accReg;
+            AscendC::Reg::RegTensor<float> statReg;
+            AscendC::Reg::RegTensor<float> rstdReg;
+            AscendC::Reg::RegTensor<float> oneReg;
+            AscendC::Reg::MaskReg pregAll = AscendC::Reg::CreateMask<float, AscendC::Reg::MaskPattern::ALL>();
+            AscendC::Reg::MaskReg pregLoop;
+
+            AscendC::Reg::Duplicate(oneReg, 1.0f, pregAll);
+
+            for (uint16_t rid = 0; rid < static_cast<uint16_t>(nums); ++rid) {
+                __ubuf__ T* rowX = xInBase + rid * ha;
+                __ubuf__ float* rowOut = outBase + rid * ha;
+
+                // pass 1: sum(x * x) accumulated in registers
+                AscendC::Reg::Duplicate(accReg, 0.0f, pregAll);
+                uint32_t remain = h;
+                for (uint16_t j = 0; j < loopCnt; ++j) {
+                    pregLoop = AscendC::Reg::UpdateMask<float>(remain);
+                    AscendC::Reg::LoadAlign<T, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
+                        xB16Reg, rowX + j * ELEM_PER_REP_FP32);
+                    AscendC::Reg::Cast<float, T, kTraitB16ToB32>(xReg, xB16Reg, pregLoop);
+                    AscendC::Reg::Mul(sqReg, xReg, xReg, pregLoop);
+                    // full-mask accumulate is safe: lanes outside pregLoop are zeroed by the Cast
+                    AscendC::Reg::Add(accReg, accReg, sqReg, pregAll);
+                }
+                AscendC::Reg::ReduceSum(statReg, accReg, pregAll);
+                // Reduce leaves the result in lane 0 only: broadcast before vector use
+                AscendC::Reg::Duplicate(statReg, statReg, pregAll);
+                AscendC::Reg::Muls(statReg, statReg, aveNum, pregAll);
+                AscendC::Reg::Adds(statReg, statReg, eps, pregAll);
+                AscendC::Reg::Sqrt(statReg, statReg, pregAll);
+                AscendC::Reg::Div(rstdReg, oneReg, statReg, pregAll);
+
+                // pass 2: out = (x * rstd) * gamma (+ beta), fp32 rows stay in UB for the quant stage
+                remain = h;
+                for (uint16_t j = 0; j < loopCnt; ++j) {
+                    pregLoop = AscendC::Reg::UpdateMask<float>(remain);
+                    AscendC::Reg::LoadAlign<T, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
+                        xB16Reg, rowX + j * ELEM_PER_REP_FP32);
+                    AscendC::Reg::Cast<float, T, kTraitB16ToB32>(xReg, xB16Reg, pregLoop);
+                    AscendC::Reg::LoadAlign<T, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
+                        wB16Reg, gammaBase + j * ELEM_PER_REP_FP32);
+                    AscendC::Reg::Cast<float, T, kTraitB16ToB32>(wReg, wB16Reg, pregLoop);
+                    AscendC::Reg::Mul(xReg, xReg, rstdReg, pregLoop);
+                    AscendC::Reg::Mul(xReg, xReg, wReg, pregLoop);
+                    if constexpr (HAS_BETA) {
+                        AscendC::Reg::LoadAlign<T, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
+                            wB16Reg, betaBase + j * ELEM_PER_REP_FP32);
+                        AscendC::Reg::Cast<float, T, kTraitB16ToB32>(wReg, wB16Reg, pregLoop);
+                        AscendC::Reg::Add(xReg, xReg, wReg, pregLoop);
+                    }
+                    AscendC::Reg::StoreAlign<float>(rowOut + j * ELEM_PER_REP_FP32, xReg, pregLoop);
+                }
+            }
+            // make the fp32 rows visible to the quant-stage loads
+            AscendC::Reg::LocalMemBar<AscendC::Reg::MemType::VEC_STORE, AscendC::Reg::MemType::VEC_LOAD>();
+        }
+    }
+#endif
+
     __aicore__ inline void ComputeDynamicQuant(int32_t nums, int32_t elementCount)
     {
         LocalTensor<float> xLocalFp32 = xBufFp32.Get<float>(); // xLocalFp32 <-- y
         LocalTensor<float> scaleLocal = scalesBuf.Get<float>();
         LocalTensor<float> zLocalFp32 = outRowsQue.template AllocTensor<float>();
         LocalTensor<T_Y> outQuant01 = zLocalFp32.ReinterpretCast<T_Y>();
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        // registration-build adaptation: non-int8 quant-output instantiations keep the
+        // baseline implementation (see ComputeRmsNorm)
+        if constexpr (is_same<T_Y, int8_t>::value) {
+            // compute gating aligned verbatim with the CopyOut write gating
+            // (skip-unwritten-quant-path); both paths active -> fused dual two-pass, otherwise
+            // single-path via the flag gates (which skip the never-written second path)
+            const bool quant1Active = this->isOld || (this->outQuant1Flag == 1);
+            const bool quant2Active = this->oldDouble || (this->outQuant2Flag == 1);
+            if (quant1Active && quant2Active) {
+                doQuantFusedVf(scaleLocal, xLocalFp32, outQuant01, nums, elementCount);
+            } else {
+                doQuant1withFlag(scaleLocal, xLocalFp32, outQuant01, nums, elementCount);
+                doQuant2withFlag(scaleLocal, xLocalFp32, outQuant01, nums, elementCount);
+            }
+            outRowsQue.EnQue(zLocalFp32);
+            return;
+        }
+#endif
         doQuant1withFlag(scaleLocal, xLocalFp32, outQuant01, nums, elementCount);
         doQuant2withFlag(scaleLocal, xLocalFp32, outQuant01, nums, elementCount);
         outRowsQue.EnQue(zLocalFp32);
@@ -188,9 +321,19 @@ private:
         LocalTensor<float> scaleLocal, LocalTensor<float> xLocalFp32, LocalTensor<T_Y> outQuant01, int32_t nums,
         int32_t elementCount)
     {
-        if (this->outQuant1Flag == 0 && !this->isOld) {
+        // aligned verbatim with the CopyOut write gate `isOld || outQuant1Flag == 1`
+        // (skip-unwritten-quant-path)
+        if (!(this->isOld || this->outQuant1Flag == 1)) {
             return;
         }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        // registration-build adaptation: non-int8 quant-output instantiations keep the
+        // baseline implementation (see ComputeRmsNorm)
+        if constexpr (is_same<T_Y, int8_t>::value) {
+            doQuantVf(scaleLocal, xLocalFp32, outQuant01, nums, elementCount, 0);
+            return;
+        }
+#endif
         LocalTensor<float> tmpFp32 = inRowsQue.template AllocTensor<float>();
         LocalTensor<float> yLocalFp32 = yBufFp32.Get<float>();
         LocalTensor<float> scale1Local = scaleLocal[0];
@@ -232,9 +375,19 @@ private:
         LocalTensor<float> scaleLocal, LocalTensor<float> xLocalFp32, LocalTensor<T_Y> outQuant01, int32_t nums,
         int32_t elementCount)
     {
-        if (this->outQuant2Flag == 0 && !this->oldDouble) {
+        // aligned verbatim with the CopyOut write gate `oldDouble || outQuant2Flag == 1`
+        // (skip-unwritten-quant-path)
+        if (!(this->oldDouble || this->outQuant2Flag == 1)) {
             return;
         }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        // registration-build adaptation: non-int8 quant-output instantiations keep the
+        // baseline implementation (see ComputeRmsNorm)
+        if constexpr (is_same<T_Y, int8_t>::value) {
+            doQuantVf(scaleLocal, xLocalFp32, outQuant01, nums, elementCount, 1);
+            return;
+        }
+#endif
         LocalTensor<float> tmpFp32 = inRowsQue.template AllocTensor<float>();
         LocalTensor<float> scale2Local = scaleLocal[this->numRowsAligned];
         LocalTensor<float> yLocalFp32 = yBufFp32.Get<float>();
@@ -271,6 +424,368 @@ private:
         inRowsQue.FreeTensor(tmpFp32);
     }
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+    // quantPath 0: first dynamic-quant branch (smooth1 / y1 / scale1).
+    // quantPath 1: second dynamic-quant branch (smooth2 / y2 / scale2, base offset elementCount).
+    __aicore__ inline void doQuantVf(
+        LocalTensor<float>& scaleLocal, LocalTensor<float>& xLocalFp32, LocalTensor<T_Y>& outQuant01, int32_t nums,
+        int32_t elementCount, int32_t quantPath)
+    {
+        __ubuf__ float* outBase = (__ubuf__ float*)xLocalFp32.GetPhyAddr();
+        __ubuf__ T* smoothBase = nullptr;
+        if (quantPath == 0) {
+            if (this->smooth1Exist) {
+                LocalTensor<T> smooth1Local = weightBuf02.Get<T>();
+                smoothBase = (__ubuf__ T*)smooth1Local.GetPhyAddr();
+            }
+        } else {
+            if (this->smooth2Exist) {
+                LocalTensor<T> smooth2Local = weightBuf03.Get<T>();
+                smoothBase = (__ubuf__ T*)smooth2Local.GetPhyAddr();
+            }
+        }
+        __ubuf__ T_Y* yBase = (__ubuf__ T_Y*)outQuant01.GetPhyAddr();
+        if (quantPath == 1) {
+            yBase += elementCount;
+        }
+        __ubuf__ float* scaleAddr = (__ubuf__ float*)scaleLocal.GetPhyAddr();
+        if (quantPath == 1) {
+            scaleAddr += this->numRowsAligned;
+        }
+
+        // smooth branch resolved outside the __VEC_SCOPE__: runtime branches with live vector
+        // values inside a vector function are not lowerable on this backend
+        if (smoothBase != nullptr) {
+            DoQuantVfImpl<true>(outBase, smoothBase, yBase, scaleAddr, nums);
+        } else {
+            DoQuantVfImpl<false>(outBase, nullptr, yBase, scaleAddr, nums);
+        }
+    }
+
+    template <bool HAS_SMOOTH>
+    __aicore__ inline void DoQuantVfImpl(
+        __ubuf__ float* outBase, __ubuf__ T* smoothBase, __ubuf__ T_Y* yBase, __ubuf__ float* scaleAddr,
+        int32_t nums)
+    {
+        // xasc_combined standard form: function-scope static constexpr CastTrait (cast probe verified)
+        static constexpr AscendC::Reg::CastTrait kTraitB16ToB32 = {
+            AscendC::Reg::RegLayout::ZERO,
+            AscendC::Reg::SatMode::UNKNOWN,
+            AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::UNKNOWN};
+        static constexpr AscendC::Reg::CastTrait kTraitF32ToS16Rint = {
+            AscendC::Reg::RegLayout::ZERO,
+            AscendC::Reg::SatMode::NO_SAT,
+            AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::CAST_RINT};
+        static constexpr AscendC::Reg::CastTrait kTraitS16ToF16 = {
+            AscendC::Reg::RegLayout::UNKNOWN,
+            AscendC::Reg::SatMode::UNKNOWN,
+            AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::CAST_NONE};
+        static constexpr AscendC::Reg::CastTrait kTraitF16ToI8Trunc = {
+            AscendC::Reg::RegLayout::ZERO,
+            AscendC::Reg::SatMode::NO_SAT,
+            AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::CAST_TRUNC};
+
+        const uint32_t h = static_cast<uint32_t>(this->numLastDim);
+        const uint32_t ha = static_cast<uint32_t>(this->numLastDimAligned);
+        const uint16_t loopCnt = static_cast<uint16_t>((h + ELEM_PER_REP_FP32 - 1) / ELEM_PER_REP_FP32);
+        const float quantMax = this->quantMaxVal;
+
+        __VEC_SCOPE__
+        {
+            AscendC::Reg::RegTensor<T> sB16Reg;
+            AscendC::Reg::RegTensor<float> outReg;
+            AscendC::Reg::RegTensor<float> smReg;
+            AscendC::Reg::RegTensor<float> tReg;
+            AscendC::Reg::RegTensor<float> absReg;
+            AscendC::Reg::RegTensor<float> amaxReg;
+            AscendC::Reg::RegTensor<float> redReg;
+            AscendC::Reg::RegTensor<float> scTmpReg;
+            AscendC::Reg::RegTensor<float> scaleReg;
+            AscendC::Reg::RegTensor<float> oneReg;
+            AscendC::Reg::RegTensor<float> cstReg;
+            AscendC::Reg::RegTensor<float> qReg;
+            AscendC::Reg::RegTensor<int16_t> qS16Reg;
+            AscendC::Reg::RegTensor<half> qF16Reg;
+            AscendC::Reg::RegTensor<T_Y> qI8Reg;
+            AscendC::Reg::MaskReg pregAll = AscendC::Reg::CreateMask<float, AscendC::Reg::MaskPattern::ALL>();
+            AscendC::Reg::MaskReg pregLoop;
+            AscendC::Reg::UnalignRegForStore scaleCursor;
+
+            AscendC::Reg::Duplicate(oneReg, 1.0f, pregAll);
+            // loop-invariant constants kept in dedicated read-only registers
+            AscendC::Reg::Duplicate(cstReg, quantMax, pregAll);
+
+            for (uint16_t rid = 0; rid < static_cast<uint16_t>(nums); ++rid) {
+                __ubuf__ float* rowOut = outBase + rid * ha;
+                __ubuf__ T_Y* rowY = yBase + rid * ha;
+
+                // pass 1: amax(|t|), t = out * smooth (smooth absent: t = out, Muls-by-1.0 is an exact identity)
+                AscendC::Reg::Duplicate(amaxReg, 0.0f, pregAll);
+                uint32_t remain = h;
+                for (uint16_t j = 0; j < loopCnt; ++j) {
+                    pregLoop = AscendC::Reg::UpdateMask<float>(remain);
+                    AscendC::Reg::LoadAlign<float>(outReg, rowOut + j * ELEM_PER_REP_FP32);
+                    if constexpr (HAS_SMOOTH) {
+                        AscendC::Reg::LoadAlign<T, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
+                            sB16Reg, smoothBase + j * ELEM_PER_REP_FP32);
+                        AscendC::Reg::Cast<float, T, kTraitB16ToB32>(smReg, sB16Reg, pregLoop);
+                        AscendC::Reg::Mul(tReg, outReg, smReg, pregLoop);
+                        AscendC::Reg::Abs(absReg, tReg, pregLoop);
+                    } else {
+                        AscendC::Reg::Abs(absReg, outReg, pregLoop);
+                    }
+                    // full-mask max is safe: lanes outside pregLoop are zeroed by the load and abs >= 0
+                    AscendC::Reg::Max(amaxReg, amaxReg, absReg, pregAll);
+                }
+                AscendC::Reg::Reduce<AscendC::Reg::ReduceType::MAX>(redReg, amaxReg, pregAll);
+                // Reduce leaves the result in lane 0 only: broadcast before vector use
+                AscendC::Reg::Duplicate(redReg, redReg, pregAll);
+
+                // scaleTemp = quantMaxVal / amax; scale = 1 / scaleTemp (same expression as baseline ScaleTensor)
+                AscendC::Reg::Div(scTmpReg, cstReg, redReg, pregAll);
+                AscendC::Reg::Div(scaleReg, oneReg, scTmpReg, pregAll);
+                AscendC::Reg::StoreUnAlign<float, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
+                    scaleAddr, scaleReg, scaleCursor, 1);
+
+                // pass 2: y = Cast(Cast(Cast(t * scaleTemp, RINT), NONE), TRUNC)
+                remain = h;
+                for (uint16_t j = 0; j < loopCnt; ++j) {
+                    pregLoop = AscendC::Reg::UpdateMask<float>(remain);
+                    AscendC::Reg::LoadAlign<float>(outReg, rowOut + j * ELEM_PER_REP_FP32);
+                    if constexpr (HAS_SMOOTH) {
+                        AscendC::Reg::LoadAlign<T, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
+                            sB16Reg, smoothBase + j * ELEM_PER_REP_FP32);
+                        AscendC::Reg::Cast<float, T, kTraitB16ToB32>(smReg, sB16Reg, pregLoop);
+                        AscendC::Reg::Mul(qReg, outReg, smReg, pregLoop);
+                        AscendC::Reg::Mul(qReg, qReg, scTmpReg, pregLoop);
+                    } else {
+                        AscendC::Reg::Mul(qReg, outReg, scTmpReg, pregLoop);
+                    }
+                    AscendC::Reg::Cast<int16_t, float, kTraitF32ToS16Rint>(qS16Reg, qReg, pregLoop);
+                    AscendC::Reg::Cast<half, int16_t, kTraitS16ToF16>(qF16Reg, qS16Reg, pregLoop);
+                    AscendC::Reg::Cast<T_Y, half, kTraitF16ToI8Trunc>(qI8Reg, qF16Reg, pregLoop);
+                    AscendC::Reg::StoreAlign<T_Y, AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                        rowY + j * ELEM_PER_REP_FP32, qI8Reg, pregLoop);
+                }
+            }
+            AscendC::Reg::StoreUnAlignPost<float>(scaleAddr, scaleCursor, 0);
+        }
+    }
+
+    // fused dual-path dynamic quant: replaces the sequential doQuant1withFlag +
+    // doQuant2withFlag pair when both CopyOut write gates are open; out rows are loaded once
+    // per pass for both paths, per-element expressions are identical to DoQuantVfImpl
+    __aicore__ inline void doQuantFusedVf(
+        LocalTensor<float>& scaleLocal, LocalTensor<float>& xLocalFp32, LocalTensor<T_Y>& outQuant01, int32_t nums,
+        int32_t elementCount)
+    {
+        __ubuf__ float* outBase = (__ubuf__ float*)xLocalFp32.GetPhyAddr();
+        __ubuf__ T* s1Base = nullptr;
+        __ubuf__ T* s2Base = nullptr;
+        if (this->smooth1Exist) {
+            LocalTensor<T> smooth1Local = weightBuf02.Get<T>();
+            s1Base = (__ubuf__ T*)smooth1Local.GetPhyAddr();
+        }
+        if (this->smooth2Exist) {
+            LocalTensor<T> smooth2Local = weightBuf03.Get<T>();
+            s2Base = (__ubuf__ T*)smooth2Local.GetPhyAddr();
+        }
+        __ubuf__ T_Y* y1Base = (__ubuf__ T_Y*)outQuant01.GetPhyAddr();
+        __ubuf__ T_Y* y2Base = y1Base + elementCount;
+        __ubuf__ float* scale1Addr = (__ubuf__ float*)scaleLocal.GetPhyAddr();
+        __ubuf__ float* scale2Addr = scale1Addr + this->numRowsAligned;
+
+        // smooth branches resolved outside the __VEC_SCOPE__: runtime branches with live
+        // vector values inside a vector function are not lowerable on this backend
+        if (s1Base != nullptr) {
+            if (s2Base != nullptr) {
+                DoQuantFusedVfImpl<true, true>(outBase, s1Base, s2Base, y1Base, y2Base, scale1Addr, scale2Addr, nums);
+            } else {
+                DoQuantFusedVfImpl<true, false>(
+                    outBase, s1Base, nullptr, y1Base, y2Base, scale1Addr, scale2Addr, nums);
+            }
+        } else {
+            if (s2Base != nullptr) {
+                DoQuantFusedVfImpl<false, true>(
+                    outBase, nullptr, s2Base, y1Base, y2Base, scale1Addr, scale2Addr, nums);
+            } else {
+                DoQuantFusedVfImpl<false, false>(
+                    outBase, nullptr, nullptr, y1Base, y2Base, scale1Addr, scale2Addr, nums);
+            }
+        }
+    }
+
+    // fused dual two-pass quant: pass 1 shares one out load per chunk to build both amax
+    // accumulators, pass 2 shares one out load per chunk for both cast chains; per-element
+    // expressions, scale computation and the 3-level cast chain are identical to
+    // DoQuantVfImpl (bit-exact by construction)
+    template <bool HAS_S1, bool HAS_S2>
+    __aicore__ inline void DoQuantFusedVfImpl(
+        __ubuf__ float* outBase, __ubuf__ T* s1Base, __ubuf__ T* s2Base, __ubuf__ T_Y* y1Base,
+        __ubuf__ T_Y* y2Base, __ubuf__ float* scale1Addr, __ubuf__ float* scale2Addr, int32_t nums)
+    {
+        // xasc_combined standard form: function-scope static constexpr CastTrait (cast probe verified)
+        static constexpr AscendC::Reg::CastTrait kTraitB16ToB32 = {
+            AscendC::Reg::RegLayout::ZERO,
+            AscendC::Reg::SatMode::UNKNOWN,
+            AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::UNKNOWN};
+        static constexpr AscendC::Reg::CastTrait kTraitF32ToS16Rint = {
+            AscendC::Reg::RegLayout::ZERO,
+            AscendC::Reg::SatMode::NO_SAT,
+            AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::CAST_RINT};
+        static constexpr AscendC::Reg::CastTrait kTraitS16ToF16 = {
+            AscendC::Reg::RegLayout::UNKNOWN,
+            AscendC::Reg::SatMode::UNKNOWN,
+            AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::CAST_NONE};
+        static constexpr AscendC::Reg::CastTrait kTraitF16ToI8Trunc = {
+            AscendC::Reg::RegLayout::ZERO,
+            AscendC::Reg::SatMode::NO_SAT,
+            AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::CAST_TRUNC};
+
+        const uint32_t h = static_cast<uint32_t>(this->numLastDim);
+        const uint32_t ha = static_cast<uint32_t>(this->numLastDimAligned);
+        const uint16_t loopCnt = static_cast<uint16_t>((h + ELEM_PER_REP_FP32 - 1) / ELEM_PER_REP_FP32);
+        const float quantMax = this->quantMaxVal;
+
+        __VEC_SCOPE__
+        {
+            AscendC::Reg::RegTensor<T> s1B16Reg;
+            AscendC::Reg::RegTensor<T> s2B16Reg;
+            AscendC::Reg::RegTensor<float> outReg;
+            AscendC::Reg::RegTensor<float> sm1Reg;
+            AscendC::Reg::RegTensor<float> sm2Reg;
+            AscendC::Reg::RegTensor<float> t1Reg;
+            AscendC::Reg::RegTensor<float> t2Reg;
+            AscendC::Reg::RegTensor<float> abs1Reg;
+            AscendC::Reg::RegTensor<float> abs2Reg;
+            AscendC::Reg::RegTensor<float> amax1Reg;
+            AscendC::Reg::RegTensor<float> amax2Reg;
+            AscendC::Reg::RegTensor<float> red1Reg;
+            AscendC::Reg::RegTensor<float> red2Reg;
+            AscendC::Reg::RegTensor<float> scTmp1Reg;
+            AscendC::Reg::RegTensor<float> scTmp2Reg;
+            AscendC::Reg::RegTensor<float> scale1Reg;
+            AscendC::Reg::RegTensor<float> scale2Reg;
+            AscendC::Reg::RegTensor<float> oneReg;
+            AscendC::Reg::RegTensor<float> cstReg;
+            AscendC::Reg::RegTensor<float> q1Reg;
+            AscendC::Reg::RegTensor<float> q2Reg;
+            AscendC::Reg::RegTensor<int16_t> q1S16Reg;
+            AscendC::Reg::RegTensor<int16_t> q2S16Reg;
+            AscendC::Reg::RegTensor<half> q1F16Reg;
+            AscendC::Reg::RegTensor<half> q2F16Reg;
+            AscendC::Reg::RegTensor<T_Y> q1I8Reg;
+            AscendC::Reg::RegTensor<T_Y> q2I8Reg;
+            AscendC::Reg::MaskReg pregAll = AscendC::Reg::CreateMask<float, AscendC::Reg::MaskPattern::ALL>();
+            AscendC::Reg::MaskReg pregLoop;
+            AscendC::Reg::UnalignRegForStore scale1Cursor;
+            AscendC::Reg::UnalignRegForStore scale2Cursor;
+
+            AscendC::Reg::Duplicate(oneReg, 1.0f, pregAll);
+            // loop-invariant constants kept in dedicated read-only registers
+            AscendC::Reg::Duplicate(cstReg, quantMax, pregAll);
+
+            for (uint16_t rid = 0; rid < static_cast<uint16_t>(nums); ++rid) {
+                __ubuf__ float* rowOut = outBase + rid * ha;
+                __ubuf__ T_Y* rowY1 = y1Base + rid * ha;
+                __ubuf__ T_Y* rowY2 = y2Base + rid * ha;
+
+                // pass 1: amax1(|t1|) and amax2(|t2|) share one out load per chunk;
+                // t = out * smooth (smooth absent: t = out, Muls-by-1.0 is an exact identity)
+                AscendC::Reg::Duplicate(amax1Reg, 0.0f, pregAll);
+                AscendC::Reg::Duplicate(amax2Reg, 0.0f, pregAll);
+                uint32_t remain = h;
+                for (uint16_t j = 0; j < loopCnt; ++j) {
+                    pregLoop = AscendC::Reg::UpdateMask<float>(remain);
+                    AscendC::Reg::LoadAlign<float>(outReg, rowOut + j * ELEM_PER_REP_FP32);
+                    if constexpr (HAS_S1) {
+                        AscendC::Reg::LoadAlign<T, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
+                            s1B16Reg, s1Base + j * ELEM_PER_REP_FP32);
+                        AscendC::Reg::Cast<float, T, kTraitB16ToB32>(sm1Reg, s1B16Reg, pregLoop);
+                        AscendC::Reg::Mul(t1Reg, outReg, sm1Reg, pregLoop);
+                        AscendC::Reg::Abs(abs1Reg, t1Reg, pregLoop);
+                    } else {
+                        AscendC::Reg::Abs(abs1Reg, outReg, pregLoop);
+                    }
+                    if constexpr (HAS_S2) {
+                        AscendC::Reg::LoadAlign<T, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
+                            s2B16Reg, s2Base + j * ELEM_PER_REP_FP32);
+                        AscendC::Reg::Cast<float, T, kTraitB16ToB32>(sm2Reg, s2B16Reg, pregLoop);
+                        AscendC::Reg::Mul(t2Reg, outReg, sm2Reg, pregLoop);
+                        AscendC::Reg::Abs(abs2Reg, t2Reg, pregLoop);
+                    } else {
+                        AscendC::Reg::Abs(abs2Reg, outReg, pregLoop);
+                    }
+                    // full-mask max is safe: lanes outside pregLoop are zeroed by the masked ops
+                    AscendC::Reg::Max(amax1Reg, amax1Reg, abs1Reg, pregAll);
+                    AscendC::Reg::Max(amax2Reg, amax2Reg, abs2Reg, pregAll);
+                }
+                AscendC::Reg::Reduce<AscendC::Reg::ReduceType::MAX>(red1Reg, amax1Reg, pregAll);
+                // Reduce leaves the result in lane 0 only: broadcast before vector use
+                AscendC::Reg::Duplicate(red1Reg, red1Reg, pregAll);
+                AscendC::Reg::Reduce<AscendC::Reg::ReduceType::MAX>(red2Reg, amax2Reg, pregAll);
+                AscendC::Reg::Duplicate(red2Reg, red2Reg, pregAll);
+
+                // scaleTemp = quantMaxVal / amax; scale = 1 / scaleTemp (same expression as baseline ScaleTensor)
+                AscendC::Reg::Div(scTmp1Reg, cstReg, red1Reg, pregAll);
+                AscendC::Reg::Div(scale1Reg, oneReg, scTmp1Reg, pregAll);
+                AscendC::Reg::StoreUnAlign<float, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
+                    scale1Addr, scale1Reg, scale1Cursor, 1);
+                AscendC::Reg::Div(scTmp2Reg, cstReg, red2Reg, pregAll);
+                AscendC::Reg::Div(scale2Reg, oneReg, scTmp2Reg, pregAll);
+                AscendC::Reg::StoreUnAlign<float, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
+                    scale2Addr, scale2Reg, scale2Cursor, 1);
+
+                // pass 2: y = Cast(Cast(Cast(t * scaleTemp, RINT), NONE), TRUNC), one out load
+                // per chunk for both paths
+                remain = h;
+                for (uint16_t j = 0; j < loopCnt; ++j) {
+                    pregLoop = AscendC::Reg::UpdateMask<float>(remain);
+                    AscendC::Reg::LoadAlign<float>(outReg, rowOut + j * ELEM_PER_REP_FP32);
+                    if constexpr (HAS_S1) {
+                        AscendC::Reg::LoadAlign<T, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
+                            s1B16Reg, s1Base + j * ELEM_PER_REP_FP32);
+                        AscendC::Reg::Cast<float, T, kTraitB16ToB32>(sm1Reg, s1B16Reg, pregLoop);
+                        AscendC::Reg::Mul(q1Reg, outReg, sm1Reg, pregLoop);
+                        AscendC::Reg::Mul(q1Reg, q1Reg, scTmp1Reg, pregLoop);
+                    } else {
+                        AscendC::Reg::Mul(q1Reg, outReg, scTmp1Reg, pregLoop);
+                    }
+                    if constexpr (HAS_S2) {
+                        AscendC::Reg::LoadAlign<T, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
+                            s2B16Reg, s2Base + j * ELEM_PER_REP_FP32);
+                        AscendC::Reg::Cast<float, T, kTraitB16ToB32>(sm2Reg, s2B16Reg, pregLoop);
+                        AscendC::Reg::Mul(q2Reg, outReg, sm2Reg, pregLoop);
+                        AscendC::Reg::Mul(q2Reg, q2Reg, scTmp2Reg, pregLoop);
+                    } else {
+                        AscendC::Reg::Mul(q2Reg, outReg, scTmp2Reg, pregLoop);
+                    }
+                    AscendC::Reg::Cast<int16_t, float, kTraitF32ToS16Rint>(q1S16Reg, q1Reg, pregLoop);
+                    AscendC::Reg::Cast<half, int16_t, kTraitS16ToF16>(q1F16Reg, q1S16Reg, pregLoop);
+                    AscendC::Reg::Cast<T_Y, half, kTraitF16ToI8Trunc>(q1I8Reg, q1F16Reg, pregLoop);
+                    AscendC::Reg::StoreAlign<T_Y, AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                        rowY1 + j * ELEM_PER_REP_FP32, q1I8Reg, pregLoop);
+                    AscendC::Reg::Cast<int16_t, float, kTraitF32ToS16Rint>(q2S16Reg, q2Reg, pregLoop);
+                    AscendC::Reg::Cast<half, int16_t, kTraitS16ToF16>(q2F16Reg, q2S16Reg, pregLoop);
+                    AscendC::Reg::Cast<T_Y, half, kTraitF16ToI8Trunc>(q2I8Reg, q2F16Reg, pregLoop);
+                    AscendC::Reg::StoreAlign<T_Y, AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                        rowY2 + j * ELEM_PER_REP_FP32, q2I8Reg, pregLoop);
+                }
+            }
+            AscendC::Reg::StoreUnAlignPost<float>(scale1Addr, scale1Cursor, 0);
+            AscendC::Reg::StoreUnAlignPost<float>(scale2Addr, scale2Cursor, 0);
+        }
+    }
+#endif
+
     __aicore__ inline void CopyOut(int32_t gmOffset, int32_t gmOffsetScale, int32_t rowCount)
     {
         LocalTensor<T_Y> outY12 = outRowsQue.template DeQue<T_Y>();
@@ -290,6 +805,8 @@ private:
         outRowsQue.FreeTensor(outY12);
     }
 
+    // registration-build adaptation: compiled unconditionally again (as in the original
+    // source); the int4 baseline fallback of doQuant{1,2}withFlag needs it on 3510
     __aicore__ inline void ScaleTensor(
         LocalTensor<float>& srcTensor, LocalTensor<float>& tmpTensor, LocalTensor<float>& scaleTensor, int32_t size,
         int32_t nums)

@@ -57,7 +57,6 @@ CATLASS_DEVICE void CallSharedInferKernel(const XAttnKernelCommonParams& params,
     using TileMmadPV = Gemm::Tile::TileMmadTla<ArchTag, ElementP, typename TileCopyPV::LayoutTagL1A>;
     using BlockMmadPV = Gemm::Block::BlockMmadTla<DispatchPolicyPV, L1TileShape, L0TileShape, ElementP, ElementV, ElementOTmp, void, TileCopyPV, TileMmadPV>;
 
-    // Shared Epilogue RescaleO，do not div rowSum or cast on lastStackTile
     using DispatchPolicyRescaleO = Epilogue::EpilogueAscend950XASharedRescaleO;
     using OTmpType = Gemm::GemmType<ElementOTmp, LayoutOTmp>;
     using EpilogueRescaleO = Epilogue::Block::BlockEpilogue<DispatchPolicyRescaleO, L1TileShape, OTmpType>;

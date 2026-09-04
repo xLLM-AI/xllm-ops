@@ -31,9 +31,6 @@ else()
 endif ()
 message(STATUS "ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH}")
 
-# CANN 版本检测：读取安装目录下 version.info 解析版本号，版本 >= 9.1 时定义编译宏 CANN_GTE_91。
-# 背景：CANN 9.1 将 OP_MODULE_ID 由预处理宏改为 op_common/log/log.h 中的 constexpr，
-#       9.0 中其为公共可见宏；通过编译宏区分以兼容两个版本。
 set(_XLLM_CANN_VERSION_INFO "")
 if(EXISTS "${ASCEND_CANN_PACKAGE_PATH}/compiler/version.info")
     file(READ "${ASCEND_CANN_PACKAGE_PATH}/compiler/version.info" _XLLM_CANN_VERSION_INFO)

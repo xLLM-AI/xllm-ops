@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -23,6 +23,8 @@ const static uint64_t MOE_GATING_TOP_K_REGBASE_TILING_KEY_1 = 10001;
 const static uint64_t MOE_GATING_TOP_K_REGBASE_TILING_KEY_2 = 10002;
 const static uint64_t MOE_GATING_TOP_K_REGBASE_TILING_KEY_3 = 10003;
 const static uint64_t MOE_GATING_TOP_K_REGBASE_TILING_KEY_4 = 10004;
+const static uint64_t MOE_GATING_TOP_K_STATIC_TBUF_KEY_BASE = 20000;
+const static uint64_t MOE_GATING_TOP_K_STATIC_TBUF_HASH_KEY_BASE = 20208;
 
 const static int64_t GROUP_SELECT_MODE_MAX = 0;
 const static int64_t GROUP_SELECT_MODE_SUM = 1;
@@ -571,6 +573,22 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::PostTiling()
 
 uint64_t MoeGatingTopKHashTilingRegbase::GetTilingKey() const
 {
+    const int64_t perCoreRowCount = CeilDiv(rows_, static_cast<int64_t>(coreNum_));
+    const bool hasHash = inputIdsShape_ != nullptr;
+    const bool validHashPair = !hasHash ||
+        (inputIdsDtype == ge::DataType::DT_INT32 && tid2eidDtype == ge::DataType::DT_INT32);
+    const bool staticFast = perCoreRowCount == 1 &&
+        (kGroup_ == groupCount_ || groupCount_ == expertCount_) &&
+        expertCount_ >= 1 && expertCount_ <= 256 && k_ >= 1 && k_ <= 16 &&
+        (normType_ == NORM_TYPE_SOFTMAX || normType_ == NORM_TYPE_SIGMOID) &&
+        renorm_ == RENORM_NO && outFlag_ == OUT_FLAG_TRUE && validHashPair;
+    if (staticFast) {
+        const uint64_t alignedExpert = (expertCount_ % 32 == 0) ? 1U : 0U;
+        const uint64_t fastVariant = (static_cast<uint64_t>(normType_) << 2U) |
+            (addBias_ ? 2U : 0U) | alignedExpert;
+        return (hasHash ? MOE_GATING_TOP_K_STATIC_TBUF_HASH_KEY_BASE :
+                          MOE_GATING_TOP_K_STATIC_TBUF_KEY_BASE) + fastVariant;
+    }
     if (inputIdsShape_ == nullptr) {
       return MOE_GATING_TOP_K_REGBASE_TILING_KEY;
     } else if (inputIdsDtype == ge::DataType::DT_INT32 && tid2eidDtype == ge::DataType::DT_INT64) {

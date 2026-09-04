@@ -36,9 +36,6 @@ static const std::initializer_list<op::DataType> ASCEND910B_AICORE_DTYPE_SUPPORT
 
 inline static bool IsAiCoreSupport(const aclTensor* self) {
     // ScatterNdUpdateV2只需要判断self
-    // ASCEND910B / ASCEND910_93 / ASCEND950 均使用扩展dtype支持列表(含BF16/INT64/INT8等)，
-    // 且这些平台只提供AiCore实现(见def中仅AddConfig AICore，无AICPU注册)，
-    // 因此这些dtype必须走AiCore分支，否则会误分派到不存在的AiCPU kernel(errno 361001)。
     const auto socVersion = GetCurrentPlatformInfo().GetSocVersion();
     if (socVersion == SocVersion::ASCEND910B ||
         socVersion == SocVersion::ASCEND910_93 ||

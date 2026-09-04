@@ -16,6 +16,7 @@
 #ifndef SCATTER_ND_UPDATE_V2_TILING_H
 #define SCATTER_ND_UPDATE_V2_TILING_H
 #include "register/tilingdata_base.h"
+#include "tiling/platform/platform_ascendc.h"
 constexpr uint64_t MAX_DIM_NUM = 8;
 namespace optiling {
 BEGIN_TILING_DATA_DEF(ScatterNdUpdateV2ScatterTiling)
@@ -66,6 +67,7 @@ REGISTER_TILING_DATA_CLASS(ScatterNdUpdateV2TilingDataOp, ScatterNdUpdateV2Tilin
 struct ScatterNdUpdateV2CompileInfo {
     uint64_t totalCoreNum = 0;
     uint64_t ubSizePlatForm = 0;
+    platform_ascendc::SocVersion socVersion = platform_ascendc::SocVersion::ASCEND910B;
 };
 } // namespace optiling
 #endif // SCATTER_ND_UPDATE_V2_TILING_H
