@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -53,9 +53,14 @@ const int64_t DYNAMIC_INT_X_FLOAT32_BIAS_QUANT_D = 30006;
 const int64_t DYNAMIC_INT_X_BFLOAT16_BIAS_QUANT_ONE = 30004;
 const int64_t DYNAMIC_INT_X_BFLOAT16_BIAS_QUANT_D = 30008;
 
+// Field order follows the direct-launch ABI mapping contract (see
+// docs/perf-integrate/INTEGRATION_PLAN.md): the legacy dead fields
+// isDoubleBuffer/swiColLen/perRowLen/modRowLen are removed and tileRows (the
+// host-proved Row-VF tile size) is appended. No consumer reads the removed
+// fields; host and kernel share this single definition through the generated
+// tiling data class.
 BEGIN_TILING_DATA_DEF(SwiGluTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, is32BAligned);
-    TILING_DATA_FIELD_DEF(uint32_t, isDoubleBuffer);
     TILING_DATA_FIELD_DEF(uint64_t, rowLen);
     TILING_DATA_FIELD_DEF(uint64_t, colLen);
     TILING_DATA_FIELD_DEF(uint32_t, baseRowLen);
@@ -64,10 +69,8 @@ BEGIN_TILING_DATA_DEF(SwiGluTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, biasIsEmpty);
     TILING_DATA_FIELD_DEF(uint32_t, quantScaleIsEmpty);
     TILING_DATA_FIELD_DEF(uint32_t, activateScaleIsEmpty);
-    TILING_DATA_FIELD_DEF(uint64_t, swiColLen);
-    TILING_DATA_FIELD_DEF(uint64_t, perRowLen);
-    TILING_DATA_FIELD_DEF(uint64_t, modRowLen);
     TILING_DATA_FIELD_DEF(uint32_t, usedCoreNum);
+    TILING_DATA_FIELD_DEF(uint32_t, tileRows);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(SwiGlu, SwiGluTilingData)

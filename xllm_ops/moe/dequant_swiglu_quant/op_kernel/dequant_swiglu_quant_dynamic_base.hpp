@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -106,8 +106,11 @@ public:
         }
         pipe->InitBuffer(inputTempBufferBF16D, alignTileLength * sizeof(CalcType) * baseRowLen);
         pipe->InitBuffer(outputTempBufferBF16D, alignTileLength * sizeof(CalcType) * baseRowLen);
-        pipe->InitBuffer(inQueueA, 1, alignTileLength * sizeof(InType) * baseRowLen);
-        pipe->InitBuffer(inQueueB, 1, alignTileLength * sizeof(InType) * baseRowLen);
+        // S1-R3-DYNPIPE: input-side double buffer. Buffer count is raised 1 -> 2
+        // only through the InitBuffer num argument (double_buffer_design.md sec
+        // 4.2); every other buffer keeps its size and count.
+        pipe->InitBuffer(inQueueA, 2, alignTileLength * sizeof(InType) * baseRowLen);
+        pipe->InitBuffer(inQueueB, 2, alignTileLength * sizeof(InType) * baseRowLen);
         pipe->InitBuffer(swiGluQueue, 1, alignTileLength * sizeof(float) * baseRowLen);
         if (quantScaleIsEmpty == 0) {
             if (quantIsOne == 0) {
@@ -300,16 +303,25 @@ public:
         uint32_t aligCalcNum = this->Align(this->colNum, sizeof(InType));
         uint32_t alig8CalcNum = this->Align(this->colNum, sizeof(int8_t));
         this->dstStride = this->isOut32BAligned ? 0 : (alig8CalcNum - this->colNum) * sizeof(InType) / this->blockBytes;
-        for (uint32_t i = 0; i < loops - 1; i++) {
-            uint32_t base = i * (this->colNum * DOUBLE) * this->baseRowLen;
-            this->CopyIn(this->colNum, offset1 + base, offset2 + base, blockCount);
-            this->BaseCompute(perLoopColSize, blockCount, i);
-            this->DynamicCompute(i, perLoopColSize, blockCount);
+        // S1-R3-DYNPIPE: prefetch loop (double_buffer_design.md sec 4.2). Tile 0
+        // is copied in before the loop; each iteration issues CopyIn(i+1)
+        // (lastLoopBlockCount when i+1 is the final iteration) BEFORE
+        // BaseCompute(i)/DynamicCompute(i) so the MTE2 of tile i+1 overlaps the
+        // vector work of tile i. CopyIn calls, offsets and block counts are the
+        // same set as the original loop, only reordered; the arithmetic of
+        // BaseCompute/DynamicCompute is untouched.
+        this->CopyIn(this->colNum, offset1, offset2, (loops == 1) ? lastLoopBlockCount : blockCount);
+        for (uint32_t i = 0; i < loops; i++) {
+            if (i + 1 < loops) {
+                uint32_t nextBlockCount = (i + 1 == loops - 1) ? lastLoopBlockCount : blockCount;
+                uint32_t base = (i + 1) * (this->colNum * DOUBLE) * this->baseRowLen;
+                this->CopyIn(this->colNum, offset1 + base, offset2 + base, nextBlockCount);
+            }
+            int64_t curLoopColSize = (i == loops - 1) ? lastLoopColSize : perLoopColSize;
+            int64_t curBlockCount = (i == loops - 1) ? lastLoopBlockCount : blockCount;
+            this->BaseCompute(curLoopColSize, curBlockCount, i);
+            this->DynamicCompute(i, curLoopColSize, curBlockCount);
         }
-        uint32_t base = (loops - 1) * (this->colNum * DOUBLE) * this->baseRowLen;
-        this->CopyIn(this->colNum, offset1 + base, offset2 + base, lastLoopBlockCount);
-        this->BaseCompute(lastLoopColSize, lastLoopBlockCount, (loops - 1));
-        this->DynamicCompute((loops - 1), lastLoopColSize, lastLoopBlockCount);
 
         if (this->quantScaleIsEmpty == 0) {
             if constexpr (quantIsOne == 0) {
@@ -547,8 +559,14 @@ protected:
     TBuf<TPosition::VECCALC> outputTempBufferBF16D;
     TBuf<TPosition::VECCALC> inputBiasTempBufferA;
     TBuf<TPosition::VECCALC> inputBiasTempBufferB;
-    TQue<QuePosition::VECIN, 1> inQueueA;
-    TQue<QuePosition::VECIN, 1> inQueueB;
+    // S1-R3-DYNPIPE double buffer: the depth template argument must match the
+    // InitBuffer num (2) in InitUbBufferCommon. With depth 1 the queue is a
+    // single-slot queue (EnQue overwrites the slot), so the prefetch loop's
+    // second in-flight tile loses the first tile's handle (wrong-tile reads)
+    // and leaves its buffer permanently OCCUPIED (AllocTensor spin-waits) --
+    // the A2/A3 numeric-mismatch + hang regression.
+    TQue<QuePosition::VECIN, 2> inQueueA;
+    TQue<QuePosition::VECIN, 2> inQueueB;
     TQue<QuePosition::VECIN, 1> inQueueQuantScale;
     TQue<QuePosition::VECOUT, 1> swiGluQueue;
     TQue<QuePosition::VECOUT, 1> outQueueF;

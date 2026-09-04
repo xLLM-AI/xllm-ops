@@ -28,7 +28,6 @@
 #if defined(OP)
 #define XLLM_OP_MODULE_ID OP
 #else
-// CANN 9.1 中 OP_MODULE_ID 为 log.h 内 constexpr，9.0 中不存在；统一回退固定模块 ID 63（仅影响日志过滤，不影响功能）
 #define XLLM_OP_MODULE_ID 63
 #endif
 #endif
