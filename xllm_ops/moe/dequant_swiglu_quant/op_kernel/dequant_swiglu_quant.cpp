@@ -26,6 +26,7 @@
 #include "dequant_swiglu_quant_dynamic_bias_int32.hpp"
 #include "dequant_swiglu_quant_dynamic_bias_float.hpp"
 #include "dequant_swiglu_quant_dynamic_performance.hpp"
+#include "dequant_swiglu_quant_vecrow.hpp"
 
 using namespace AscendC;
 
@@ -57,6 +58,11 @@ using namespace AscendC;
 #define DEQUANT_SWIGLU_QUANT_WITH_GROUP_FP32_QS_GR 110000000
 #define DEQUANT_SWIGLU_QUANT_WITH_GROUP_FP16_QS_GR 110000100
 #define DEQUANT_SWIGLU_QUANT_WITH_GROUP_BF16_QS_GR 110000200
+
+// Vectorised-row fast path; keys assigned in dequant_swiglu_quant_tiling_base.cpp.
+#define DEQUANT_SWIGLU_QUANT_VECROW_INT32 30020
+#define DEQUANT_SWIGLU_QUANT_VECROW_FLOAT16 30021
+#define DEQUANT_SWIGLU_QUANT_VECROW_BFLOAT16 30022
 
 extern "C" __global__ __aicore__ void dequant_swiglu_quant(GM_ADDR xGM, GM_ADDR weightSscaleGM,
                                                            GM_ADDR activationScaleGM, GM_ADDR biasGM,
@@ -312,6 +318,12 @@ extern "C" __global__ __aicore__ void dequant_swiglu_quant(GM_ADDR xGM, GM_ADDR 
     op.Init(xGM, weightSscaleGM, activationScaleGM, biasGM, quantScaleGM, quantOffsetGM, yGM, scaleGM, userspace,
             tilingData, &(pipe));
     op.Process();
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_VECROW_INT32)) {
+    GET_TILING_DATA_WITH_STRUCT(SwiGluTilingData, tilingDataIn, tiling);
+    const SwiGluTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuant::DequantSwigluQuantVecRow<int32_t, true> op;
+    op.Init(xGM, weightSscaleGM, activationScaleGM, quantScaleGM, yGM, scaleGM, tilingData, &(pipe));
+    op.Process();
   }
 #if !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
   // ORIG_DTYPE_BIAS == DT_BF16
@@ -375,6 +387,12 @@ extern "C" __global__ __aicore__ void dequant_swiglu_quant(GM_ADDR xGM, GM_ADDR 
     op.Init(xGM, weightSscaleGM, activationScaleGM, biasGM, quantScaleGM, quantOffsetGM, yGM, scaleGM, userspace,
             tilingData, &(pipe));
     op.Process();
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_VECROW_FLOAT16)) {
+    GET_TILING_DATA_WITH_STRUCT(SwiGluTilingData, tilingDataIn, tiling);
+    const SwiGluTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuant::DequantSwigluQuantVecRow<half, false> op;
+    op.Init(xGM, weightSscaleGM, activationScaleGM, quantScaleGM, yGM, scaleGM, tilingData, &(pipe));
+    op.Process();
   }
 #endif
 #if !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113)) && (ORIG_DTYPE_X == DT_BF16)
@@ -427,6 +445,12 @@ extern "C" __global__ __aicore__ void dequant_swiglu_quant(GM_ADDR xGM, GM_ADDR 
     DequantSwigluQuant::DequantSwigluQuantDynamicBF16<bfloat16_t, float, bfloat16_t, int8_t, 1, 0> op;
     op.Init(xGM, weightSscaleGM, activationScaleGM, biasGM, quantScaleGM, quantOffsetGM, yGM, scaleGM, userspace,
             tilingData, &(pipe));
+    op.Process();
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_VECROW_BFLOAT16)) {
+    GET_TILING_DATA_WITH_STRUCT(SwiGluTilingData, tilingDataIn, tiling);
+    const SwiGluTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuant::DequantSwigluQuantVecRow<bfloat16_t, false> op;
+    op.Init(xGM, weightSscaleGM, activationScaleGM, quantScaleGM, yGM, scaleGM, tilingData, &(pipe));
     op.Process();
   }
 #endif
