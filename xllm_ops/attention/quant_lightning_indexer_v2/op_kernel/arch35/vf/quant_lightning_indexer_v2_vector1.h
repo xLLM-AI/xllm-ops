@@ -16,7 +16,9 @@
 #define QUANT_LIGHTNING_INDEXER_V2_VECTOR1_H
 
 #include "kernel_operator.h"
-#if __has_include("../../../lightning_indexer_v2/arch35/vf/common/lightning_indexer_v2_vector1_base.h")
+#if __has_include("lightning_indexer_v2/arch35/vf/common/lightning_indexer_v2_vector1_base.h")
+#include "lightning_indexer_v2/arch35/vf/common/lightning_indexer_v2_vector1_base.h"
+#elif __has_include("../../../lightning_indexer_v2/arch35/vf/common/lightning_indexer_v2_vector1_base.h")
 #include "../../../lightning_indexer_v2/arch35/vf/common/lightning_indexer_v2_vector1_base.h"
 #else
 #include "../../../../lightning_indexer_v2/op_kernel/arch35/vf/common/lightning_indexer_v2_vector1_base.h"

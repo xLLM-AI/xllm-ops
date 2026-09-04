@@ -50,6 +50,17 @@ get_cann_toolkit_version() {
     return 1
 }
 
+maybe_add_quant_lightning_indexer_v2() {
+    local li_v2_dir="${ASCEND_HOME_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_transformer/ascendc/lightning_indexer_v2"
+    if [[ -d "${li_v2_dir}" ]]; then
+        log "found lightning_indexer_v2 source in CANN (${li_v2_dir}), enable quant_lightning_indexer_v2 / _metadata"
+        CUSTOM_OPS_ARRAY+=("quant_lightning_indexer_v2")
+        CUSTOM_OPS_ARRAY+=("quant_lightning_indexer_v2_metadata")
+    else
+        log "lightning_indexer_v2 source NOT found in CANN (${li_v2_dir}), skip quant_lightning_indexer_v2 / _metadata"
+    fi
+}
+
 # 如果指定了 OP_NAME_ARG，覆盖 CUSTOM_OPS_ARRAY 和 CUSTOM_OPS
 if [[ -n "${OP_NAME_ARG}" ]]; then
     log "OP_NAME_ARG=${OP_NAME_ARG} specified, overriding default CUSTOM_OPS"
@@ -169,6 +180,7 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
         "layer_norm_fwd"
     )
 
+    maybe_add_quant_lightning_indexer_v2
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910b"
 elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
@@ -253,6 +265,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     else
         log "skip mega_chunk_gdn because CANN version is unavailable"
     fi
+    maybe_add_quant_lightning_indexer_v2
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
 elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
@@ -324,6 +337,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "mega_gdn_prefill_op"
         "layer_norm_fwd"
     )
+    maybe_add_quant_lightning_indexer_v2
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend950"
 else
