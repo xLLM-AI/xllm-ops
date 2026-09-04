@@ -1,6 +1,6 @@
 /**
  * This program is free software, you can redistribute it and/or modify.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -41,7 +41,11 @@ constexpr uint32_t SIZEOF_B16 = 2;
 constexpr uint32_t BLOCK_SIZE = 32;
 constexpr uint64_t ROW_FACTOR = 128;
 constexpr uint64_t UB_RESERVED_BYTE = 768;
-constexpr uint32_t MAX_ROW_STEP = 16;
+// arch35 VF kernel（寄存器流水，无逐行 V<->S 往返）在 950 上以 32 行/轮吃满流水；
+// 其余平台编译的是 baseline kernel（逐行标量往返 + PipeBarrier），行批过大反而放大串行段，
+// 维持历史经验上限 16，避免 A2/A3 上 rowStep 翻倍带来的性能回退风险。
+constexpr uint32_t MAX_ROW_STEP = 32;
+constexpr uint32_t MAX_ROW_STEP_BASELINE = 16;
 constexpr uint32_t INT4_ALIGN_SIZE = 64;
 
 constexpr uint32_t UB_TILING_POLICY_NORMAL = 1;
@@ -192,6 +196,7 @@ bool RmsNormDynamicQuantTilingHelper::InitializePlatformInfo()
     this->socCoreNums_ = ascendcPlatform.GetCoreNumAiv();
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, this->ubSize_);
     this->sysWorkspaceSize_ = ascendcPlatform.GetLibApiWorkSpaceSize();
+    this->curSocVersion_ = ascendcPlatform.GetSocVersion();
     return true;
 }
 
@@ -398,8 +403,10 @@ bool RmsNormDynamicQuantTilingHelper::CheckUbNormalTiling()
         "rowCommons: %ld",
         ret, ubConst, ubAvaliable, coexistingRowsNum, rowStep, rowCommons);
     if (ret) {
-        // No mutilN now. max RowStep = 16
-        this->firstDimPerLoop_ = (rowStep <= MAX_ROW_STEP) ? rowStep : MAX_ROW_STEP;
+        // No mutilN now. 950（VF kernel）用 32 行/轮，其余平台 baseline kernel 维持 16。
+        const uint32_t rowStepCap =
+            (this->curSocVersion_ == platform_ascendc::SocVersion::ASCEND950) ? MAX_ROW_STEP : MAX_ROW_STEP_BASELINE;
+        this->firstDimPerLoop_ = (rowStep <= rowStepCap) ? rowStep : rowStepCap;
         this->lastDimSliceLen_ = this->numLastDimAligned_;
         this->lastDimLoopNum_ = 1;
         this->lastDimSliceLenTail_ = 0;

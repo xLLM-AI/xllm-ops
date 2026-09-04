@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -26,6 +26,13 @@
 #include "dequant_swiglu_quant_dynamic_bias_int32.hpp"
 #include "dequant_swiglu_quant_dynamic_bias_float.hpp"
 #include "dequant_swiglu_quant_dynamic_performance.hpp"
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+// Row-VF (Reg/MicroAPI) and V35Nlast kernels are arch35 (Ascend950) only;
+// non-950 platforms keep the frozen baseline routing (see tiling_base.cpp).
+#include "dequant_swiglu_quant_vecrow.hpp"
+#include "dequant_swiglu_quant_vecrow_legacy.hpp"
+#include "arch35/dequant_swiglu_quant_nlast.h"
+#endif
 
 using namespace AscendC;
 
@@ -57,6 +64,27 @@ using namespace AscendC;
 #define DEQUANT_SWIGLU_QUANT_WITH_GROUP_FP32_QS_GR 110000000
 #define DEQUANT_SWIGLU_QUANT_WITH_GROUP_FP16_QS_GR 110000100
 #define DEQUANT_SWIGLU_QUANT_WITH_GROUP_BF16_QS_GR 110000200
+
+// Vectorised-row fast path; keys assigned in dequant_swiglu_quant_tiling_base.cpp.
+// 30020-30022 select the new Row-VF kernel (Register-API two-pass, tileRows from
+// the host UB equation); 30023-30025 keep the restored legacy MicroAPI Row-VF
+// kernel (dequant_swiglu_quant_vecrow_legacy.hpp) for the shapes the frozen
+// baseline used to route to 30020-30022.
+#define DEQUANT_SWIGLU_QUANT_VECROW_INT32 30020
+#define DEQUANT_SWIGLU_QUANT_VECROW_FLOAT16 30021
+#define DEQUANT_SWIGLU_QUANT_VECROW_BFLOAT16 30022
+#define DEQUANT_SWIGLU_QUANT_VECROW_LEGACY_INT32 30023
+#define DEQUANT_SWIGLU_QUANT_VECROW_LEGACY_FLOAT16 30024
+#define DEQUANT_SWIGLU_QUANT_VECROW_LEGACY_BFLOAT16 30025
+
+// Non-last activate_dim routes (assigned by DequantSwigluQuantV35NlastTiling in
+// dequant_swiglu_quant_tiling_arch35.cpp; key = 100000 + bias*1000 + act*100 +
+// quant_scale*10). Only the frozen acceptance combinations are dispatched, the
+// same set the accepted direct-launch implementation serves.
+#define DEQUANT_SWIGLU_QUANT_NLAST_FP16_QUANT 100010
+#define DEQUANT_SWIGLU_QUANT_NLAST_BF16_PLAIN 100000
+#define DEQUANT_SWIGLU_QUANT_NLAST_I32_BIAS_FP16_ACT 103100
+#define DEQUANT_SWIGLU_QUANT_NLAST_I32_BIAS_BF16_ACT 104100
 
 extern "C" __global__ __aicore__ void dequant_swiglu_quant(GM_ADDR xGM, GM_ADDR weightSscaleGM,
                                                            GM_ADDR activationScaleGM, GM_ADDR biasGM,
@@ -312,6 +340,34 @@ extern "C" __global__ __aicore__ void dequant_swiglu_quant(GM_ADDR xGM, GM_ADDR 
     op.Init(xGM, weightSscaleGM, activationScaleGM, biasGM, quantScaleGM, quantOffsetGM, yGM, scaleGM, userspace,
             tilingData, &(pipe));
     op.Process();
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_VECROW_INT32)) {
+    GET_TILING_DATA_WITH_STRUCT(SwiGluTilingData, tilingDataIn, tiling);
+    const SwiGluTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuant::DequantSwigluQuantVecRow<int32_t, true> op;
+    op.Init(xGM, weightSscaleGM, activationScaleGM, quantScaleGM, yGM, scaleGM, tilingData, &(pipe));
+    op.Process();
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_VECROW_LEGACY_INT32)) {
+    GET_TILING_DATA_WITH_STRUCT(SwiGluTilingData, tilingDataIn, tiling);
+    const SwiGluTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuant::DequantSwigluQuantVecRowLegacy<int32_t, true> op;
+    op.Init(xGM, weightSscaleGM, activationScaleGM, quantScaleGM, yGM, scaleGM, tilingData, &(pipe));
+    op.Process();
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_NLAST_I32_BIAS_FP16_ACT)) {
+    GET_TILING_DATA_WITH_STRUCT(DequantSwigluQuantV35NlastTilingData, tilingDataIn, tiling);
+    const DequantSwigluQuantV35NlastTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuantV35Ops::DequantSwigluQuantNlast<float, bool, bool, half, int32_t, int8_t> op(&pipe);
+    op.Init(xGM, weightSscaleGM, activationScaleGM, biasGM, quantScaleGM, quantOffsetGM, groupIndex, yGM, scaleGM,
+            tilingData);
+    op.Process();
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_NLAST_I32_BIAS_BF16_ACT)) {
+    GET_TILING_DATA_WITH_STRUCT(DequantSwigluQuantV35NlastTilingData, tilingDataIn, tiling);
+    const DequantSwigluQuantV35NlastTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuantV35Ops::DequantSwigluQuantNlast<float, bool, bool, bfloat16_t, int32_t, int8_t> op(&pipe);
+    op.Init(xGM, weightSscaleGM, activationScaleGM, biasGM, quantScaleGM, quantOffsetGM, groupIndex, yGM, scaleGM,
+            tilingData);
+    op.Process();
+#endif
   }
 #if !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
   // ORIG_DTYPE_BIAS == DT_BF16
@@ -375,6 +431,27 @@ extern "C" __global__ __aicore__ void dequant_swiglu_quant(GM_ADDR xGM, GM_ADDR 
     op.Init(xGM, weightSscaleGM, activationScaleGM, biasGM, quantScaleGM, quantOffsetGM, yGM, scaleGM, userspace,
             tilingData, &(pipe));
     op.Process();
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_VECROW_FLOAT16)) {
+    GET_TILING_DATA_WITH_STRUCT(SwiGluTilingData, tilingDataIn, tiling);
+    const SwiGluTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuant::DequantSwigluQuantVecRow<half, false> op;
+    op.Init(xGM, weightSscaleGM, activationScaleGM, quantScaleGM, yGM, scaleGM, tilingData, &(pipe));
+    op.Process();
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_VECROW_LEGACY_FLOAT16)) {
+    GET_TILING_DATA_WITH_STRUCT(SwiGluTilingData, tilingDataIn, tiling);
+    const SwiGluTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuant::DequantSwigluQuantVecRowLegacy<half, false> op;
+    op.Init(xGM, weightSscaleGM, activationScaleGM, quantScaleGM, yGM, scaleGM, tilingData, &(pipe));
+    op.Process();
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_NLAST_FP16_QUANT)) {
+    GET_TILING_DATA_WITH_STRUCT(DequantSwigluQuantV35NlastTilingData, tilingDataIn, tiling);
+    const DequantSwigluQuantV35NlastTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuantV35Ops::DequantSwigluQuantNlast<bool, float, bool, bool, half, int8_t> op(&pipe);
+    op.Init(xGM, weightSscaleGM, activationScaleGM, biasGM, quantScaleGM, quantOffsetGM, groupIndex, yGM, scaleGM,
+            tilingData);
+    op.Process();
+#endif
   }
 #endif
 #if !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113)) && (ORIG_DTYPE_X == DT_BF16)
@@ -428,6 +505,27 @@ extern "C" __global__ __aicore__ void dequant_swiglu_quant(GM_ADDR xGM, GM_ADDR 
     op.Init(xGM, weightSscaleGM, activationScaleGM, biasGM, quantScaleGM, quantOffsetGM, yGM, scaleGM, userspace,
             tilingData, &(pipe));
     op.Process();
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_VECROW_BFLOAT16)) {
+    GET_TILING_DATA_WITH_STRUCT(SwiGluTilingData, tilingDataIn, tiling);
+    const SwiGluTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuant::DequantSwigluQuantVecRow<bfloat16_t, false> op;
+    op.Init(xGM, weightSscaleGM, activationScaleGM, quantScaleGM, yGM, scaleGM, tilingData, &(pipe));
+    op.Process();
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_VECROW_LEGACY_BFLOAT16)) {
+    GET_TILING_DATA_WITH_STRUCT(SwiGluTilingData, tilingDataIn, tiling);
+    const SwiGluTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuant::DequantSwigluQuantVecRowLegacy<bfloat16_t, false> op;
+    op.Init(xGM, weightSscaleGM, activationScaleGM, quantScaleGM, yGM, scaleGM, tilingData, &(pipe));
+    op.Process();
+  } else if (TILING_KEY_IS(DEQUANT_SWIGLU_QUANT_NLAST_BF16_PLAIN)) {
+    GET_TILING_DATA_WITH_STRUCT(DequantSwigluQuantV35NlastTilingData, tilingDataIn, tiling);
+    const DequantSwigluQuantV35NlastTilingData* __restrict__ tilingData = &tilingDataIn;
+    DequantSwigluQuantV35Ops::DequantSwigluQuantNlast<bool, bool, bool, bool, bfloat16_t, int8_t> op(&pipe);
+    op.Init(xGM, weightSscaleGM, activationScaleGM, biasGM, quantScaleGM, quantOffsetGM, groupIndex, yGM, scaleGM,
+            tilingData);
+    op.Process();
+#endif
   }
 #endif
 }

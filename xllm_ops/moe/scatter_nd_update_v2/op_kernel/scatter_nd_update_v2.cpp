@@ -16,6 +16,7 @@
 #include "scatter_nd_update_linear_index.h"
 #include "scatter_nd_update_no_sort.h"
 #include "scatter_nd_update_large_index.h"
+#include "scatter_nd_update_v2_scan.h"
 
 extern "C" __global__ __aicore__ void scatter_nd_update_v2(GM_ADDR varRef, GM_ADDR indices,
     GM_ADDR updates, GM_ADDR output, GM_ADDR workSpace, GM_ADDR tiling) {
@@ -31,7 +32,18 @@ extern "C" __global__ __aicore__ void scatter_nd_update_v2(GM_ADDR varRef, GM_AD
 #if (defined(DTYPE_VAR))
     // tilingKey: indexType * 10 + sortFlag
     // indexType: 1=int32, 2=int64(cast), 3=int64(large); sortFlag: 0=非排序, 1=排序
-    if (TILING_KEY_IS(11)) {
+    // 单趟扫描分支：int32 indices = 50，int64 = 51（host tiling 的 useScan 决定）
+    if (TILING_KEY_IS(50)) {
+        ScatterNdUpdateV2::ScatterNdUpdateV2ScanKernel<DTYPE_VAR, int> op(indices, updates, output,
+                                                                          tilingData, tpipe);
+        op.Process();
+        tpipe.Destroy();
+    } else if (TILING_KEY_IS(51)) {
+        ScatterNdUpdateV2::ScatterNdUpdateV2ScanKernel<DTYPE_VAR, int64_t> op(indices, updates, output,
+                                                                              tilingData, tpipe);
+        op.Process();
+        tpipe.Destroy();
+    } else if (TILING_KEY_IS(11)) {
         ScatterNdUpdateV2::LinearIndexKernel<true, int> op1(indices, workSpace, tilingData, tpipe);
         op1.Process();
         AscendC::SyncAll();

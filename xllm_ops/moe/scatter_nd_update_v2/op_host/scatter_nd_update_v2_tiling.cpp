@@ -33,6 +33,9 @@ constexpr uint64_t GATHER_USE_NUM = 2;
 constexpr uint64_t ALIGNED_NUM = 8;
 constexpr uint64_t ALIGNED_SIZE = 32;
 constexpr uint64_t ATTR_STRIDE = 0;
+// 单趟扫描分支的路由上界与每核 UB 预算
+constexpr uint64_t SCAN_MAX_ROWS = 2048;   // R ≤ 2048
+constexpr uint64_t SCAN_UB_MARGIN = 16 * 1024;  // 预留 16KB 余量（框架/栈开销）
 class ScatterNdUpdateV2Tiling {
 public:
     explicit ScatterNdUpdateV2Tiling(gert::TilingContext* context) : tilingContext_(context){}
@@ -43,6 +46,8 @@ public:
 private:
     inline bool IsSort(uint64_t totalLength, uint64_t indexRow);
     inline bool IsLinearIndex(uint64_t totalLength);
+    inline bool ScanUbFits(uint64_t indexRow, uint64_t indexDim, uint64_t scatterLength,
+                           uint64_t dataTypeSize, uint64_t ubSize) const;
     inline size_t CalcWorkSpaceSize(uint64_t indexRow);
     inline void SetTilingKeyMode();
     inline void GetDtypeSize();
@@ -61,6 +66,7 @@ private:
     uint64_t dataTypeSize_ = 0;
     uint64_t isInt64Indices_ = false;
     uint64_t needLargeIndexKernel_ = false;
+    bool useScan_ = false;   // 走单趟扫描核（免 sort/SyncAll/workspace）
 
 private:
     // LinearIndex
@@ -92,6 +98,13 @@ private:
 
 inline void ScatterNdUpdateV2Tiling::SetTilingKeyMode()
 {
+    // useScan 优先于原 indexType*10+sortFlag 编码
+    if (useScan_) {
+        tilingKey_ = isInt64Indices_ ? 51 : 50;   // REG-SCAN·int64=51 / REG-SCAN·int32=50
+        tilingContext_->SetTilingKey(tilingKey_);
+        OP_LOGD(tilingContext_, "useScan=%u, REG-SCAN tilingKey=%lu (int64=%u)", useScan_, tilingKey_, isInt64Indices_);
+        return;
+    }
     // tilingKey: indexType * 10 + sortFlag (indexType: 1=int32, 2=int64(cast), 3=int64(large))
     uint64_t indexType;
     if (!isInt64Indices_) {
@@ -117,6 +130,31 @@ inline bool ScatterNdUpdateV2Tiling::IsLinearIndex(uint64_t totalLength)
 inline bool ScatterNdUpdateV2Tiling::IsSort(uint64_t totalLength, uint64_t indexRow)
 {
     return totalLength <= MAX_FLOAT_EXPRESS_INT32;
+}
+
+// 扫描核每核 UB 布局，必须与 scatter_nd_update_v2_scan.h::InitBuffers 保持一致
+//   dstBuf int32[align8(R)] + tmpBuf + rangeBuf + indexBuf int32/int64[R×indexDim] + updBuf T×2
+// 装不下则回退原 sort 路径，不改变算子语义。
+inline bool ScatterNdUpdateV2Tiling::ScanUbFits(uint64_t indexRow, uint64_t indexDim,
+                                                uint64_t scatterLength, uint64_t dataTypeSize,
+                                                uint64_t ubSize) const
+{
+    uint64_t rowBufElems = (indexRow + ALIGNED_NUM - 1) & ~(ALIGNED_NUM - 1);
+    if (rowBufElems == 0) {
+        rowBufElems = 1;
+    }
+    uint64_t idxElemBytes = isInt64Indices_ ? 8 : 4;
+    uint64_t indexBufBytes = (indexRow * indexDim * idxElemBytes + ALIGNED_SIZE - 1) & ~(ALIGNED_SIZE - 1);
+    uint64_t dstTmpRangeBytes = rowBufElems * sizeof(int) * 3;
+    // scatterTileAlignLength：每行 ups 的 32B 对齐元素数（对应 kernel 侧 updBuf 每槽）
+    uint64_t scatterAlignNum = ALIGNED_SIZE / (dataTypeSize == 0 ? 4 : dataTypeSize);
+    uint64_t tileAlignLen = (scatterLength + scatterAlignNum - 1) & ~(scatterAlignNum - 1);
+    uint64_t updBufBytes = 2 * (tileAlignLen == 0 ? 32 : tileAlignLen) * dataTypeSize;
+    if (updBufBytes == 0) {
+        updBufBytes = 2 * ALIGNED_SIZE;
+    }
+    uint64_t total = indexBufBytes + dstTmpRangeBytes + updBufBytes;
+    return total + SCAN_UB_MARGIN <= ubSize;
 }
 
 inline void ScatterNdUpdateV2Tiling::Tiling4LinearIndex(uint64_t indexRow, uint64_t indexDim)
@@ -252,8 +290,13 @@ inline size_t ScatterNdUpdateV2Tiling::CalcWorkSpaceSize(uint64_t indexRow)
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(tilingContext_->GetPlatformInfo());
     size_t sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
     size_t indexRowAligned = (indexRow + ALIGNED_NUM - 1) & ~(ALIGNED_NUM - 1);
-    sortWorkspace_ = indexRowAligned;
     size_t totalWorkspace = sysWorkspaceSize;
+    // 扫描分支不排序，无 sortWorkspace
+    if (useScan_) {
+        sortWorkspace_ = 0;
+        return totalWorkspace;
+    }
+    sortWorkspace_ = indexRowAligned;
     if (isLinearIndex_) {
         totalWorkspace += sortWorkspace_ * SORT_USE_GM_NUM * sizeof(int);
     }
@@ -344,6 +387,19 @@ ge::graphStatus ScatterNdUpdateV2Tiling::Init()
     coreNum_ = coreNum_ == 0 ? 1 : coreNum_;
     ubSize_ = compileInfo->ubSizePlatForm;
     GetDtypeSize();
+    // 扫描核目前仅在 ASCEND950 上验证过，其余平台一律保持原 sort 双阶段路径。
+    // 索引行数与 totalLength 还要在上界内；UB 可行性在 dtype/ubSize 已知后再判。
+    useScan_ = (compileInfo->socVersion == platform_ascendc::SocVersion::ASCEND950) &&
+               (indexRow <= SCAN_MAX_ROWS) && (totalLength <= MAX_LENGTH_INT32);
+    if (useScan_) {
+        if (ScanUbFits(indexRow, indexDim_, scatterLength_, dataTypeSize_, ubSize_)) {
+            // blockDim = min(coreNum, max(1, totalLength))；分区复用 Tiling4Scatter
+            coreNum_ = std::min(compileInfo->totalCoreNum, std::max<uint64_t>(1, totalLength));
+            coreNum_ = coreNum_ == 0 ? 1 : coreNum_;
+        } else {
+            useScan_ = false;   // UB 装不下 → 回退原 sort 双阶段（coreNum_ 保持原值）
+        }
+    }
     Tiling4LinearIndex(indexRow, indexDim_);
     SetTilingKeyMode();
     tilingContext_->SetScheduleMode(1);
@@ -383,6 +439,7 @@ ge::graphStatus TilingPrepare4ScatterNdUpdateV2(gert::TilingParseContext* contex
     auto platformInfo = context->GetPlatformInfo();
     OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
+    compileInfo->socVersion = ascendcPlatform.GetSocVersion();
     compileInfo->totalCoreNum = ascendcPlatform.GetCoreNumAiv();
     if (compileInfo->totalCoreNum == 0) {
         OP_LOGE(context, "coreNum %lu", compileInfo->totalCoreNum);

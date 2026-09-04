@@ -43,12 +43,20 @@ public:
         postGm.SetGlobalBuffer((__gm__ float*)post);
         combFragGm.SetGlobalBuffer((__gm__ float*)combFrag);
 
+        useCombSoa = (tilingData->hcMult <= COMB_SOA_MAX_MULT) && (tilingData->rowFactor >= COMB_SOA_MIN_ROWS);
+        combPlanes = tilingData->hcMult * tilingData->hcMult;
+        combAAlign = CeilAlign(static_cast<int32_t>(tilingData->rowFactor), VL_FP32);
+
         // InQue
         int64_t mixesQue01Size = tilingData->rowFactor * tilingData->hcMultAlign * 2 * sizeof(float);
         pipe->InitBuffer(mixesQue01, 2, mixesQue01Size);
-        pipe->InitBuffer(
-            mixesQue2, 2, tilingData->rowFactor * tilingData->hcMult * tilingData->hcMultAlign * sizeof(float));
-        pipe->InitBuffer(rsqrtQue, 2, RoundUp<float>(tilingData->rowFactor) * sizeof(float));
+        int64_t combInSize = useCombSoa ?
+            (int64_t)combPlanes * combAAlign * sizeof(float) :
+            tilingData->rowFactor * tilingData->hcMult * tilingData->hcMultAlign * sizeof(float);
+        pipe->InitBuffer(mixesQue2, 2, combInSize);
+        int64_t rsqrtSize = useCombSoa ? combAAlign * sizeof(float) :
+                                         RoundUp<float>(tilingData->rowFactor) * sizeof(float);
+        pipe->InitBuffer(rsqrtQue, 2, rsqrtSize);
         pipe->InitBuffer(
             xQue, 2, tilingData->rowFactor * tilingData->hcMult * RoundUp<T>(tilingData->dFactor) * sizeof(T));
 
@@ -56,8 +64,8 @@ public:
         pipe->InitBuffer(
             yQue, 2, tilingData->rowFactor * RoundUp<T>(tilingData->dFactor) * sizeof(T));
         pipe->InitBuffer(postQue, 2, tilingData->rowFactor * tilingData->hcMultAlign * sizeof(float));
-        pipe->InitBuffer(
-            combFragQue, 2, tilingData->rowFactor * tilingData->hcMult * tilingData->hcMultAlign * sizeof(float));
+        int64_t combOutSize = useCombSoa ? (int64_t)TRANS_BLOCK_FULL * combAAlign * sizeof(float) : combInSize;
+        pipe->InitBuffer(combFragQue, 2, combOutSize);
 
         // TBuf
         pipe->InitBuffer(hcBaseBuf0, tilingData->hcMultAlign * sizeof(float));
@@ -67,6 +75,11 @@ public:
         hcBase0Local = hcBaseBuf0.Get<float>();
         hcBase1Local = hcBaseBuf1.Get<float>();
         hcBase2Local = hcBaseBuf2.Get<float>();
+
+        if (useCombSoa) {
+            pipe->InitBuffer(vaAddrBuf, 2 * TRANS_BLOCK_FULL * sizeof(uint64_t));
+            vaAddrLocal = vaAddrBuf.Get<uint64_t>();
+        }
     }
 
     __aicore__ inline void Process()
@@ -81,7 +94,11 @@ public:
 
         CopyIn(hcBaseGm, hcBase0Local, 1, tilingData->hcMult);
         CopyIn(hcBaseGm[tilingData->hcMult], hcBase1Local, 1, tilingData->hcMult);
-        CopyIn(hcBaseGm[tilingData->hcMult * 2], hcBase2Local, tilingData->hcMult, tilingData->hcMult);
+        if (useCombSoa) {
+            CopyIn(hcBaseGm[tilingData->hcMult * 2], hcBase2Local, 1, tilingData->hcMult * tilingData->hcMult);
+        } else {
+            CopyIn(hcBaseGm[tilingData->hcMult * 2], hcBase2Local, tilingData->hcMult, tilingData->hcMult);
+        }
         event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
         SetFlag<HardEvent::MTE2_V>(eventId);
         WaitFlag<HardEvent::MTE2_V>(eventId);
@@ -142,23 +159,101 @@ public:
 
             // combFrag
             mixes2Local = mixesQue2.AllocTensor<float>();
-            CopyInWithLoopMode(
-                mixesGm
-                    [mixGmBaseOffset + rowOuterIdx * tilingData->rowFactor * tilingData->hcMix + tilingData->hcMult * 2],
-                mixes2Local, curRowFactor, tilingData->hcMult, tilingData->hcMult, tilingData->hcMix);
+            if (useCombSoa) {
+                CopyInCombTransposed(
+                    mixesGm[mixGmBaseOffset + rowOuterIdx * tilingData->rowFactor * tilingData->hcMix +
+                            tilingData->hcMult * 2],
+                    mixes2Local, curRowFactor, combAAlign, tilingData->hcMix, combPlanes);
+            } else {
+                CopyInWithLoopMode(
+                    mixesGm[mixGmBaseOffset + rowOuterIdx * tilingData->rowFactor * tilingData->hcMix +
+                            tilingData->hcMult * 2],
+                    mixes2Local, curRowFactor, tilingData->hcMult, tilingData->hcMult, tilingData->hcMix);
+            }
             mixesQue2.EnQue(mixes2Local);
             mixes2Local = mixesQue2.DeQue<float>();
 
             combFragLocal = combFragQue.AllocTensor<float>();
-            VFProcessCombFragRLessVLUseFourUnfold(
-                combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
-                tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
+            // Branch-S (hcMult<=4, enough rows): plane-major SoA, full lane occupancy
+            // Branch-A (hcMult==4): FourUnfold fast path (already register-resident)
+            // Branch-B (hcMult in {2,3,6,8,12,16}): RLessVL register-resident via template
+            // Branch-C (other): fallback to original RLessVL UB-staging path
+            if (useCombSoa) {
+                switch (tilingData->hcMult) {
+                    case 2:
+                        VFProcessCombFragSoA<2>(
+                            mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
+                            tilingData->iterTimes - 1, curRowFactor, combAAlign);
+                        break;
+                    case 3:
+                        VFProcessCombFragSoA<3>(
+                            mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
+                            tilingData->iterTimes - 1, curRowFactor, combAAlign);
+                        break;
+                    default:
+                        VFProcessCombFragSoA<4>(
+                            mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
+                            tilingData->iterTimes - 1, curRowFactor, combAAlign);
+                        break;
+                }
+                TransposeCombSoAToAoS(combFragLocal, mixes2Local, vaAddrLocal, curRowFactor, combAAlign, combPlanes);
+            } else if (tilingData->hcMult == COMB_UNFOLD_NUM) {
+                VFProcessCombFragRLessVLUseFourUnfold(
+                    combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
+                    tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
+            } else {
+                // [vec-05 + state_resident] Register-resident Sinkhorn iteration
+                switch (tilingData->hcMult) {
+                    case 2:
+                        VFProcessCombFragRegResident<2>(
+                            combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
+                            tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
+                        break;
+                    case 3:
+                        VFProcessCombFragRegResident<3>(
+                            combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
+                            tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
+                        break;
+                    case 6:
+                        VFProcessCombFragRegResident<6>(
+                            combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
+                            tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
+                        break;
+                    case 8:
+                        VFProcessCombFragRegResident<8>(
+                            combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
+                            tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
+                        break;
+                    case 12:
+                        VFProcessCombFragRegResident<12>(
+                            combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
+                            tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
+                        break;
+                    case 16:
+                        VFProcessCombFragRegResident<16>(
+                            combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
+                            tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
+                        break;
+                    default:
+                        VFProcessCombFragRLessVL(
+                            combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
+                            tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
+                        break;
+                }
+            }
             mixesQue2.FreeTensor(mixes2Local);
             rsqrtQue.FreeTensor(rsqrtLocal);
 
             combFragQue.EnQue(combFragLocal);
             combFragLocal = combFragQue.DeQue<float>();
-            CopyOut(combFragLocal, combFragGm[curBlockIdx * tilingData->rowOfFormerBlock * tilingData->hcMult * tilingData->hcMult + rowOuterIdx * tilingData->rowFactor * tilingData->hcMult * tilingData->hcMult], curRowFactor * tilingData->hcMult, tilingData->hcMult);
+            int64_t combGmOffset = curBlockIdx * tilingData->rowOfFormerBlock * tilingData->hcMult * tilingData->hcMult +
+                                   rowOuterIdx * tilingData->rowFactor * tilingData->hcMult * tilingData->hcMult;
+            if (useCombSoa) {
+                CopyOutCombSoA(combFragLocal, combFragGm[combGmOffset], curRowFactor, combPlanes);
+            } else {
+                CopyOut(
+                    combFragLocal, combFragGm[combGmOffset], curRowFactor * tilingData->hcMult, tilingData->hcMult);
+            }
             combFragQue.FreeTensor(combFragLocal);
         }
     }
@@ -166,6 +261,9 @@ public:
 private:
     TPipe* pipe;
     const HcPreSinkhornTilingData* tilingData;
+    bool useCombSoa = false;
+    int32_t combPlanes = 0;
+    int32_t combAAlign = 0;
     GlobalTensor<float> mixesGm;
     GlobalTensor<float> rsqrtGm;
     GlobalTensor<float> hcScaleGm;
@@ -186,6 +284,7 @@ private:
     TBuf<QuePosition::VECCALC> hcBaseBuf0;
     TBuf<QuePosition::VECCALC> hcBaseBuf1;
     TBuf<QuePosition::VECCALC> hcBaseBuf2;
+    TBuf<QuePosition::VECCALC> vaAddrBuf;
 
     LocalTensor<float> mixes01Local;
     LocalTensor<float> mixes2Local;
@@ -197,6 +296,7 @@ private:
     LocalTensor<float> hcBase0Local;
     LocalTensor<float> hcBase1Local;
     LocalTensor<float> hcBase2Local;
+    LocalTensor<uint64_t> vaAddrLocal;
 };
 
 } // namespace HCPreSinkhorn

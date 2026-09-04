@@ -1,6 +1,6 @@
 /**
  * This program is free software, you can redistribute it and/or modify.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -39,6 +39,10 @@ TILING_DATA_FIELD_DEF(uint32_t, mul_tail_fp16);
 TILING_DATA_FIELD_DEF(uint32_t, dst_rep_stride_fp16);
 TILING_DATA_FIELD_DEF(uint32_t, is_performance);
 TILING_DATA_FIELD_DEF(uint32_t, nullptr_beta);
+// arch35 RegBase/VF 路径新增字段（其余分支不读）
+TILING_DATA_FIELD_DEF(uint32_t, bin_add_quotient);   // 平方和二分累加分界点
+TILING_DATA_FIELD_DEF(uint32_t, ub_loop);            // VF 切 D：列方向整块循环数
+TILING_DATA_FIELD_DEF(uint32_t, col_bufer_length);   // VF 切 D：列缓冲长度（沿用 ops-nn 字段名）
 END_TILING_DATA_DEF;
 
 struct AddRmsNormBiasCompileInfo {
