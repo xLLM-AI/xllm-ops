@@ -16,6 +16,7 @@ endif()
 include(FindPackageHandleStandardArgs)
 
 set(OPBASE_HEAD_SEARCH_PATHS
+  ${ASCEND_DIR}/${SYSTEM_PREFIX}/include
   ${ASCEND_DIR}/${SYSTEM_PREFIX}/pkg_inc
   ${TOP_DIR}/ops-base/pkg_inc             # compile with ci
 )
