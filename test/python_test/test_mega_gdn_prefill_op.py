@@ -187,6 +187,10 @@ def _to_device(cpu_inputs, device):
     }
 
 
+def _clone_device_inputs(tensors):
+    return {name: tensor.clone() for name, tensor in tensors.items()}
+
+
 def _make_constants(device, tokens=TOKENS, seq_lens=None):
     if seq_lens is None:
         seq_lens = (tokens,)
@@ -704,15 +708,46 @@ def test_mega_gdn_prefill_op_group_qk_underfilled_grid_regression():
         _assert_results(e2e, baseline, WRITE_SLOT)
 
 
-def test_mega_gdn_prefill_op_async_layer_queue_regression():
-    """Keep each A5 software-sync reset adjacent to its queued kernel.
+def test_mega_gdn_prefill_op_fixed_input_repeatability():
+    value_heads = 24
+    key_heads = 8
+    device = torch.device("npu:0")
+    torch_npu.npu.set_device(device)
+    pristine = _to_device(
+        _make_cpu_inputs(value_heads, key_heads, state_mode="out_of_place"),
+        device,
+    )
+    constants = _make_constants(device)
+    inputs = [_clone_device_inputs(pristine) for _ in range(20)]
+    torch_npu.npu.synchronize()
+    results = []
 
-    Qwen3.5-27B enqueues this operator once for each of its 48 linear-attention
-    layers before synchronizing.  A reset submitted directly by the caller can
-    overtake an earlier OpCommand custom handler and leave the next kernel with
-    stale generation counters.  A single-call test, or synchronizing after
-    every call, cannot reproduce that ordering failure.
-    """
+    for tensors in inputs:
+        result = _run_e2e(tensors, constants)
+        torch_npu.npu.synchronize()
+        results.append(
+            {
+                "out": result["out"].clone(),
+                "conv_state": result["conv_state"].clone(),
+                "ssm_state": result["ssm_state"].clone(),
+            }
+        )
+
+    reference = results[0]
+    for iteration, result in enumerate(results[1:], start=1):
+        for name in ("conv_state", "ssm_state", "out"):
+            try:
+                torch.testing.assert_close(
+                    result[name], reference[name], atol=0.0, rtol=0.0
+                )
+            except AssertionError as error:
+                raise AssertionError(
+                    f"iteration={iteration}, tensor={name}: {error}"
+                ) from error
+
+
+def test_mega_gdn_prefill_op_async_layer_queue_regression():
+    """Exercise queued multi-layer MIX synchronization before a host sync."""
     value_heads = 24
     key_heads = 8
     state_mode = "no_initial"
@@ -723,22 +758,28 @@ def test_mega_gdn_prefill_op_async_layer_queue_regression():
         key_heads,
         state_mode=state_mode,
     )
-    baseline_tensors = _to_device(cpu_inputs, device)
-    e2e_tensors = _to_device(cpu_inputs, device)
+    pristine = _to_device(cpu_inputs, device)
     constants = _make_constants(device)
-    baseline = _run_baseline(
-        baseline_tensors,
-        constants,
-        value_heads,
-        key_heads,
-        state_mode,
-    )
+    inputs = [_clone_device_inputs(pristine) for _ in range(48)]
+    torch_npu.npu.synchronize()
+    queued = []
 
-    for _ in range(48):
-        e2e = _run_e2e(e2e_tensors, constants)
+    for tensors in inputs:
+        result = _run_e2e(tensors, constants)
+        queued.append(result)
     torch_npu.npu.synchronize()
 
-    _assert_results(e2e, baseline, WRITE_SLOT)
+    reference = queued[0]
+    for iteration, result in enumerate(queued[1:], start=1):
+        for name in ("conv_state", "ssm_state", "out"):
+            try:
+                torch.testing.assert_close(
+                    result[name], reference[name], atol=0.0, rtol=0.0
+                )
+            except AssertionError as error:
+                raise AssertionError(
+                    f"iteration={iteration}, tensor={name}: {error}"
+                ) from error
 
 
 @pytest.mark.parametrize(

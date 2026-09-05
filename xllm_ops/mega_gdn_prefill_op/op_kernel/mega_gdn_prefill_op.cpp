@@ -396,7 +396,9 @@ extern "C" __global__ __aicore__ void GDN_KERNEL_NAME(
     // is still live can deadlock at 16 chunks. A5 uses the existing full
     // stage rendezvous instead of the pipelined slot protocol.
 #endif
-    qwen35_e2e_pto::mega_kernel_impl<true, true, true, true, true, true>(
+    // The A2/A3 H/O pipeline can publish a chunk before all of its payload
+    // stores are visible to the O consumer. Use the stage-synchronized path.
+    qwen35_e2e_pto::mega_kernel_impl<true, true, false, true, true, true>(
         q_ptr, k_ptr, v_ptr, g_ptr, beta_compute_ptr, mask_lower_ptr,
         mask_full_ptr, minus_identity_compute_ptr, cu_seqlens_ptr,
         norm_output_ptr, g_sum_ptr,
