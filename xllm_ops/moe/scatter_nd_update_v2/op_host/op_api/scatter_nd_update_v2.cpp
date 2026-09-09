@@ -36,12 +36,10 @@ static const std::initializer_list<op::DataType> ASCEND910B_AICORE_DTYPE_SUPPORT
 
 inline static bool IsAiCoreSupport(const aclTensor* self) {
     // ScatterNdUpdateV2只需要判断self
-    const auto socVersion = GetCurrentPlatformInfo().GetSocVersion();
-    if (socVersion == SocVersion::ASCEND910B ||
-        socVersion == SocVersion::ASCEND910_93 ||
-        socVersion == SocVersion::ASCEND950) {
+    if (GetCurrentPlatformInfo().GetSocVersion() == SocVersion::ASCEND910B ||
+        GetCurrentPlatformInfo().GetSocVersion() == SocVersion::ASCEND910_93) {
         return CheckType(self->GetDataType(), ASCEND910B_AICORE_DTYPE_SUPPORT_LIST);
-    }
+        }
     return CheckType(self->GetDataType(), AICORE_DTYPE_SUPPORT_LIST);
 }
 
