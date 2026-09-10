@@ -1165,7 +1165,48 @@ bool DequantSwigluQuantV35NlastTiling::IsCapable()
     return false;
   }
 
-  return true;
+  // The kernel entry (dequant_swiglu_quant.cpp) only dispatches the frozen
+  // acceptance combinations. Tiling key = 100000 + biasDtype * 1000 +
+  // hasActScale * 100 + hasQuantScale * 10:
+  //   x FP16  -> 100010: no bias, no activation_scale, with quant_scale
+  //   x BF16  -> 100000: no bias, no activation_scale, no quant_scale
+  //   x INT32 -> 103100/104100: fp16/bf16 bias, with activation_scale,
+  //                             no quant_scale
+  // Any other dtype/input combination has no device branch, so the kernel
+  // would return without writing the output. Decline such requests here so
+  // tiling fails explicitly instead of silently producing nothing. The
+  // non-last kernel ignores quant_offset, so requests carrying one are
+  // declined as well.
+  auto xDesc = context_->GetInputDesc(X_INDEX);
+  if (xDesc == nullptr) {
+    return false;
+  }
+  const ge::DataType xDtype = xDesc->GetDataType();
+  auto biasDesc = context_->GetOptionalInputDesc(BIAS_INDEX);
+  auto actScaleDesc = context_->GetOptionalInputDesc(ACTIVATION_SCALE_INDEX);
+  auto quantScaleDesc = context_->GetOptionalInputDesc(QUANT_SCALE_INDEX);
+  auto quantOffsetDesc = context_->GetOptionalInputDesc(QUANT_OFFSET_INDEX);
+  bool capable = false;
+  if (quantOffsetDesc == nullptr) {
+    if (xDtype == ge::DT_FLOAT16) {
+      capable = biasDesc == nullptr && actScaleDesc == nullptr && quantScaleDesc != nullptr;
+    } else if (xDtype == ge::DT_BF16) {
+      capable = biasDesc == nullptr && actScaleDesc == nullptr && quantScaleDesc == nullptr;
+    } else if (xDtype == ge::DT_INT32) {
+      capable = actScaleDesc != nullptr && quantScaleDesc == nullptr && biasDesc != nullptr &&
+                (biasDesc->GetDataType() == ge::DT_FLOAT16 || biasDesc->GetDataType() == ge::DT_BF16);
+    }
+  }
+  if (!capable) {
+    OP_LOGI(context_->GetNodeName(),
+            "Skip V35Nlast tiling: x dtype %d with bias dtype %d, act scale %d, quant scale %d, quant offset %d has "
+            "no implemented non-last kernel branch.",
+            static_cast<int32_t>(xDtype),
+            biasDesc != nullptr ? static_cast<int32_t>(biasDesc->GetDataType()) : -1,
+            actScaleDesc != nullptr ? 1 : 0, quantScaleDesc != nullptr ? 1 : 0,
+            quantOffsetDesc != nullptr ? 1 : 0);
+  }
+  return capable;
 }
 
 void DequantSwigluQuantV35NlastTiling::DoBlockSplit()

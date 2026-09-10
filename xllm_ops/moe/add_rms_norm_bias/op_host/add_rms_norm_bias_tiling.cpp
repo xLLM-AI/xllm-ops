@@ -447,8 +447,6 @@ static void SetTilingParameters(
 }
 
 
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 static bool TryArch35VfRoute(AddRMSNormBiasTilingData* tiling, uint32_t dtypeKey, uint32_t& modeKey,
                              uint32_t numRow, uint32_t numCol, uint32_t numColAlign, uint32_t numCore,
                              uint64_t ubSize, uint32_t& useCoreNum)

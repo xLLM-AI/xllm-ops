@@ -176,8 +176,11 @@ public:
             combFragLocal = combFragQue.AllocTensor<float>();
             // Branch-S (hcMult<=4, enough rows): plane-major SoA, full lane occupancy
             // Branch-A (hcMult==4): FourUnfold fast path (already register-resident)
-            // Branch-B (hcMult in {2,3,6,8,12,16}): RLessVL register-resident via template
-            // Branch-C (other): fallback to original RLessVL UB-staging path
+            // Branch-B (hcMult in {2,3,6}): RLessVL register-resident via template
+            // Branch-C (other, incl. 8/12/16): original RLessVL UB-staging path.
+            //             hcMult 8/12/16 regressed to 0.648x on the AoS acceptance
+            //             cases, so they stay on the original implementation until
+            //             shape-based A/B data justifies a finer gate.
             if (useCombSoa) {
                 switch (tilingData->hcMult) {
                     case 2:
@@ -216,21 +219,6 @@ public:
                         break;
                     case 6:
                         VFProcessCombFragRegResident<6>(
-                            combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
-                            tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
-                        break;
-                    case 8:
-                        VFProcessCombFragRegResident<8>(
-                            combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
-                            tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
-                        break;
-                    case 12:
-                        VFProcessCombFragRegResident<12>(
-                            combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
-                            tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
-                        break;
-                    case 16:
-                        VFProcessCombFragRegResident<16>(
                             combFragLocal, mixes2Local, hcBase2Local, rsqrtLocal, hcScaleGm.GetValue(2), tilingData->eps,
                             tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult);
                         break;

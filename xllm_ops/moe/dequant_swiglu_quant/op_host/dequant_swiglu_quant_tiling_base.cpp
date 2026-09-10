@@ -183,10 +183,18 @@ protected:
         auto shapeGroupIndex = context_->GetOptionalInputShape(6);
         if (shapeGroupIndex == nullptr) {
             // This template only carries last-axis semantics (SetTotalShape
-            // always splits on the last dim). Dynamic-quant shapes whose
-            // activate_dim is not the last axis fall through to the registered
-            // V35NlastTiling template (priority 2000), matching the accepted
-            // dispatch where non-last axes take the V35 non-last path.
+            // always splits on the last dim). On Ascend950, dynamic-quant
+            // shapes whose activate_dim is not the last axis fall through to
+            // the registered V35NlastTiling template (priority 2000), matching
+            // the accepted dispatch where non-last axes take the V35 non-last
+            // path. Non-950 SoCs keep the frozen baseline routing here: their
+            // kernels do not compile the V35 non-last branches (the NLAST
+            // dispatch in dequant_swiglu_quant.cpp is guarded by
+            // __NPU_ARCH__ == 3510), same contract as the Row-VF gate in
+            // DoOpTiling.
+            if (curShortSocName_ != platform_ascendc::SocVersion::ASCEND950) {
+                return true;
+            }
             return !IsNonLastDynamicActivateDim();
         }
         return false;
