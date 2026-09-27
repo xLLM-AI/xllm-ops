@@ -14,6 +14,8 @@
 #include "lib/matmul_intf.h"
 using namespace AscendC;
 #include "x_flash_attention_infer_common.h"
+#include "window_online_softmax.h"
+#include "window_rescale_o.h"
 
 using namespace Catlass;
 
@@ -613,8 +615,11 @@ __global__ __aicore__ void FAInfer(GM_ADDR q,
     using DispatchPolicyOnlineSoftmax = Epilogue::EpilogueAtlasA2XFAIOnlineSoftmax<lseMode>;
     using PType = Gemm::GemmType<ElementP, LayoutP>;
     using maskType = Gemm::GemmType<ElementMask, LayoutMask>;
-    using EpilogueOnlineSoftmax =
-        Epilogue::Block::BlockEpilogue<DispatchPolicyOnlineSoftmax, PType, SType, maskType>;
+    using EpilogueOnlineSoftmax = std::conditional_t<
+        maskCategory == FaiKenel::MaskType::NO_MASK,
+        xllm_ops::xfia::WindowOnlineSoftmax<PType, SType, maskType, lseMode>,
+        Epilogue::Block::
+            BlockEpilogue<DispatchPolicyOnlineSoftmax, PType, SType, maskType>>;
 
     using L1TileShapePV = GemmShape<128, 128, 256>;
     using L0TileShapePV = GemmShape<128, 128, 128>;
@@ -627,11 +632,23 @@ __global__ __aicore__ void FAInfer(GM_ADDR q,
     using OType = Gemm::GemmType<ElementO, LayoutO>;
     using OUpdateType = Gemm::GemmType<ElementUpdate, LayoutUpdate>;
     using LseType = Gemm::GemmType<ElementLse, LayoutLse>;
-    using EpilogueRescaleO =
-        Epilogue::Block::BlockEpilogue<DispatchPolicyRescaleO, OType, OTmpType, OUpdateType, LseType>;
+    using EpilogueRescaleO = std::conditional_t<
+        maskCategory == FaiKenel::MaskType::NO_MASK,
+        xllm_ops::xfia::
+            WindowRescaleO<OType, OTmpType, OUpdateType, LseType, lseMode>,
+        Epilogue::Block::BlockEpilogue<DispatchPolicyRescaleO,
+                                       OType,
+                                       OTmpType,
+                                       OUpdateType,
+                                       LseType>>;
 
-    using FAInferKernel = FAInferKernel<BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO,
-                                        PagedCacheFlag, maskCategory, inLayout>;
+    using FAInferKernel = FAInferKernel<BlockMmadQK,
+                                        BlockMmadPV,
+                                        EpilogueOnlineSoftmax,
+                                        EpilogueRescaleO,
+                                        PagedCacheFlag,
+                                        maskCategory,
+                                        inLayout>;
     FAIKernelParams params{q, k, v, mask, blockTables, actualQseqlen, actualKvseqlen, o, s, p, oTemp, oUpdate, tiling};
     params.kv_starts = kv_starts;
     FAInferKernel flashAttnInfer;
