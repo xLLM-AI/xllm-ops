@@ -35,7 +35,7 @@ ge::graphStatus XFAInferTiling::FillBasicTilingData()
   int32_t embeddingSize = queryShape.GetDim(2);
   int32_t batch = actualSeqShape.GetDim(0);
   int32_t maxNumBlocksPerBatch = blockTableShape.GetDim(1);
-  float scaleValue = static_cast<float>(1.0 / std::sqrt(1.0 * embeddingSize));
+  float scaleValue = *attrs->GetFloat(AttrsIndex::SCALE_IDX);
   int32_t blockNum, blockSize = 0;
   if (maskOptionalShapePtr != nullptr) {
     maskType = 1;
@@ -186,6 +186,11 @@ ge::graphStatus XFAInferTiling::RunTiling()
   if (ret != ge::GRAPH_SUCCESS) {
     return ge::GRAPH_FAILED;
   }
+#if !defined(CATLASS_ARCH) || (CATLASS_ARCH != 3510)
+  if (maskType == 0 && kvLayout == "TND") {
+    usingFD = false;
+  }
+#endif
   FillSplitCoreTilingDataForJD();
   SetWorkspaces();
 

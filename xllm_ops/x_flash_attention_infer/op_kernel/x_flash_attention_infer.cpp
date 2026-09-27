@@ -88,6 +88,23 @@ extern "C" __global__ __aicore__ void x_flash_attention_infer(GM_ADDR query, GM_
     GM_ADDR oUpdate = oTemp + tiling_data.mm2OutSize;
     GM_ADDR gmlse = oUpdate + tiling_data.updateSize;
     GM_ADDR glo = gmlse + tiling_data.splitLseTotalSize;
+    if (TILING_KEY_IS(1000000000000000110)) {
+        FAInfer<half, half, layout::ColumnMajor, layout::RowMajor, true,
+                FaiKenel::MaskType::NO_MASK>(query, key_cache, value_cache, mask,
+                                             block_table, attn_out, actual_q_lens,
+                                             actual_kv_lens, s, p, oTemp, oUpdate,
+                                             tiling, extra_tiling);
+        return;
+    }
+    if (TILING_KEY_IS(1000000000000000120)) {
+        FAInfer<bfloat16_t, bfloat16_t, layout::ColumnMajor, layout::RowMajor,
+                true, FaiKenel::MaskType::NO_MASK>(query, key_cache, value_cache,
+                                                   mask, block_table, attn_out,
+                                                   actual_q_lens, actual_kv_lens,
+                                                   s, p, oTemp, oUpdate, tiling,
+                                                   extra_tiling);
+        return;
+    }
     __gm__ SplitKvExtraInfo *extraInfo = reinterpret_cast<__gm__ SplitKvExtraInfo *>(extra_tiling);
     auto coreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
     if (TILING_KEY_IS(QFP16_KVFP16_TND_CAUSALMASK_FD_TILING)) {  // FD fp16

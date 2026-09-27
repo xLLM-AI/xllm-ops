@@ -158,6 +158,7 @@ struct FAIKernelParams {
     GM_ADDR oTemp;
     GM_ADDR oUpdate;
     GM_ADDR tiling;
+    GM_ADDR kv_starts = nullptr;
 
     // Methods
     __aicore__ inline FAIKernelParams() {}

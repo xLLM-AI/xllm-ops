@@ -7,6 +7,24 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
+
+# Keep the DFlash2 window-mask extension in xllm_ops, without a Catlass fork.
+set(XFA_CATLASS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/catlass")
+set(XFA_CATLASS_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/../../../patches/catlass_xfia_window_prefix.patch")
+execute_process(
+    COMMAND git -C "${XFA_CATLASS_DIR}" apply --reverse --check "${XFA_CATLASS_PATCH}"
+    RESULT_VARIABLE XFA_PATCH_APPLIED
+    OUTPUT_QUIET ERROR_QUIET)
+if(NOT XFA_PATCH_APPLIED EQUAL 0)
+    execute_process(
+        COMMAND git -C "${XFA_CATLASS_DIR}" apply "${XFA_CATLASS_PATCH}"
+        RESULT_VARIABLE XFA_PATCH_RESULT
+        ERROR_VARIABLE XFA_PATCH_ERROR)
+    if(NOT XFA_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR "Cannot apply Catlass XFIA window-mask patch: ${XFA_PATCH_ERROR}")
+    endif()
+endif()
+
 add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
