@@ -88,7 +88,7 @@ extern "C" __global__ __aicore__ void x_flash_attention_infer(GM_ADDR query, GM_
     GM_ADDR oUpdate = oTemp + tiling_data.mm2OutSize;
     GM_ADDR gmlse = oUpdate + tiling_data.updateSize;
     GM_ADDR glo = gmlse + tiling_data.splitLseTotalSize;
-    if (TILING_KEY_IS(1000000000000000110)) {
+    if (TILING_KEY_IS(QFP16_KVFP16_TND_NOMASK_NOFD_TILING)) {
         FAInfer<half, half, layout::ColumnMajor, layout::RowMajor, true,
                 FaiKenel::MaskType::NO_MASK>(query, key_cache, value_cache, mask,
                                              block_table, attn_out, actual_q_lens,
@@ -96,7 +96,7 @@ extern "C" __global__ __aicore__ void x_flash_attention_infer(GM_ADDR query, GM_
                                              tiling, extra_tiling);
         return;
     }
-    if (TILING_KEY_IS(1000000000000000120)) {
+    if (TILING_KEY_IS(QBF16_KVBF16_TND_NOMASK_NOFD_TILING)) {
         FAInfer<bfloat16_t, bfloat16_t, layout::ColumnMajor, layout::RowMajor,
                 true, FaiKenel::MaskType::NO_MASK>(query, key_cache, value_cache,
                                                    mask, block_table, attn_out,

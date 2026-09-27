@@ -642,13 +642,8 @@ __global__ __aicore__ void FAInfer(GM_ADDR q,
                                        OUpdateType,
                                        LseType>>;
 
-    using FAInferKernel = FAInferKernel<BlockMmadQK,
-                                        BlockMmadPV,
-                                        EpilogueOnlineSoftmax,
-                                        EpilogueRescaleO,
-                                        PagedCacheFlag,
-                                        maskCategory,
-                                        inLayout>;
+    using FAInferKernel = FAInferKernel<BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO,
+                                        PagedCacheFlag, maskCategory, inLayout>;
     FAIKernelParams params{q, k, v, mask, blockTables, actualQseqlen, actualKvseqlen, o, s, p, oTemp, oUpdate, tiling};
     params.kv_starts = kv_starts;
     FAInferKernel flashAttnInfer;
