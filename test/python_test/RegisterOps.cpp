@@ -233,6 +233,7 @@ at::Tensor x_flash_attention_infer_impl_npu(
                actual_q_lens,
                actual_kv_lens,
                extra_tiling,
+               c10::optional<at::Tensor>{},  // kvstarts: full KV prefix
                layout_c,
                qHead,
                kvHead,

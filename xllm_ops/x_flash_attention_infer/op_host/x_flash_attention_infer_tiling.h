@@ -25,13 +25,15 @@
 namespace optiling {
 
 enum InputPosIndex {
-    QUERY = 0,
-    KEY,
-    VALUE,
-    MASK,
-    BLOCK_TABLE,
-    Q_LENS,
-    KV_LENS,
+  QUERY = 0,
+  KEY,
+  VALUE,
+  MASK,
+  BLOCK_TABLE,
+  Q_LENS,
+  KV_LENS,
+  EXTRA_TILING,
+  KV_STARTS,
 };
 
 enum AttrsIndex {

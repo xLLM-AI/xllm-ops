@@ -10,8 +10,11 @@
 
 // Per-build arch selection is provided via x_flash_attention_infer_tiling.h,
 // which includes the CMake-generated xfa_arch_config.h before any struct def.
-#include <register/op_impl_registry.h>
 #include "x_flash_attention_infer_tiling.h"
+
+#include <register/op_impl_registry.h>
+
+#include <cmath>
 #if defined(CATLASS_ARCH) && (CATLASS_ARCH == 3510)
 #include "arch35/a5_x_flash_attention_infer_tiling.h"
 #endif
@@ -35,7 +38,11 @@ ge::graphStatus XFAInferTiling::FillBasicTilingData()
   int32_t embeddingSize = queryShape.GetDim(2);
   int32_t batch = actualSeqShape.GetDim(0);
   int32_t maxNumBlocksPerBatch = blockTableShape.GetDim(1);
-  float scaleValue = *attrs->GetFloat(AttrsIndex::SCALE_IDX);
+  const float* scale_attr = attrs->GetFloat(AttrsIndex::SCALE_IDX);
+  const float scaleValue =
+      scale_attr != nullptr
+          ? *scale_attr
+          : 1.0F / std::sqrt(static_cast<float>(embeddingSize));
   int32_t blockNum, blockSize = 0;
   if (maskOptionalShapePtr != nullptr) {
     maskType = 1;
@@ -191,6 +198,21 @@ ge::graphStatus XFAInferTiling::RunTiling()
     usingFD = false;
   }
 #endif
+  // FD continues to consume SplitKvExtraInfo from extra_tiling. Window
+  // starts are a separate optional input, supported only by TND no-mask.
+  if (usingFD && tiling_context_->GetOptionalInputShape(
+                     InputPosIndex::EXTRA_TILING) == nullptr) {
+    return ge::GRAPH_FAILED;
+  }
+  const auto* kv_starts_shape =
+      tiling_context_->GetOptionalInputShape(InputPosIndex::KV_STARTS);
+  if (kv_starts_shape != nullptr) {
+    const auto& shape = kv_starts_shape->GetStorageShape();
+    if (usingFD || maskType != 0 || kvLayout != "TND" ||
+        shape.GetDimNum() != 1 || shape.GetDim(0) != tiling_data_.get_batch()) {
+      return ge::GRAPH_FAILED;
+    }
+  }
   FillSplitCoreTilingDataForJD();
   SetWorkspaces();
 

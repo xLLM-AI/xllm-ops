@@ -58,9 +58,19 @@
 #include "x_flash_attention_infer_fd.h"
 #endif
 
-extern "C" __global__ __aicore__ void x_flash_attention_infer(GM_ADDR query, GM_ADDR key_cache, GM_ADDR value_cache,
-                        GM_ADDR mask, GM_ADDR block_table, GM_ADDR actual_q_lens,
-                        GM_ADDR actual_kv_lens, GM_ADDR extra_tiling, GM_ADDR attn_out, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void x_flash_attention_infer(
+    GM_ADDR query,
+    GM_ADDR key_cache,
+    GM_ADDR value_cache,
+    GM_ADDR mask,
+    GM_ADDR block_table,
+    GM_ADDR actual_q_lens,
+    GM_ADDR actual_kv_lens,
+    GM_ADDR extra_tiling,
+    GM_ADDR kvstarts,
+    GM_ADDR attn_out,
+    GM_ADDR workspace,
+    GM_ADDR tiling) {
 #if defined(XFA_ARCH35)
     // A5(Ascend950/DAV_3510): dispatch into arch35 example49-ported FAInferKernel.
     // Host tiling A5 branch (bnAxisStartIdx/sparseStartIdx) is filled in stage-3.
@@ -89,21 +99,48 @@ extern "C" __global__ __aicore__ void x_flash_attention_infer(GM_ADDR query, GM_
     GM_ADDR gmlse = oUpdate + tiling_data.updateSize;
     GM_ADDR glo = gmlse + tiling_data.splitLseTotalSize;
     if (TILING_KEY_IS(QFP16_KVFP16_TND_NOMASK_NOFD_TILING)) {
-        FAInfer<half, half, layout::ColumnMajor, layout::RowMajor, true,
-                FaiKenel::MaskType::NO_MASK>(query, key_cache, value_cache, mask,
-                                             block_table, attn_out, actual_q_lens,
-                                             actual_kv_lens, s, p, oTemp, oUpdate,
-                                             tiling, extra_tiling);
-        return;
+      FAInfer<half,
+              half,
+              layout::ColumnMajor,
+              layout::RowMajor,
+              true,
+              FaiKenel::MaskType::NO_MASK>(query,
+                                           key_cache,
+                                           value_cache,
+                                           mask,
+                                           block_table,
+                                           attn_out,
+                                           actual_q_lens,
+                                           actual_kv_lens,
+                                           s,
+                                           p,
+                                           oTemp,
+                                           oUpdate,
+                                           tiling,
+                                           kvstarts);
+      return;
     }
     if (TILING_KEY_IS(QBF16_KVBF16_TND_NOMASK_NOFD_TILING)) {
-        FAInfer<bfloat16_t, bfloat16_t, layout::ColumnMajor, layout::RowMajor,
-                true, FaiKenel::MaskType::NO_MASK>(query, key_cache, value_cache,
-                                                   mask, block_table, attn_out,
-                                                   actual_q_lens, actual_kv_lens,
-                                                   s, p, oTemp, oUpdate, tiling,
-                                                   extra_tiling);
-        return;
+      FAInfer<bfloat16_t,
+              bfloat16_t,
+              layout::ColumnMajor,
+              layout::RowMajor,
+              true,
+              FaiKenel::MaskType::NO_MASK>(query,
+                                           key_cache,
+                                           value_cache,
+                                           mask,
+                                           block_table,
+                                           attn_out,
+                                           actual_q_lens,
+                                           actual_kv_lens,
+                                           s,
+                                           p,
+                                           oTemp,
+                                           oUpdate,
+                                           tiling,
+                                           kvstarts);
+      return;
     }
     __gm__ SplitKvExtraInfo *extraInfo = reinterpret_cast<__gm__ SplitKvExtraInfo *>(extra_tiling);
     auto coreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
