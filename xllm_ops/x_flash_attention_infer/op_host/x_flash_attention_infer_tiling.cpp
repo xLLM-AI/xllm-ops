@@ -200,10 +200,6 @@ ge::graphStatus XFAInferTiling::RunTiling()
 #endif
   // FD continues to consume SplitKvExtraInfo from extra_tiling. Window
   // starts are a separate optional input, supported only by TND no-mask.
-  if (usingFD && tiling_context_->GetOptionalInputShape(
-                     InputPosIndex::EXTRA_TILING) == nullptr) {
-    return ge::GRAPH_FAILED;
-  }
   const auto* kv_starts_shape =
       tiling_context_->GetOptionalInputShape(InputPosIndex::KV_STARTS);
   if (kv_starts_shape != nullptr) {
