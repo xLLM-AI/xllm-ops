@@ -233,6 +233,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "pp_matmul_opt"
         "quant_matmul_nz_decode"
         "recurrent_gated_delta_rule"
+        "dequant_situ_quant"
         "replace_token"
         "mtp_prepare_next_draft"
         "select_unshared_kv"
