@@ -33,6 +33,9 @@ constexpr uint64_t GATHER_USE_NUM = 2;
 constexpr uint64_t ALIGNED_NUM = 8;
 constexpr uint64_t ALIGNED_SIZE = 32;
 constexpr uint64_t ATTR_STRIDE = 0;
+// small fast path (tilingKey 40/41): single-stage kernel
+constexpr uint64_t SMALL_FAST_PATH_MAX_ROWS = 32;
+constexpr uint64_t SMALL_FAST_PATH_UB_RESERVE = 8192; // headroom for indices buffers/tensor mgmt
 class ScatterNdUpdateV2Tiling {
 public:
     explicit ScatterNdUpdateV2Tiling(gert::TilingContext* context) : tilingContext_(context){}
@@ -61,6 +64,7 @@ private:
     uint64_t dataTypeSize_ = 0;
     uint64_t isInt64Indices_ = false;
     uint64_t needLargeIndexKernel_ = false;
+    uint64_t useSmallFastPath_ = false;
 
 private:
     // LinearIndex
@@ -93,6 +97,15 @@ private:
 inline void ScatterNdUpdateV2Tiling::SetTilingKeyMode()
 {
     // tilingKey: indexType * 10 + sortFlag (indexType: 1=int32, 2=int64(cast), 3=int64(large))
+    // 40/41: small-scale single-stage fast path (indexRow<=32, updates fit UB, BlockDim=1)
+    if (useSmallFastPath_) {
+        tilingKey_ = isInt64Indices_ ? 41 : 40;
+        tilingContext_->SetTilingKey(tilingKey_);
+        OP_LOGD(tilingContext_, "small fast path enabled: tilingKey=%lu (isInt64Indices=%lu), BlockDim=1",
+                tilingKey_, isInt64Indices_);
+        return;
+    }
+
     uint64_t indexType;
     if (!isInt64Indices_) {
         indexType = 1;
@@ -212,7 +225,7 @@ inline void ScatterNdUpdateV2Tiling::GetDtypeSize()
 
 ge::graphStatus ScatterNdUpdateV2Tiling::SetKernelTiling()
 {
-    tilingContext_->SetBlockDim(coreNum_);
+    tilingContext_->SetBlockDim(useSmallFastPath_ ? 1 : coreNum_);
     tilingData_.linearIndexTiling.set_indexDim(indexDim_);
     tilingData_.linearIndexTiling.set_ubSize(ubSize_);
     tilingData_.linearIndexTiling.set_indicesMask(indicesMask_);
@@ -269,6 +282,7 @@ void ScatterNdUpdateV2Tiling::TilingDataPrint() const
     OP_LOGD(tilingContext_, "tilingKey:                 %lu", tilingKey_);
     OP_LOGD(tilingContext_, "isInt64Indices:            %lu", isInt64Indices_);
     OP_LOGD(tilingContext_, "needLargeIndexKernel:      %lu", needLargeIndexKernel_);
+    OP_LOGD(tilingContext_, "useSmallFastPath:          %lu", useSmallFastPath_);
     OP_LOGD(tilingContext_, "tiling for LinearIndex--------");
     OP_LOGD(tilingContext_, "indexDim:                  %lu", indexDim_);
     OP_LOGD(tilingContext_, "ubSize:                    %lu", ubSize_);
@@ -345,6 +359,16 @@ ge::graphStatus ScatterNdUpdateV2Tiling::Init()
     ubSize_ = compileInfo->ubSizePlatForm;
     GetDtypeSize();
     Tiling4LinearIndex(indexRow, indexDim_);
+
+    // small fast path: indexRow <= 32 (blockNum_ == 0 guaranteed), updates batch fits UB.
+    // Use 8-aligned row count to match the kernel's rowAlloc_ buffer sizing.
+    uint64_t fastPathRows = (indexRow + ALIGNED_NUM - 1) & ~(ALIGNED_NUM - 1);
+    uint64_t scatterAlignNum = ALIGNED_SIZE / dataTypeSize_;
+    uint64_t fastPathAlignLength = (scatterLength_ + scatterAlignNum - 1) & ~(scatterAlignNum - 1);
+    uint64_t updatesBytes = fastPathRows * fastPathAlignLength * dataTypeSize_;
+    useSmallFastPath_ = isLinearIndex_ && !needLargeIndexKernel_ && blockNum_ == 0 &&
+                        indexRow <= SMALL_FAST_PATH_MAX_ROWS &&
+                        (updatesBytes + SMALL_FAST_PATH_UB_RESERVE) <= ubSize_;
     SetTilingKeyMode();
     tilingContext_->SetScheduleMode(1);
     uint64_t maxPhysicalOffset = 0;

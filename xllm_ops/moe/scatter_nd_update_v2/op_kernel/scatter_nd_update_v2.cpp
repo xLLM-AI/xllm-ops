@@ -16,6 +16,7 @@
 #include "scatter_nd_update_linear_index.h"
 #include "scatter_nd_update_no_sort.h"
 #include "scatter_nd_update_large_index.h"
+#include "scatter_nd_update_small_fast_path.h"
 
 extern "C" __global__ __aicore__ void scatter_nd_update_v2(GM_ADDR varRef, GM_ADDR indices,
     GM_ADDR updates, GM_ADDR output, GM_ADDR workSpace, GM_ADDR tiling) {
@@ -31,7 +32,14 @@ extern "C" __global__ __aicore__ void scatter_nd_update_v2(GM_ADDR varRef, GM_AD
 #if (defined(DTYPE_VAR))
     // tilingKey: indexType * 10 + sortFlag
     // indexType: 1=int32, 2=int64(cast), 3=int64(large); sortFlag: 0=非排序, 1=排序
-    if (TILING_KEY_IS(11)) {
+    // 40/41: small-scale single-stage fast path (indexRow<=32, updates fit UB)
+    if (TILING_KEY_IS(40)) {
+        ScatterNdUpdateV2::SmallFastPathKernel<DTYPE_VAR, false> op(indices, updates, output, tilingData, tpipe);
+        op.Process();
+    } else if (TILING_KEY_IS(41)) {
+        ScatterNdUpdateV2::SmallFastPathKernel<DTYPE_VAR, true> op(indices, updates, output, tilingData, tpipe);
+        op.Process();
+    } else if (TILING_KEY_IS(11)) {
         ScatterNdUpdateV2::LinearIndexKernel<true, int> op1(indices, workSpace, tilingData, tpipe);
         op1.Process();
         AscendC::SyncAll();
