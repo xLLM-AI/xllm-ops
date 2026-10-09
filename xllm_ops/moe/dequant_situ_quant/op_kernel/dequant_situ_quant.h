@@ -44,16 +44,15 @@ class DequantSituQuantKernel {
  public:
   __aicore__ inline DequantSituQuantKernel(TPipe* pipe) { pipe_ = pipe; }
 
-  __aicore__ inline void Init(
-      GM_ADDR x,
-      GM_ADDR dequantScale,
-      GM_ADDR dequantBias,
-      GM_ADDR quantScale,
-      GM_ADDR quantOffset,
-      GM_ADDR y,
-      GM_ADDR scale,
-      GM_ADDR workspace,
-      const DequantSituQuantTilingData* tilingData) {
+  __aicore__ inline void Init(GM_ADDR x,
+                              GM_ADDR dequantScale,
+                              GM_ADDR dequantBias,
+                              GM_ADDR quantScale,
+                              GM_ADDR quantOffset,
+                              GM_ADDR y,
+                              GM_ADDR scale,
+                              GM_ADDR workspace,
+                              const DequantSituQuantTilingData* tilingData) {
     tl_ = tilingData;
     blockIdx_ = GetBlockIdx();
 
@@ -800,15 +799,14 @@ class DequantSituQuantK3Kernel {
   __aicore__ inline explicit DequantSituQuantK3Kernel(TPipe* pipe)
       : pipe_(pipe) {}
 
-  __aicore__ inline void Init(
-      GM_ADDR x,
-      GM_ADDR weightScale,
-      GM_ADDR activationScale,
-      GM_ADDR bias,
-      GM_ADDR groupIndex,
-      GM_ADDR y,
-      GM_ADDR scale,
-      const DequantSituQuantTilingData* tilingData) {
+  __aicore__ inline void Init(GM_ADDR x,
+                              GM_ADDR weightScale,
+                              GM_ADDR activationScale,
+                              GM_ADDR bias,
+                              GM_ADDR groupIndex,
+                              GM_ADDR y,
+                              GM_ADDR scale,
+                              const DequantSituQuantTilingData* tilingData) {
     tilingData_ = tilingData;
     blockIdx_ = GetBlockIdx();
     rowLen_ = static_cast<int64_t>(tilingData_->rowLen);
@@ -848,7 +846,7 @@ class DequantSituQuantK3Kernel {
     if constexpr (std::is_same_v<XType, int32_t>) {
       pipe_->InitBuffer(weightScaleQueue_, 1, paramBytes);
       if (hasBias_) {
-        pipe_->InitBuffer(biasQueue_, 1, paramBytes);
+        pipe_->InitBuffer(biasQueue_, 1, paramBytes / 2);
       }
     } else {
       pipe_->InitBuffer(dequantBuf_,
@@ -874,15 +872,26 @@ class DequantSituQuantK3Kernel {
       return;
     }
 
+    // Device-produced counts are validated before any output is written.
+    // ASSERT is disabled in release builds; Trap reports malformed routing
+    // to the runtime without adding a host synchronization to graph replay.
+    int64_t totalRows = 0;
+    for (int64_t expertIdx = 0; expertIdx < expertNum_; ++expertIdx) {
+      const int64_t count = groupIndexGm_.GetValue(expertIdx);
+      if (count < 0 || count > rowLen_ - totalRows) {
+        Trap();
+        return;
+      }
+      totalRows += count;
+    }
+    if (totalRows != rowLen_) {
+      Trap();
+      return;
+    }
+
     int64_t groupOffset = 0;
-    for (int64_t expertIdx = 0; expertIdx < expertNum_ && groupOffset < rowLen_;
-         ++expertIdx) {
-      const int64_t requestedRows = groupIndexGm_.GetValue(expertIdx);
-      const int64_t remainingRows = rowLen_ - groupOffset;
-      const int64_t groupRows =
-          requestedRows <= 0
-              ? 0
-              : (requestedRows > remainingRows ? remainingRows : requestedRows);
+    for (int64_t expertIdx = 0; expertIdx < expertNum_; ++expertIdx) {
+      const int64_t groupRows = groupIndexGm_.GetValue(expertIdx);
       if (groupRows > 0) {
         ProcessGroup(expertIdx, groupRows, groupOffset);
         groupOffset += groupRows;
@@ -894,36 +903,34 @@ class DequantSituQuantK3Kernel {
   __aicore__ inline void ProcessGroup(int64_t expertIdx,
                                       int64_t groupRows,
                                       int64_t groupOffset) {
-    const int64_t rowsPerCore = (groupRows + usedCoreNum_ - 1) / usedCoreNum_;
-    const int64_t localGroupOffset = blockIdx_ * rowsPerCore;
-    if (localGroupOffset >= groupRows) {
+    // Intersect the expert interval with each core's global row interval.
+    // One-row experts then use different cores instead of all using core 0.
+    const int64_t rowsPerCore = (rowLen_ + usedCoreNum_ - 1) / usedCoreNum_;
+    const int64_t coreStart = blockIdx_ * rowsPerCore;
+    const int64_t coreEnd =
+        coreStart + rowsPerCore < rowLen_ ? coreStart + rowsPerCore : rowLen_;
+    const int64_t firstRow = groupOffset > coreStart ? groupOffset : coreStart;
+    const int64_t groupEnd = groupOffset + groupRows;
+    const int64_t lastRow = groupEnd < coreEnd ? groupEnd : coreEnd;
+    if (firstRow >= lastRow) {
       return;
     }
-    const int64_t localRows = groupRows - localGroupOffset < rowsPerCore
-                                  ? groupRows - localGroupOffset
-                                  : rowsPerCore;
-    const int64_t firstRow = groupOffset + localGroupOffset;
+    const int64_t localRows = lastRow - firstRow;
 
     if constexpr (std::is_same_v<XType, int32_t>) {
       CopyInExpertParams(expertIdx);
       weightScaleLocal_ = weightScaleQueue_.DeQue<float>();
-      if (hasBias_) {
-        biasLocal_ = biasQueue_.DeQue<float>();
-      }
     }
 
     for (int64_t localRow = 0; localRow < localRows; ++localRow) {
       const int64_t rowIdx = firstRow + localRow;
       CopyInRow(rowIdx);
-      ComputeRow(rowIdx);
+      ComputeRow(rowIdx, expertIdx);
       CopyOutRow(rowIdx);
     }
 
     if constexpr (std::is_same_v<XType, int32_t>) {
       weightScaleQueue_.FreeTensor(weightScaleLocal_);
-      if (hasBias_) {
-        biasQueue_.FreeTensor(biasLocal_);
-      }
     }
   }
 
@@ -939,12 +946,22 @@ class DequantSituQuantK3Kernel {
     DataCopyPad(
         weightScaleLocal, weightScaleGm_[paramOffset], params, padParams);
     weightScaleQueue_.EnQue(weightScaleLocal);
+  }
 
-    if (hasBias_) {
-      LocalTensor<float> biasLocal = biasQueue_.AllocTensor<float>();
-      DataCopyPad(biasLocal, biasGm_[paramOffset], params, padParams);
-      biasQueue_.EnQue(biasLocal);
-    }
+  __aicore__ inline void AddBiasHalf(LocalTensor<float> values,
+                                     int64_t expertIdx,
+                                     int64_t columnOffset) {
+    const int64_t offset = expertIdx * inputWidth_ + columnOffset;
+    DataCopyExtParams params{
+        1, static_cast<uint32_t>(outputWidth_ * sizeof(float)), 0, 0, 0};
+    DataCopyPadExtParams<float> padParams{false, 0, 0, 0};
+    LocalTensor<float> bias = biasQueue_.AllocTensor<float>();
+    DataCopyPad(bias, biasGm_[offset], params, padParams);
+    biasQueue_.EnQue(bias);
+    bias = biasQueue_.DeQue<float>();
+    Add(values, values, bias, outputWidth_);
+    PipeBarrier<PIPE_V>();
+    biasQueue_.FreeTensor(bias);
   }
 
   __aicore__ inline void CopyInRow(int64_t rowIdx) {
@@ -957,7 +974,7 @@ class DequantSituQuantK3Kernel {
     xQueue_.EnQue(xLocal);
   }
 
-  __aicore__ inline void ComputeRow(int64_t rowIdx) {
+  __aicore__ inline void ComputeRow(int64_t rowIdx, int64_t expertIdx) {
     LocalTensor<XType> xLocal = xQueue_.DeQue<XType>();
     LocalTensor<float> xLocalF32;
     if constexpr (std::is_same_v<XType, int32_t>) {
@@ -974,8 +991,8 @@ class DequantSituQuantK3Kernel {
       Muls(xLocalF32, xLocalF32, activationScale, inputWidth_);
       PipeBarrier<PIPE_V>();
       if (hasBias_) {
-        Add(xLocalF32, xLocalF32, biasLocal_, inputWidth_);
-        PipeBarrier<PIPE_V>();
+        AddBiasHalf(xLocalF32, expertIdx, 0);
+        AddBiasHalf(xLocalF32[outputWidth_], expertIdx, outputWidth_);
       }
     }
 
@@ -992,7 +1009,15 @@ class DequantSituQuantK3Kernel {
     PipeBarrier<PIPE_V>();
     Muls(gate, gate, 1.0f / beta_, outputWidth_);
     PipeBarrier<PIPE_V>();
-    Tanh(gate, gate, outputWidth_);
+    // The second half of temp is not live at this point. Reuse it
+    // instead of Tanh's implicit stack, which can overflow TP1+bias UB.
+    if (hasBias_ && outputWidth_ >= 32) {
+      auto tanhScratch = ones.ReinterpretCast<uint8_t>();
+      tanhScratch.SetSize(outputWidth_ * sizeof(float));
+      Tanh(gate, gate, tanhScratch, outputWidth_);
+    } else {
+      Tanh(gate, gate, outputWidth_);
+    }
     PipeBarrier<PIPE_V>();
     Muls(gate, gate, beta_, outputWidth_);
     PipeBarrier<PIPE_V>();
@@ -1013,7 +1038,15 @@ class DequantSituQuantK3Kernel {
     if (linearBeta_ > 0.0f) {
       Muls(up, up, 1.0f / linearBeta_, outputWidth_);
       PipeBarrier<PIPE_V>();
-      Tanh(up, up, outputWidth_);
+      // The second half of temp is not live at this point. Reuse it
+      // instead of Tanh's implicit stack, which can overflow TP1+bias UB.
+      if (hasBias_ && outputWidth_ >= 32) {
+        auto tanhScratch = ones.ReinterpretCast<uint8_t>();
+        tanhScratch.SetSize(outputWidth_ * sizeof(float));
+        Tanh(up, up, tanhScratch, outputWidth_);
+      } else {
+        Tanh(up, up, outputWidth_);
+      }
       PipeBarrier<PIPE_V>();
       Muls(up, up, linearBeta_, outputWidth_);
       PipeBarrier<PIPE_V>();
@@ -1031,15 +1064,6 @@ class DequantSituQuantK3Kernel {
     PipeBarrier<PIPE_V>();
     ComputeReduceMax(temp);
     PipeBarrier<PIPE_V>();
-    WholeReduceMax(temp,
-                   temp,
-                   K3_MASK_FP32,
-                   1,
-                   K3_MASK_BLK_STRIDE,
-                   1,
-                   K3_MASK_BLK_STRIDE,
-                   ReduceOrder::ORDER_ONLY_VALUE);
-    PipeBarrier<PIPE_V>();
 
     event_t eventVToS =
         static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
@@ -1055,9 +1079,7 @@ class DequantSituQuantK3Kernel {
     LocalTensor<float> outLocal = outQueue_.AllocTensor<float>();
     LocalTensor<int8_t> yLocal = outLocal.ReinterpretCast<int8_t>();
     // Scale is packed after int8 data, aligned to float boundary
-    int64_t scaleIdx =
-        (outputWidth_ + static_cast<int64_t>(sizeof(float)) - 1) /
-        sizeof(float);
+    const int64_t scaleIdx = (outputWidth_ + 31) / 32 * 8;
     LocalTensor<float> scaleLocal = outLocal[scaleIdx];
     Duplicate<float>(scaleLocal, scaleValue, 1);
     PipeBarrier<PIPE_V>();
@@ -1126,9 +1148,7 @@ class DequantSituQuantK3Kernel {
   __aicore__ inline void CopyOutRow(int64_t rowIdx) {
     LocalTensor<float> outLocal = outQueue_.DeQue<float>();
     LocalTensor<int8_t> yLocal = outLocal.ReinterpretCast<int8_t>();
-    int64_t scaleIdx =
-        (outputWidth_ + static_cast<int64_t>(sizeof(float)) - 1) /
-        sizeof(float);
+    const int64_t scaleIdx = (outputWidth_ + 31) / 32 * 8;
     LocalTensor<float> scaleLocal = outLocal[scaleIdx];
 
     DataCopyExtParams yParams{
@@ -1169,7 +1189,6 @@ class DequantSituQuantK3Kernel {
   TBuf<TPosition::VECCALC> tmpBuf_;
   TBuf<TPosition::VECCALC> dequantBuf_;
   LocalTensor<float> weightScaleLocal_;
-  LocalTensor<float> biasLocal_;
 };
 
 }  // namespace DequantSituQuantOps

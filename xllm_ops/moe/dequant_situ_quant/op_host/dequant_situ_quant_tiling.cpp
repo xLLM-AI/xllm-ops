@@ -157,10 +157,9 @@ bool DequantSituQuantTiling::SetAttrs(const gert::RuntimeAttrs* attrs) {
   return true;
 }
 
-ge::graphStatus DequantSituQuantTiling::CheckInputShapesInt8(
-    int64_t dimNum,
-    int64_t inDimy,
-    int64_t outDimy) {
+ge::graphStatus DequantSituQuantTiling::CheckInputShapesInt8(int64_t dimNum,
+                                                             int64_t inDimy,
+                                                             int64_t outDimy) {
   CHECK_FAIL(
       context_, dimNum <= 1, "The shape dim of x can not be less than 2");
 
@@ -406,8 +405,8 @@ ge::graphStatus DequantSituQuantTiling::ValidateInt32Contract() {
   const uint64_t outputBytes =
       static_cast<uint64_t>(outDimy) * sizeof(int8_t) + BLOCK_BYTES;
   const uint64_t requiredUb = inputBytes + paramBytes +
-                              (hasDequantBias ? paramBytes : 0) + tempBytes +
-                              outputBytes + UB_RESERVED_BUFF;
+                              (hasDequantBias ? paramBytes / 2 : 0) +
+                              tempBytes + outputBytes + UB_RESERVED_BUFF;
   OP_CHECK_IF(aicoreParams_.ubSize < requiredUb,
               OP_LOGE(context_->GetNodeName(),
                       "UB size %lu is smaller than required %lu bytes",
@@ -522,6 +521,11 @@ ge::graphStatus DequantSituQuantTiling::CheckInputShapes() {
 
   inDimx = shapeBefore;
   outDimy = inDimy / NUM_TWO;
+  if (xDtype_ == ge::DT_INT32 || xDtype_ == ge::DT_BF16) {
+    CHECK_FAIL(context_,
+               inDimy <= 0 || inDimy % 16 != 0,
+               "int32/bfloat16 input width must be a positive multiple of 16");
+  }
 
   tilingData.set_rowLen(inDimx);
   tilingData.set_colLen(outDimy);
@@ -587,7 +591,7 @@ ge::graphStatus DequantSituQuantTiling::GetShapeAttrsInfoInner() {
 }
 
 bool DequantSituQuantTiling::CalcUbMaxTileLen(const uint64_t ubSize,
-                                                    uint32_t& maxTileLen) {
+                                              uint32_t& maxTileLen) {
   uint64_t bytesPerElement =
       8 + 2 + 16 + 16 +
       4;  // 46 (weightScale + inQueueX + tmpBuf + castBuf + outQueue)
@@ -640,7 +644,7 @@ bool DequantSituQuantTiling::CalcOptBaseShape(uint32_t maxTileLen) {
 }
 
 bool DequantSituQuantTiling::CalcTiling(const uint32_t totalCores,
-                                              const uint64_t ubSize) {
+                                        const uint64_t ubSize) {
   ubMinBlockLen = ALIGN_UINT_IN_CACHE_32B / inputDTypeLen;
   cacheLineLen = PACK_UINT_IN_CACHE_512B / inputDTypeLen;
 
@@ -764,9 +768,7 @@ void DequantSituQuantTiling::ShowTilingData() {
   OP_LOGI(opName, "%s", info.str().c_str());
 }
 
-REGISTER_TILING_TEMPLATE("DequantSituQuant",
-                         DequantSituQuantTiling,
-                         0);
+REGISTER_TILING_TEMPLATE("DequantSituQuant", DequantSituQuantTiling, 0);
 
 ge::graphStatus TilingForDequantSituQuant(gert::TilingContext* context) {
   return TilingRegistry::GetInstance().DoTilingImpl(context);
@@ -775,8 +777,7 @@ ge::graphStatus TilingForDequantSituQuant(gert::TilingContext* context) {
 ge::graphStatus TilingPrepareForDequantSituQuant(
     gert::TilingParseContext* context) {
   OP_LOGD(context, "TilingPrepare4DequantSituQuant enter.");
-  auto compileInfo =
-      context->GetCompiledInfo<DequantSituQuantCompileInfo>();
+  auto compileInfo = context->GetCompiledInfo<DequantSituQuantCompileInfo>();
   OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
   auto platformInfo = context->GetPlatformInfo();
   OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
@@ -803,7 +804,6 @@ ge::graphStatus TilingPrepareForDequantSituQuant(
 
 IMPL_OP_OPTILING(DequantSituQuant)
     .Tiling(TilingForDequantSituQuant)
-    .TilingParse<DequantSituQuantCompileInfo>(
-        TilingPrepareForDequantSituQuant);
+    .TilingParse<DequantSituQuantCompileInfo>(TilingPrepareForDequantSituQuant);
 
 }  // namespace optiling
