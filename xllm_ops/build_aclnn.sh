@@ -143,6 +143,8 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
         "mega_gdn_decode"
         "mega_gdn_mtp_decode"
         "mega_gdn_prefill_op"
+        "mega_kda_prefill"
+        "mega_kda_decode"
         "convert_kv_cache_format"
         "beam_search"
         "index_group_matmul"
