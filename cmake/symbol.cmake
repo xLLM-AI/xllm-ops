@@ -227,7 +227,7 @@ function(gen_cust_aicpu_kernel_symbol)
   endif()
 
   set(ARM_CXX_COMPILER ${ASCEND_DIR}/toolkit/toolchain/hcc/bin/aarch64-target-linux-gnu-g++)
-  set(ARM_SO_OUTPUT ${CMAKE_BINARY_DIR}/libmath_aicpu_kernels.so)
+  set(ARM_SO_OUTPUT ${CMAKE_BINARY_DIR}/libtransformer_aicpu_kernels.so)
 
   set(ALL_OBJECTS "")
   foreach(tgt IN LISTS AICPU_CUST_OBJ_TARGETS)
