@@ -756,6 +756,67 @@ at::Tensor& scatter_nd_update_v2_impl_npu(
   return var;
 }
 
+at::Tensor quant_lightning_indexer_v2_metadata_va_impl_npu(
+    int64_t num_heads_q,
+    int64_t num_heads_k,
+    int64_t head_dim,
+    int64_t topk,
+    int64_t quant_mode,
+    const c10::optional<at::Tensor>& cu_seqlens_q,
+    const c10::optional<at::Tensor>& cu_seqlens_k,
+    const c10::optional<at::Tensor>& seqused_q,
+    const c10::optional<at::Tensor>& seqused_k,
+    const c10::optional<at::Tensor>& cmp_residual_k,
+    int64_t batch_size,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_k,
+    std::string layout_q,
+    std::string layout_k,
+    int64_t mask_mode,
+    int64_t cmp_ratio) {
+  // Every Tensor argument may be omitted, so the output device has to be
+  // resolved explicitly: the first present optional Tensor wins.
+  at::Device output_device = at::Device("npu");
+  if (cu_seqlens_q.has_value() && cu_seqlens_q.value().defined()) {
+    output_device = cu_seqlens_q.value().device();
+  } else if (cu_seqlens_k.has_value() && cu_seqlens_k.value().defined()) {
+    output_device = cu_seqlens_k.value().device();
+  } else if (seqused_q.has_value() && seqused_q.value().defined()) {
+    output_device = seqused_q.value().device();
+  } else if (seqused_k.has_value() && seqused_k.value().defined()) {
+    output_device = seqused_k.value().device();
+  } else if (cmp_residual_k.has_value() && cmp_residual_k.value().defined()) {
+    output_device = cmp_residual_k.value().device();
+  }
+
+  at::Tensor output = at::zeros({1024},
+      at::TensorOptions().dtype(at::kInt).device(output_device));
+
+  char* layout_q_ptr = const_cast<char*>(layout_q.c_str());
+  char* layout_k_ptr = const_cast<char*>(layout_k.c_str());
+
+  EXEC_NPU_CMD(aclnnQuantLightningIndexerV2MetadataVa,
+               cu_seqlens_q,
+               cu_seqlens_k,
+               seqused_q,
+               seqused_k,
+               cmp_residual_k,
+               num_heads_q,
+               num_heads_k,
+               head_dim,
+               topk,
+               quant_mode,
+               batch_size,
+               max_seqlen_q,
+               max_seqlen_k,
+               layout_q_ptr,
+               layout_k_ptr,
+               mask_mode,
+               cmp_ratio,
+               output);
+  return output;
+}
+
 std::tuple<at::Tensor&, at::Tensor&> reshape_and_cache_a5_impl_npu(
     const at::Tensor& key,
     const at::Tensor& value,
@@ -2220,6 +2281,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "mtp_prepare_next_draft");
   m.def("convert_kv_cache_format", &convert_kv_cache_format_impl_npu, "convert_kv_cache_format");
   m.def("scatter_nd_update_v2", &scatter_nd_update_v2_impl_npu, "scatter_nd_update_v2");
+  m.def("quant_lightning_indexer_v2_metadata_va",
+        &quant_lightning_indexer_v2_metadata_va_impl_npu,
+        "quant_lightning_indexer_v2_metadata_va");
   m.def("reshape_and_cache_a5",
         &reshape_and_cache_a5_impl_npu,
         "reshape_and_cache_a5");

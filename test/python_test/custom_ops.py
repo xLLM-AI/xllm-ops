@@ -195,6 +195,23 @@ def scatter_nd_update_v2_npu(var, indices, updates, strides):
     return custom_ops_lib.scatter_nd_update_v2(var, indices, updates, strides)
 
 
+# quant_lightning_indexer_v2_metadata_va (AICPU-only metadata producer for the
+# QLI v3 candidate path): builds the 1024 x int32 per-core tiling metadata that
+# the fused top-k kernel consumes. Every tensor input is optional; the output
+# device is resolved from the first present tensor. Returns the 1024-length
+# int32 metadata tensor.
+def quant_lightning_indexer_v2_metadata_va_npu(
+        num_heads_q, num_heads_k, head_dim, topk, quant_mode,
+        cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k,
+        batch_size, max_seqlen_q, max_seqlen_k, layout_q, layout_k,
+        mask_mode, cmp_ratio):
+    return custom_ops_lib.quant_lightning_indexer_v2_metadata_va(
+        num_heads_q, num_heads_k, head_dim, topk, quant_mode,
+        cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k,
+        batch_size, max_seqlen_q, max_seqlen_k, layout_q, layout_k,
+        mask_mode, cmp_ratio)
+
+
 # inplace_partial_rotary_mul (in-place interleaved partial RoPE on x[..., start:end])
 #   x: [B, S, N, allHeadDim]; cos/sin: [B, S, 1, headDim] with headDim=end-start
 #   mode must be 1 (interleave); partial_slice=[start, end]

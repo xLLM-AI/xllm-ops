@@ -1,0 +1,15 @@
+{
+    "QuantLightningIndexerV2MetadataVa":{
+        "opInfo":{
+            "computeCost":"100",
+            "engine":"DNN_VM_AICPU",
+            "flagAsync":"False",
+            "flagPartial":"False",
+            "functionName":"RunCpuKernel",
+            "kernelSo":"libmath_aicpu_kernels.so",
+            "opKernelLib":"CUSTAICPUKernel",
+            "userDefined":"True",
+            "workspaceSize":"100"
+        }
+    }
+}
