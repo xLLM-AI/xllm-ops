@@ -33,6 +33,7 @@ show_help() {
     echo '                       e.g. -c "ascend910b" or -c "ascend910b;ascend310p"'
     echo '  --build-transformer  Build ops-transformer third-party ops (default: enabled)'
     echo '  --no-build-transformer  Skip building ops-transformer third-party ops'
+    echo '  --no-build-flash     Skip building flash-linear-attention-npu third-party ops'
     echo "  -h, --help          Show this help message"
     echo ""
     echo "Examples:"
@@ -62,10 +63,14 @@ parse_args() {
                 COMPUTE_UNIT="${arg#*=}"
                 ;;
             --build-transformer)
-                BUILD_TRANSFORMER="true"
+    BUILD_TRANSFORMER="true"
+    BUILD_FLASH="true"
                 ;;
             --no-build-transformer)
                 BUILD_TRANSFORMER="false"
+                ;;
+            --no-build-flash)
+                BUILD_FLASH="false"
                 ;;
             -n|--op-name)
                 # 需要取下一个参数，在第二轮中处理
@@ -357,6 +362,11 @@ update_vendor_config() {
 # 构建 flash-linear-attention-npu 三方库
 # ============================================================================
 build_flash_linear_attention() {
+    if [[ "${BUILD_FLASH}" != "true" ]]; then
+        echo ">>> Skip flash-linear-attention-npu build (--no-build-flash)"
+        return 0
+    fi
+
     local fla_script="${BASE_DIR}/build_flash_linear_attention.sh"
     if [ ! -f "${fla_script}" ]; then
         echo "[WARN] flash-linear-attention-npu build script not found: ${fla_script}, skip"

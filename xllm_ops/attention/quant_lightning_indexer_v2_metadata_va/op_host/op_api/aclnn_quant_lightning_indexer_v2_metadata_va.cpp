@@ -63,7 +63,7 @@ aclnnStatus aclnnQuantLightningIndexerV2MetadataVaGetWorkspaceSize(
     uint32_t aivCoreNum = npuInfo.GetVectorCoreNum();
     const std::string socVersion = npuInfo.GetSocLongVersion();
 
-    auto ret = ParamsCheckQliV2(cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional,
+    auto ret = ParamsCheckQliV2Va(cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional,
                                 cmpResidualKOptional, numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize,
                                 maxSeqlenQ, maxSeqlenK, layoutQOptional, layoutKOptional, maskMode, cmpRatio, metadata,
                                 aicCoreNum, aivCoreNum, socVersion);

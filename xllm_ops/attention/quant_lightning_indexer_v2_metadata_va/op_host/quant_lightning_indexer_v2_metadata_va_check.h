@@ -45,12 +45,12 @@ inline constexpr int64_t QLI_V2_TOPK_LOWER_BOUND = 1;
 inline constexpr int64_t QLI_V2_A5_TOPK_UPPER_BOUND = 8192;
 inline constexpr int64_t QLI_V2_A3_TOPK_UPPER_BOUND = 2048;
 
-inline bool IsTensorExistQliV2(const aclTensor *tensor)
+inline bool IsTensorExistQliV2Va(const aclTensor *tensor)
 {
     return (tensor != nullptr) && (tensor->GetViewShape().GetDimNum() > 0) && (tensor->GetViewShape().GetDim(0) > 0);
 }
 
-int64_t GetDimNumQliV2(const aclTensor *tensor)
+int64_t GetDimNumQliV2Va(const aclTensor *tensor)
 {
     if (tensor == nullptr) {
         return -1;
@@ -58,7 +58,7 @@ int64_t GetDimNumQliV2(const aclTensor *tensor)
     return tensor->GetViewShape().GetDimNum();
 }
 
-aclDataType GetDataTypeQliV2(const aclTensor *tensor)
+aclDataType GetDataTypeQliV2Va(const aclTensor *tensor)
 {
     aclDataType dataType = aclDataType::ACL_DT_UNDEFINED;
     if (tensor == nullptr) {
@@ -81,17 +81,17 @@ inline int64_t GetRawShapeSizeQLiV2(const std::string &source, int64_t batchValu
     return batchValue;
 }
 
-int64_t GetQueryBatchSizeQliV2(int64_t batchSize, const aclTensor *cuSeqlensQOptional,
+int64_t GetQueryBatchSizeQliV2Va(int64_t batchSize, const aclTensor *cuSeqlensQOptional,
                                const aclTensor *sequsedQOptional, const char *layoutQOptional, std::string &source)
 {
     // 1. 如果sequsedQOptional 传了，使用sequsedQOptional获取BatchSize
-    if (IsTensorExistQliV2(sequsedQOptional)) {
+    if (IsTensorExistQliV2Va(sequsedQOptional)) {
         source = "seqused_q";
         return sequsedQOptional->GetViewShape().GetDim(0);
     }
     // 2. 如果sequsedQOptional 没传，使用cuSeqlensQOptional获取BatchSize
     if (strcmp(layoutQOptional, "TND") == 0) {
-        if (IsTensorExistQliV2(
+        if (IsTensorExistQliV2Va(
                 cuSeqlensQOptional)) { // 前序校验已保证layout_q = TND时，cu_seqlens_q必须传入，此通路必达
             source = "cu_seqlens_q";
             return cuSeqlensQOptional->GetViewShape().GetDim(0) - 1;
@@ -102,17 +102,17 @@ int64_t GetQueryBatchSizeQliV2(int64_t batchSize, const aclTensor *cuSeqlensQOpt
     return batchSize;
 }
 
-int64_t GetKeyBatchSizeQliV2(int64_t batchSize, const aclTensor *cuSeqlensKOptional, const aclTensor *sequsedKOptional,
+int64_t GetKeyBatchSizeQliV2Va(int64_t batchSize, const aclTensor *cuSeqlensKOptional, const aclTensor *sequsedKOptional,
                              const char *layoutKOptional, std::string &source)
 {
     // 1. 如果sequsedKOptional 传了，使用sequsedKOptional获取BatchSize
-    if (IsTensorExistQliV2(sequsedKOptional)) {
+    if (IsTensorExistQliV2Va(sequsedKOptional)) {
         source = "seqused_k";
         return sequsedKOptional->GetViewShape().GetDim(0);
     }
     // 如果是 TND，必须使用 cuSeqlensKOptional获取BatchSize
     if (strcmp(layoutKOptional, "TND") == 0) {
-        if (IsTensorExistQliV2(
+        if (IsTensorExistQliV2Va(
                 cuSeqlensKOptional)) { // 前序校验已保证layout_k = TND时，cu_seqlens_k必须传入，此通路必达
             source = "cu_seqlens_k";
             return cuSeqlensKOptional->GetViewShape().GetDim(0) - 1;
@@ -123,7 +123,7 @@ int64_t GetKeyBatchSizeQliV2(int64_t batchSize, const aclTensor *cuSeqlensKOptio
     return batchSize;
 }
 
-aclnnStatus CheckSingleParamQliV2(int64_t numHeadsQ, int64_t numHeadsK, int64_t headDim, int64_t topk,
+aclnnStatus CheckSingleParamQliV2Va(int64_t numHeadsQ, int64_t numHeadsK, int64_t headDim, int64_t topk,
                                   int64_t quantMode, int64_t batchSize, int64_t maxSeqlenQ, int64_t maxSeqlenK,
                                   const char *layoutQOptional, const char *layoutKOptional, int64_t maskMode,
                                   int64_t cmpRatio, uint32_t aicCoreNum, uint32_t aivCoreNum,
@@ -230,39 +230,39 @@ aclnnStatus CheckSingleParamQliV2(int64_t numHeadsQ, int64_t numHeadsK, int64_t 
     return ACLNN_SUCCESS;
 }
 
-aclnnStatus CheckExistenceQliV2(int64_t maskMode, int64_t cmpRatio, const aclTensor *cuSeqlensQOptional,
+aclnnStatus CheckExistenceQliV2Va(int64_t maskMode, int64_t cmpRatio, const aclTensor *cuSeqlensQOptional,
                                 const aclTensor *cuSeqlensKOptional, const aclTensor *sequsedQOptional,
                                 const aclTensor *sequsedKOptional, const aclTensor *cmpResidualKOptional,
                                 int64_t maxSeqlenQ, int64_t maxSeqlenK, const char *layoutQOptional,
                                 const char *layoutKOptional, const aclTensor *metadata)
 {
     // cu_seqlens_q 存在性校验
-    if ((strcmp(layoutQOptional, "TND") == 0) && !IsTensorExistQliV2(cuSeqlensQOptional)) {
+    if ((strcmp(layoutQOptional, "TND") == 0) && !IsTensorExistQliV2Va(cuSeqlensQOptional)) {
         OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "cu_seqlens_q",
                                                  "When layout_q is TND, cu_seqlens_q must be provided");
         return ACLNN_ERR_PARAM_INVALID;
     }
     // layout_q BSND, seqused_q 不存在时，max_seqlen_q 不能为-1
-    if (strcmp(layoutQOptional, "BSND") == 0 && !IsTensorExistQliV2(sequsedQOptional) && (maxSeqlenQ <= -1)) {
+    if (strcmp(layoutQOptional, "BSND") == 0 && !IsTensorExistQliV2Va(sequsedQOptional) && (maxSeqlenQ <= -1)) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
             QLI_V2_ACLNN_OP_NAME, "max_seqlen_q", std::to_string(maxSeqlenQ),
             "When layout_q is BSND and seqused_q is not provided, max_seqlen_q can not be -1");
         return ACLNN_ERR_PARAM_INVALID;
     }
     // cu_seqlens_k 存在性校验
-    if ((strcmp(layoutKOptional, "TND") == 0) && !IsTensorExistQliV2(cuSeqlensKOptional)) {
+    if ((strcmp(layoutKOptional, "TND") == 0) && !IsTensorExistQliV2Va(cuSeqlensKOptional)) {
         OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "cu_seqlens_k",
                                                  "When layout_k is TND, cu_seqlens_k must be provided");
         return ACLNN_ERR_PARAM_INVALID;
     }
     // seqused_k 存在性校验
-    if ((strcmp(layoutKOptional, "PA_BBND") == 0) && !IsTensorExistQliV2(sequsedKOptional)) {
+    if ((strcmp(layoutKOptional, "PA_BBND") == 0) && !IsTensorExistQliV2Va(sequsedKOptional)) {
         OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "seqused_k",
                                                  "When layout_k is PA_BBND, seqused_k must be provided");
         return ACLNN_ERR_PARAM_INVALID;
     }
     // layout_k BSND, seqused_k 不存在时，max_seqlen_k 不能为-1
-    if (strcmp(layoutKOptional, "BSND") == 0 && !IsTensorExistQliV2(sequsedKOptional) && maxSeqlenK <= -1) {
+    if (strcmp(layoutKOptional, "BSND") == 0 && !IsTensorExistQliV2Va(sequsedKOptional) && maxSeqlenK <= -1) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
             QLI_V2_ACLNN_OP_NAME, "max_seqlen_k", std::to_string(maxSeqlenK),
             "When layout_k is BSND and seqused_k is not provided, max_seqlen_k can not be -1");
@@ -270,21 +270,21 @@ aclnnStatus CheckExistenceQliV2(int64_t maskMode, int64_t cmpRatio, const aclTen
     }
     // cmp_residual_k 存在性校验
     if ((cmpRatio != QLI_V2_CMP_RATIO_LOWER_BOUND) && (maskMode == QLI_V2_CAUSAL_MASK_MODE) &&
-        !IsTensorExistQliV2(cmpResidualKOptional)) {
+        !IsTensorExistQliV2Va(cmpResidualKOptional)) {
         OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
             QLI_V2_ACLNN_OP_NAME, "cmp_residual_k",
             "When cmp_ratio is not 1 and mask_mode is CAUSAL, cmp_residual_k must be provided");
         return ACLNN_ERR_PARAM_INVALID;
     }
     // metadata 存在性校验
-    if (!IsTensorExistQliV2(metadata)) {
+    if (!IsTensorExistQliV2Va(metadata)) {
         OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "metadata", "Metadata is nullptr");
         return ACLNN_ERR_PARAM_INVALID;
     }
     return ACLNN_SUCCESS;
 }
 
-aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQOptional,
+aclnnStatus CheckConsistencyQliV2Va(int64_t batchSize, const aclTensor *cuSeqlensQOptional,
                                   const aclTensor *cuSeqlensKOptional, const aclTensor *sequsedQOptional,
                                   const aclTensor *sequsedKOptional, const aclTensor *cmpResidualKOptional,
                                   const char *layoutQOptional, const char *layoutKOptional, const aclTensor *metadata)
@@ -293,13 +293,13 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
     aclDataType dataType = aclDataType::ACL_DT_UNDEFINED;
 
     // 校验 cu_seqlens_q
-    if (IsTensorExistQliV2(cuSeqlensQOptional)) {
-        dimNum = GetDimNumQliV2(cuSeqlensQOptional);
+    if (IsTensorExistQliV2Va(cuSeqlensQOptional)) {
+        dimNum = GetDimNumQliV2Va(cuSeqlensQOptional);
         if (dimNum != 1) {
             OP_LOGE_FOR_INVALID_SHAPEDIM(QLI_V2_ACLNN_OP_NAME, "cu_seqlens_q", std::to_string(dimNum), "1");
             return ACLNN_ERR_PARAM_INVALID;
         }
-        dataType = GetDataTypeQliV2(cuSeqlensQOptional);
+        dataType = GetDataTypeQliV2Va(cuSeqlensQOptional);
         if (dataType != aclDataType::ACL_INT32) {
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "cu_seqlens_q", ToString(dataType).GetString(),
                                                   "The dtype of cu_seqlens_q must be int32");
@@ -307,13 +307,13 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
         }
     }
     // 校验 cu_seqlens_k
-    if (IsTensorExistQliV2(cuSeqlensKOptional)) {
-        dimNum = GetDimNumQliV2(cuSeqlensKOptional);
+    if (IsTensorExistQliV2Va(cuSeqlensKOptional)) {
+        dimNum = GetDimNumQliV2Va(cuSeqlensKOptional);
         if (dimNum != 1) {
             OP_LOGE_FOR_INVALID_SHAPEDIM(QLI_V2_ACLNN_OP_NAME, "cu_seqlens_k", std::to_string(dimNum), "1");
             return ACLNN_ERR_PARAM_INVALID;
         }
-        dataType = GetDataTypeQliV2(cuSeqlensKOptional);
+        dataType = GetDataTypeQliV2Va(cuSeqlensKOptional);
         if (dataType != aclDataType::ACL_INT32) {
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "cu_seqlens_k", ToString(dataType).GetString(),
                                                   "The dtype of cu_seqlens_k must be int32");
@@ -321,13 +321,13 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
         }
     }
     // 校验 seqused_q
-    if (IsTensorExistQliV2(sequsedQOptional)) {
-        dimNum = GetDimNumQliV2(sequsedQOptional);
+    if (IsTensorExistQliV2Va(sequsedQOptional)) {
+        dimNum = GetDimNumQliV2Va(sequsedQOptional);
         if (dimNum != 1) {
             OP_LOGE_FOR_INVALID_SHAPEDIM(QLI_V2_ACLNN_OP_NAME, "seqused_q", std::to_string(dimNum), "1");
             return ACLNN_ERR_PARAM_INVALID;
         }
-        dataType = GetDataTypeQliV2(sequsedQOptional);
+        dataType = GetDataTypeQliV2Va(sequsedQOptional);
         if (dataType != aclDataType::ACL_INT32) {
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "seqused_q", ToString(dataType).GetString(),
                                                   "The dtype of seqused_q must be int32");
@@ -335,13 +335,13 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
         }
     }
     // 校验 seqused_k
-    if (IsTensorExistQliV2(sequsedKOptional)) {
-        dimNum = GetDimNumQliV2(sequsedKOptional);
+    if (IsTensorExistQliV2Va(sequsedKOptional)) {
+        dimNum = GetDimNumQliV2Va(sequsedKOptional);
         if (dimNum != 1) {
             OP_LOGE_FOR_INVALID_SHAPEDIM(QLI_V2_ACLNN_OP_NAME, "seqused_k", std::to_string(dimNum), "1");
             return ACLNN_ERR_PARAM_INVALID;
         }
-        dataType = GetDataTypeQliV2(sequsedKOptional);
+        dataType = GetDataTypeQliV2Va(sequsedKOptional);
         if (dataType != aclDataType::ACL_INT32) {
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "seqused_k", ToString(dataType).GetString(),
                                                   "The dtype of seqused_k must be int32");
@@ -349,13 +349,13 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
         }
     }
     // 校验 cmp_residual_k
-    if (IsTensorExistQliV2(cmpResidualKOptional)) {
-        dimNum = GetDimNumQliV2(cmpResidualKOptional);
+    if (IsTensorExistQliV2Va(cmpResidualKOptional)) {
+        dimNum = GetDimNumQliV2Va(cmpResidualKOptional);
         if (dimNum != 1) {
             OP_LOGE_FOR_INVALID_SHAPEDIM(QLI_V2_ACLNN_OP_NAME, "cmp_residual_k", std::to_string(dimNum), "1");
             return ACLNN_ERR_PARAM_INVALID;
         }
-        dataType = GetDataTypeQliV2(cmpResidualKOptional);
+        dataType = GetDataTypeQliV2Va(cmpResidualKOptional);
         if (dataType != aclDataType::ACL_INT32) {
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "cmp_residual_k",
                                                   ToString(dataType).GetString(),
@@ -364,13 +364,13 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
         }
     }
     // 校验 metadata
-    if (IsTensorExistQliV2(metadata)) {
-        dimNum = GetDimNumQliV2(metadata);
+    if (IsTensorExistQliV2Va(metadata)) {
+        dimNum = GetDimNumQliV2Va(metadata);
         if (dimNum != 1) {
             OP_LOGE_FOR_INVALID_SHAPEDIM(QLI_V2_ACLNN_OP_NAME, "metadata", std::to_string(dimNum), "1");
             return ACLNN_ERR_PARAM_INVALID;
         }
-        dataType = GetDataTypeQliV2(metadata);
+        dataType = GetDataTypeQliV2Va(metadata);
         if (dataType != aclDataType::ACL_INT32) {
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "metadata", ToString(dataType).GetString(),
                                                   "The dtype of metadata must be int32");
@@ -387,9 +387,9 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
     std::string querySource;
     std::string keySource;
     int64_t queryBatchSize =
-        GetQueryBatchSizeQliV2(batchSize, cuSeqlensQOptional, sequsedQOptional, layoutQOptional, querySource);
+        GetQueryBatchSizeQliV2Va(batchSize, cuSeqlensQOptional, sequsedQOptional, layoutQOptional, querySource);
     int64_t keyBatchSize =
-        GetKeyBatchSizeQliV2(batchSize, cuSeqlensKOptional, sequsedKOptional, layoutKOptional, keySource);
+        GetKeyBatchSizeQliV2Va(batchSize, cuSeqlensKOptional, sequsedKOptional, layoutKOptional, keySource);
     if (queryBatchSize != keyBatchSize) {
         OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
             QLI_V2_ACLNN_OP_NAME, querySource + " and " + keySource,
@@ -414,7 +414,7 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
         return ACLNN_ERR_PARAM_INVALID;
     }
     // 校验TND场景q维度一致性
-    if (strcmp(layoutQOptional, "TND") == 0 && IsTensorExistQliV2(sequsedQOptional)) {
+    if (strcmp(layoutQOptional, "TND") == 0 && IsTensorExistQliV2Va(sequsedQOptional)) {
         int64_t cuSeqlensQBatchSize = cuSeqlensQOptional->GetViewShape().GetDim(0) - 1;
         CHECK_COND(
             cuSeqlensQBatchSize == queryBatchSize, ACLNN_ERR_PARAM_INVALID,
@@ -432,7 +432,7 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
         }
     }
     // 校验TND场景k维度一致性
-    if (strcmp(layoutKOptional, "TND") == 0 && IsTensorExistQliV2(sequsedKOptional)) {
+    if (strcmp(layoutKOptional, "TND") == 0 && IsTensorExistQliV2Va(sequsedKOptional)) {
         int64_t cuSeqlensKBatchSize = cuSeqlensKOptional->GetViewShape().GetDim(0) - 1;
         if (cuSeqlensKBatchSize != keyBatchSize) {
             OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
@@ -446,7 +446,7 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
     }
     // 校验 cmp_residual_k 元素数
     auto cmpResidualKBatch = cmpResidualKOptional->GetViewShape().GetDim(0);
-    if (IsTensorExistQliV2(cmpResidualKOptional) && (cmpResidualKBatch != queryBatchSize)) {
+    if (IsTensorExistQliV2Va(cmpResidualKOptional) && (cmpResidualKBatch != queryBatchSize)) {
         if (IsTensorSourceQLiV2(querySource)) {
             OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
                 QLI_V2_ACLNN_OP_NAME, "cmp_residual_k and " + querySource,
@@ -463,7 +463,7 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
     return ACLNN_SUCCESS;
 }
 
-aclnnStatus ParamsCheckQliV2(const aclTensor *cuSeqlensQOptional, const aclTensor *cuSeqlensKOptional,
+aclnnStatus ParamsCheckQliV2Va(const aclTensor *cuSeqlensQOptional, const aclTensor *cuSeqlensKOptional,
                              const aclTensor *sequsedQOptional, const aclTensor *sequsedKOptional,
                              const aclTensor *cmpResidualKOptional, int64_t numHeadsQ, int64_t numHeadsK,
                              int64_t headDim, int64_t topk, int64_t quantMode, int64_t batchSize, int64_t maxSeqlenQ,
@@ -472,16 +472,16 @@ aclnnStatus ParamsCheckQliV2(const aclTensor *cuSeqlensQOptional, const aclTenso
                              const std::string &socVersion)
 {
     auto ret =
-        CheckSingleParamQliV2(numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK,
+        CheckSingleParamQliV2Va(numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK,
                               layoutQOptional, layoutKOptional, maskMode, cmpRatio, aicCoreNum, aivCoreNum, socVersion);
     CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
 
-    ret = CheckExistenceQliV2(maskMode, cmpRatio, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional,
+    ret = CheckExistenceQliV2Va(maskMode, cmpRatio, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional,
                               sequsedKOptional, cmpResidualKOptional, maxSeqlenQ, maxSeqlenK, layoutQOptional,
                               layoutKOptional, metadata);
     CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
 
-    ret = CheckConsistencyQliV2(batchSize, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional,
+    ret = CheckConsistencyQliV2Va(batchSize, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional,
                                 cmpResidualKOptional, layoutQOptional, layoutKOptional, metadata);
     CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
 
