@@ -15,21 +15,12 @@
  * \brief
  */
 
-#include "kernel_operator.h"
-#include "kernel_operator_intf.h"
-
-#if defined(__DAV_C310__)
-#include "hc_pre_va_base_arch35.h"
-#include "hc_pre_va_m_k_split_core_arch35.h"
-#include "hc_pre_va_m_k_split_core_premix_arch35.h"
-#include "hc_pre_va_m_split_core_arch35.h"
-#include "hc_pre_va_m_split_core_premix_arch35.h"
-#else
 #include "hc_pre_va_base.h"
 #include "hc_pre_va_m_k_split_core.h"
+#include "kernel_operator.h"
+#include "kernel_operator_intf.h"
 #include "lib/matmul_intf.h"
 using namespace HcPreVa;
-#endif
 
 using namespace AscendC;
 
@@ -55,86 +46,6 @@ extern "C" __global__ __aicore__ void hc_pre_va(GM_ADDR x,
   }
   TPipe pipe;
 
-  // 950PR 950DT
-#if defined(__DAV_C310__)
-  if (TILING_KEY_IS(1000)) {
-    GET_TILING_DATA_WITH_STRUCT(HcPreVaTilingData, tiling_data_in, tiling);
-    const HcPreVaTilingData* __restrict tilingData = &tiling_data_in;
-    HcPreVaNs::HcPreVaMKSplitCorePart1<DTYPE_X> op;
-    op.Init(x, hc_fn, userWs, tilingData, &pipe);
-    op.Process();
-    pipe.Destroy();
-
-    TPipe pipeStage2;
-    HcPreVaNs::HcPreVaMKSplitCorePart2<DTYPE_X> op2;
-    op2.Init(x,
-             hc_scale,
-             hc_base,
-             y,
-             post,
-             comb_frag,
-             pre,
-             userWs,
-             tilingData,
-             &pipeStage2);
-    op2.Process();
-    pipeStage2.Destroy();
-  } else if (TILING_KEY_IS(1002)) {
-    GET_TILING_DATA_WITH_STRUCT(HcPreVaTilingData, tiling_data_in, tiling);
-    const HcPreVaTilingData* __restrict tilingData = &tiling_data_in;
-    HcPreVaNs::HcPreVaMKSplitCorePremixPart1<DTYPE_X> op;
-    op.Init(x, hc_fn, pre_mix, y, userWs, tilingData, &pipe);
-    op.Process();
-    pipe.Destroy();
-
-    TPipe pipeStage2;
-    HcPreVaNs::HcPreVaMKSplitCorePremixPart2<DTYPE_X> op2;
-    op2.Init(x,
-             hc_scale,
-             hc_base,
-             pre_mix,
-             y,
-             post,
-             comb_frag,
-             pre,
-             userWs,
-             tilingData,
-             &pipeStage2);
-    op2.Process();
-    pipeStage2.Destroy();
-  } else if (TILING_KEY_IS(1001)) {
-    GET_TILING_DATA_WITH_STRUCT(HcPreVaTilingData, tiling_data_in, tiling);
-    const HcPreVaTilingData* __restrict tilingData = &tiling_data_in;
-    HcPreVaNs::HcPreVaMSplitCoreArch35<DTYPE_X> op;
-    op.Init(x,
-            hc_fn,
-            hc_scale,
-            hc_base,
-            y,
-            post,
-            comb_frag,
-            pre,
-            tilingData,
-            &pipe);
-    op.Process();
-  } else if (TILING_KEY_IS(1003)) {
-    GET_TILING_DATA_WITH_STRUCT(HcPreVaTilingData, tiling_data_in, tiling);
-    const HcPreVaTilingData* __restrict tilingData = &tiling_data_in;
-    HcPreVaNs::HcPreVaMSplitCorePremixArch35<DTYPE_X> op;
-    op.Init(x,
-            hc_fn,
-            hc_scale,
-            hc_base,
-            pre_mix,
-            y,
-            post,
-            comb_frag,
-            pre,
-            tilingData,
-            &pipe);
-    op.Process();
-  }
-#else
   // A3
   if (TILING_KEY_IS(0)) {
     GET_TILING_DATA_WITH_STRUCT(HcPreVaTilingData, tiling_data_in, tiling);
@@ -162,5 +73,4 @@ extern "C" __global__ __aicore__ void hc_pre_va(GM_ADDR x,
 
     pipeStage2.Destroy();
   }
-#endif
 }

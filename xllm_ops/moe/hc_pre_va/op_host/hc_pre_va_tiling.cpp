@@ -19,8 +19,6 @@
 
 #include <sstream>
 
-#include "hc_pre_va_tiling_arch35.h"
-
 using namespace ge;
 namespace optiling {
 namespace {
@@ -411,13 +409,6 @@ ge::graphStatus TilingForHcPreVa(gert::TilingContext* context) {
              OPS_REPORT_VECTOR_INNER_ERR("TilingForMoeGatingTopKHash",
                                          "Tiling platformInfo is null"),
              return ge::GRAPH_FAILED);
-  auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
-  auto socVersion = ascendcPlatform.GetSocVersion();
-  if (socVersion == platform_ascendc::SocVersion::ASCEND950) {
-    OPS_LOG_I(context, "Using arch35 tiling for ASCEND950");
-    HcPreVaTilingRegbase::HcPreVaTilingRegbase hcPreTiling(context);
-    return hcPreTiling.DoOpTiling();
-  }
   HcPreVaTiling hcPreTiling(context);
   return hcPreTiling.DoOpTiling();
 }

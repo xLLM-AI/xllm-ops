@@ -74,15 +74,7 @@ class HcPreVa : public OpDef {
     this->Attr("hc_eps").AttrType(OPTIONAL).Float(1e-6f);  // default value
     this->Attr("norm_eps").AttrType(OPTIONAL).Float(1e-6f);
 
-    this->AICore().AddConfig("ascend910b");
     this->AICore().AddConfig("ascend910_93");
-
-    OpAICoreConfig regbaseCfg;
-    regbaseCfg.DynamicCompileStaticFlag(true)
-        .DynamicRankSupportFlag(true)
-        .DynamicShapeSupportFlag(true)
-        .ExtendCfgInfo("opFile.value", "hc_pre_va");
-    this->AICore().AddConfig("ascend950", regbaseCfg);
   }
 };
 OP_ADD(HcPreVa);
