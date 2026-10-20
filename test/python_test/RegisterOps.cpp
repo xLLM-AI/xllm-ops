@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "acl/acl_rt.h"
 #include "pytorch_npu_helper.hpp"
+#include "../../xllm_ops/moe/hc_pre_va/hc_pre_va_torch_adpt.h"
 
 void select_unshared_kv_impl_npu(
     const at::Tensor& beam_index,
@@ -2353,6 +2354,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_init_routing_custom", &moe_init_routing_custom_impl_npu, "moe_init_routing_custom");
   m.def("moe_init_routing_v3", &moe_init_routing_v3_impl_npu, "moe_init_routing_v3");
   m.def("hc_pre_sinkhorn", &hc_pre_sinkhorn_impl_npu, "hc_pre_sinkhorn");
+  m.def("hc_pre_va", &xllm_ops_hc_pre_va::hc_pre_va_impl_npu, "DSV4.1 hc_pre_v3");
   m.def("pp_matmul_opt", &pp_matmul_opt_impl_npu, "pp_matmul_opt");
   m.def("moe_grouped_matmul", &moe_grouped_matmul_impl_npu, "moe_grouped_matmul");
   m.def("index_group_matmul", &index_group_matmul_impl_npu, "index_group_matmul");

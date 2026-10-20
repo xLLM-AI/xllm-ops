@@ -762,3 +762,20 @@ def lightning_indexer_quant_metadata_npu(aslq, aslk,
         batch_size, max_seq_q, max_seq_k,
         layout_query, layout_key,
         sparse_count, sparse_mode, is_fd, pre_token, next_token, cmp_ratio)
+
+
+def hc_pre_va_npu(
+    x: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    pre_mix: torch.Tensor | None = None,
+    hc_mult: int = 4,
+    hc_sinkhorn_iters: int = 20,
+    norm_eps: float = 1e-6,
+    hc_eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """DSV4.1 HC pre: external mix collapse and native (post, comb, pre)."""
+    return custom_ops_lib.hc_pre_va(
+        x, hc_fn, hc_scale, hc_base, pre_mix, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps
+    )
