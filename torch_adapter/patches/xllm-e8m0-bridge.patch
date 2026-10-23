@@ -1,0 +1,58 @@
+diff --git a/xllm/core/kernels/npu/aclnn/pytorch_npu_helper.hpp b/xllm/core/kernels/npu/aclnn/pytorch_npu_helper.hpp
+index 06e1389b..501f867a 100644
+--- a/xllm/core/kernels/npu/aclnn/pytorch_npu_helper.hpp
++++ b/xllm/core/kernels/npu/aclnn/pytorch_npu_helper.hpp
+@@ -216,6 +216,26 @@ constexpr aclDataType kATenScalarTypeToAclDataTypeTable
+ #undef DEFINE_ENUM
+ };
+ 
++inline aclDataType aten_scalar_type_to_acl_data_type(
++    at::ScalarType scalar_type) {
++  if (scalar_type == at::ScalarType::Float8_e5m2) {
++    return static_cast<aclDataType>(35);  // ACL_FLOAT8_E5M2
++  }
++  if (scalar_type == at::ScalarType::Float8_e4m3fn) {
++    return static_cast<aclDataType>(36);  // ACL_FLOAT8_E4M3FN
++  }
++#if __has_include(<c10/util/Float8_e8m0fnu.h>)
++  if (scalar_type == at::ScalarType::Float8_e8m0fnu) {
++    return static_cast<aclDataType>(37);  // ACL_FLOAT8_E8M0
++  }
++#endif
++  const int64_t idx = static_cast<int64_t>(scalar_type);
++  if (idx < 0 || idx > static_cast<int64_t>(at::ScalarType::NumOptions)) {
++    return ACL_DT_UNDEFINED;
++  }
++  return kATenScalarTypeToAclDataTypeTable[idx];
++}
++
+ #ifdef XLLM_ACLNN_MEMCPY_TO_BUF
+ #undef XLLM_ACLNN_MEMCPY_TO_BUF
+ #endif
+@@ -373,7 +393,7 @@ inline aclTensor* convert_type(const at::Tensor& at_tensor) {
+   }
+   at::ScalarType scalar_data_type = at_tensor.scalar_type();
+   aclDataType acl_data_type =
+-      kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(scalar_data_type)];
++      aten_scalar_type_to_acl_data_type(scalar_data_type);
+   CHECK(acl_data_type != ACL_DT_UNDEFINED)
+       << std::string(c10::toString(scalar_data_type))
+       << " has not been supported";
+@@ -487,7 +507,7 @@ inline aclScalar* convert_type(const at::Scalar& at_scalar) {
+ 
+   at::ScalarType scalar_data_type = at_scalar.type();
+   aclDataType acl_data_type =
+-      kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(scalar_data_type)];
++      aten_scalar_type_to_acl_data_type(scalar_data_type);
+   CHECK(acl_data_type != ACL_DT_UNDEFINED)
+       << std::string(c10::toString(scalar_data_type))
+       << " has not been supported";
+@@ -600,7 +620,7 @@ inline aclScalar* convert_type(const c10::optional<at::Scalar>& opt_scalar) {
+ }
+ 
+ inline aclDataType convert_type(const at::ScalarType scalar_type) {
+-  return kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(scalar_type)];
++  return aten_scalar_type_to_acl_data_type(scalar_type);
+ }
+ 
+ template <typename T>
