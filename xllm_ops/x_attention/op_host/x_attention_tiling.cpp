@@ -52,6 +52,7 @@ constexpr int32_t SCALE_VALUE_ATTR_INDEX = 0;
 // ============================================================================
 constexpr int32_t UNSHARED_KV_TILE = 128;
 constexpr int32_t COMBINE_MAX_ROW_NUM_PER_LOOP = 64;
+constexpr int32_t SHARED_KV_TILE = 128;
 
 class TilingXAttentionFunc {
   public:
@@ -68,7 +69,12 @@ class TilingXAttentionFunc {
     uint32_t cubeCoreNum;
     uint32_t vecCoreNum;
     uint64_t ubSize;
+    bool isSharedPaged{false};
+    bool isUnsharedPaged{false};
+    uint32_t inputDtype{0};
+    ge::graphStatus ParseInputShapeAndAttrs();
     ge::graphStatus FillBasicTilingData();
+    ge::graphStatus FillBasicTilingData4NewKind();
     void FillSharedSplitCoreTilingData();
     void FillUnsharedSplitCoreTilingData();
     void FillCombineScaleTilingData();
@@ -191,31 +197,49 @@ void TilingXAttentionFunc::FillSharedSplitCoreTilingData()
 
 ge::graphStatus TilingXAttentionFunc::FillBasicTilingData()
 {
-  auto sharedBlockTableShapePtr = tiling_context_->GetOptionalInputShape(InputIndex::SHARED_BLOCK_TABLE);
-  auto unsharedBlockTableShapePtr = tiling_context_->GetOptionalInputShape(InputIndex::UNSHARED_BLOCK_TABLE);
-  bool isSharedPaged = (sharedBlockTableShapePtr != nullptr);
-  bool isUnsharedPaged = (unsharedBlockTableShapePtr != nullptr);
-
-  if (!(!isSharedPaged && isUnsharedPaged)) {
-    OP_LOGE(tiling_context_->GetNodeName(), "xAttention only support unshared_paged and not shared_paged on Ascend950.");
-    return ge::GRAPH_FAILED;
-  }
-
   auto queryShape = tiling_context_->GetInputShape(QUERY)->GetStorageShape();
   auto sharedKeyBlockShape = tiling_context_->GetInputShape(SHARED_KEY_BLOCK)->GetStorageShape();
   auto unsharedKeyBlockShape = tiling_context_->GetInputShape(UNSHARED_KEY_BLOCK)->GetStorageShape();
-  auto unsharedBlockTableShape = tiling_context_->GetOptionalInputShape(UNSHARED_BLOCK_TABLE)->GetStorageShape();
   auto sharedKvLenShape = tiling_context_->GetInputShape(SHARED_KV_LENS)->GetStorageShape();
+  auto sharedBlockTableShape = tiling_context_->GetOptionalInputShape(SHARED_BLOCK_TABLE)->GetStorageShape();
 
+  if (queryShape.GetDimNum() != NUM3 || sharedKeyBlockShape.GetDimNum() != NUM4 ||
+      unsharedKeyBlockShape.GetDimNum() != NUM4 || sharedBlockTableShape.GetDimNum() != NUM2 ||
+      sharedKvLenShape.GetDimNum() != 1) {
+    OP_LOGE(tiling_context_->GetNodeName(), "unexpected shape rank for shared paged layout.");
+    return ge::GRAPH_FAILED;
+  }
 
   int32_t totalTokensQ = queryShape.GetDim(0);
-  int32_t sharedKvTokens = sharedKeyBlockShape.GetDim(0);
   int32_t qHeads = queryShape.GetDim(1);
-  int32_t kvHeads = sharedKeyBlockShape.GetDim(1);
   int32_t headDim = queryShape.GetDim(2);
-  int32_t beamSize = unsharedKeyBlockShape.GetDim(1);
-  int32_t maxDecodeStep = unsharedKeyBlockShape.GetDim(3);
   int32_t batchSize = sharedKvLenShape.GetDim(0);
+  int32_t numSharedBlocks = sharedKeyBlockShape.GetDim(0);
+  int32_t blockSize = sharedKeyBlockShape.GetDim(1);
+  int32_t kvHeads = sharedKeyBlockShape.GetDim(2);
+  int32_t sharedHeadDim = sharedKeyBlockShape.GetDim(3);
+  int32_t maxBlocksPerBatch = sharedBlockTableShape.GetDim(1);
+  int32_t maxDecodeStep = unsharedKeyBlockShape.GetDim(2);
+  int32_t beamSize = batchSize > 0 ? totalTokensQ / batchSize : 0;
+
+  if (blockSize < SHARED_KV_TILE || blockSize % SHARED_KV_TILE != 0) {
+    OP_LOGE(tiling_context_->GetNodeName(),
+            "shared paged block_size must be a positive multiple of %d, but got %d.",
+            SHARED_KV_TILE, blockSize);
+    return ge::GRAPH_FAILED;
+  }
+
+  bool invalidShape = batchSize <= 0 || beamSize <= 0 || totalTokensQ != batchSize * beamSize ||
+                      qHeads <= 0 || kvHeads <= 0 || qHeads % kvHeads != 0 ||
+                      sharedHeadDim != headDim || numSharedBlocks <= 0 ||
+                      maxBlocksPerBatch <= 0 || sharedBlockTableShape.GetDim(0) != batchSize ||
+                      unsharedKeyBlockShape.GetDim(0) != totalTokensQ ||
+                      unsharedKeyBlockShape.GetDim(1) != kvHeads ||
+                      unsharedKeyBlockShape.GetDim(3) != headDim;
+  if (invalidShape) {
+    OP_LOGE(tiling_context_->GetNodeName(), "inconsistent shapes for shared paged layout.");
+    return ge::GRAPH_FAILED;
+  }
   int32_t groupSize = qHeads / kvHeads;
 
   float scaleValue = static_cast<float>(1.0 / std::sqrt(1.0 * headDim));
@@ -235,9 +259,107 @@ ge::graphStatus TilingXAttentionFunc::FillBasicTilingData()
   tiling_data_.baseInfo.set_headDim(headDim);
   tiling_data_.baseInfo.set_scaleValue(scaleValue);
   tiling_data_.baseInfo.set_totalTokensQ(totalTokensQ);
+  tiling_data_.baseInfo.set_sharedKvTokens(numSharedBlocks * blockSize);
+  tiling_data_.baseInfo.set_maxDecodeStep(maxDecodeStep);
+  tiling_data_.sharedInfo.set_blockSize(blockSize);
+  tiling_data_.sharedInfo.set_maxBlocksPerBatch(maxBlocksPerBatch);
+  return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus TilingXAttentionFunc::FillBasicTilingData4NewKind()
+{
+  auto queryShape = tiling_context_->GetInputShape(QUERY)->GetStorageShape();
+  auto sharedKeyBlockShape = tiling_context_->GetInputShape(SHARED_KEY_BLOCK)->GetStorageShape();
+  auto unsharedKeyBlockShape = tiling_context_->GetInputShape(UNSHARED_KEY_BLOCK)->GetStorageShape();
+  auto unsharedBlockTableShape = tiling_context_->GetOptionalInputShape(UNSHARED_BLOCK_TABLE)->GetStorageShape();
+  auto sharedKvLenShape = tiling_context_->GetInputShape(SHARED_KV_LENS)->GetStorageShape();
+
+  if (queryShape.GetDimNum() != NUM3 || sharedKeyBlockShape.GetDimNum() != NUM3 ||
+      unsharedKeyBlockShape.GetDimNum() != 5 ||
+      (unsharedBlockTableShape.GetDimNum() != 1 && unsharedBlockTableShape.GetDimNum() != NUM2) ||
+      sharedKvLenShape.GetDimNum() != 1) {
+    OP_LOGE(tiling_context_->GetNodeName(), "unexpected shape rank for unshared paged layout.");
+    return ge::GRAPH_FAILED;
+  }
+
+  int32_t totalTokensQ = queryShape.GetDim(0);
+  int32_t qHeads = queryShape.GetDim(1);
+  int32_t headDim = queryShape.GetDim(2);
+  int32_t batchSize = sharedKvLenShape.GetDim(0);
+  int32_t beamSize = unsharedKeyBlockShape.GetDim(1);
+  int32_t kvHeads = sharedKeyBlockShape.GetDim(1);
+  int32_t sharedKvTokens = sharedKeyBlockShape.GetDim(0);
+  int32_t maxDecodeStep = unsharedKeyBlockShape.GetDim(3);
+
+  bool validUnsharedBlockTableShape =
+      (unsharedBlockTableShape.GetDimNum() == 1 && unsharedBlockTableShape.GetDim(0) == batchSize) ||
+      (unsharedBlockTableShape.GetDimNum() == NUM2 && unsharedBlockTableShape.GetDim(0) == batchSize &&
+       unsharedBlockTableShape.GetDim(1) == 1);
+  bool invalidShape = batchSize <= 0 || beamSize <= 0 || totalTokensQ != batchSize * beamSize ||
+                      qHeads <= 0 || kvHeads <= 0 || qHeads % kvHeads != 0 ||
+                      sharedKeyBlockShape.GetDim(2) != headDim ||
+                      !validUnsharedBlockTableShape ||
+                      unsharedKeyBlockShape.GetDim(2) != kvHeads ||
+                      unsharedKeyBlockShape.GetDim(4) != headDim;
+  if (invalidShape) {
+    OP_LOGE(tiling_context_->GetNodeName(), "inconsistent shapes for unshared paged layout.");
+    return ge::GRAPH_FAILED;
+  }
+
+  float scaleValue = static_cast<float>(1.0 / std::sqrt(1.0 * headDim));
+  auto attrs = tiling_context_->GetAttrs();
+  if (attrs != nullptr) {
+    const auto* attr_scale_value = attrs->GetAttrPointer<float>(SCALE_VALUE_ATTR_INDEX);
+    if (attr_scale_value != nullptr && *attr_scale_value > 0.0f) {
+      scaleValue = *attr_scale_value;
+    }
+  }
+
+  tiling_data_.baseInfo.set_batchSize(batchSize);
+  tiling_data_.baseInfo.set_beamSize(beamSize);
+  tiling_data_.baseInfo.set_qHeads(qHeads);
+  tiling_data_.baseInfo.set_kvHeads(kvHeads);
+  tiling_data_.baseInfo.set_groupSize(qHeads / kvHeads);
+  tiling_data_.baseInfo.set_headDim(headDim);
+  tiling_data_.baseInfo.set_scaleValue(scaleValue);
+  tiling_data_.baseInfo.set_totalTokensQ(totalTokensQ);
   tiling_data_.baseInfo.set_sharedKvTokens(sharedKvTokens);
   tiling_data_.baseInfo.set_maxDecodeStep(maxDecodeStep);
+  tiling_data_.sharedInfo.set_blockSize(0);
+  tiling_data_.sharedInfo.set_maxBlocksPerBatch(0);
   return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus TilingXAttentionFunc::ParseInputShapeAndAttrs()
+{
+  auto dType = tiling_context_->GetInputTensor(QUERY)->GetDataType();
+  if (dType == ge::DT_FLOAT16) {
+    inputDtype = 0;
+  } else if (dType == ge::DT_BF16) {
+    inputDtype = 1;
+  } else {
+    OP_LOGE(tiling_context_->GetNodeName(), "xAttention supports only fp16 and bf16.");
+    return ge::GRAPH_FAILED;
+  }
+
+  isSharedPaged = tiling_context_->GetOptionalInputShape(InputIndex::SHARED_BLOCK_TABLE) != nullptr;
+  isUnsharedPaged = tiling_context_->GetOptionalInputShape(InputIndex::UNSHARED_BLOCK_TABLE) != nullptr;
+  if (isSharedPaged && !isUnsharedPaged) {
+    return FillBasicTilingData();
+  }
+  if (!isSharedPaged && isUnsharedPaged) {
+    return FillBasicTilingData4NewKind();
+  }
+  OP_LOGE(tiling_context_->GetNodeName(),
+          "unexpected input combination between shared_block_table and unshared_block_table.");
+  return ge::GRAPH_FAILED;
+}
+
+uint64_t TilingXAttentionFunc::GetTilingKey() const
+{
+  return (uint64_t(isSharedPaged) << 3) |
+         (uint64_t(isUnsharedPaged) << 2) |
+         (uint64_t(inputDtype) << 1);
 }
 
 ge::graphStatus TilingXAttentionFunc::RunTiling()
@@ -250,7 +372,7 @@ ge::graphStatus TilingXAttentionFunc::RunTiling()
   platformInfo.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
 
   BalanceAicore();
-  auto ret = FillBasicTilingData();
+  auto ret = ParseInputShapeAndAttrs();
   if (ret != ge::GRAPH_SUCCESS) {
     OP_LOGE(tiling_context_->GetNodeName(), "fill basic tiling failed.");
     return ge::GRAPH_FAILED;
@@ -266,8 +388,7 @@ ge::graphStatus TilingXAttentionFunc::RunTiling()
                             tiling_context_->GetRawTilingData()->GetCapacity());
   tiling_context_->GetRawTilingData()->SetDataSize(tiling_data_.GetDataSize());
   tiling_context_->SetBlockDim(cubeCoreNum);
-
-  // tiling_context_->SetTilingKey(GetTilingKey());
+  tiling_context_->SetTilingKey(GetTilingKey());
 
   return ge::GRAPH_SUCCESS;
 }

@@ -390,8 +390,11 @@ class TestFlashAttentionInfer:
                 dtype=torch_dtype
             ).uniform_(kv_min_range, kv_max_range))
             max_num_blocks_per_seq = (max_k_seqlen + gen_data_params.block_size - 1) // gen_data_params.block_size
+            physical_block_ids = list(range(gen_data_params.num_blocks))
+            random.shuffle(physical_block_ids)
             for i in range(request_num):
-                block_table = [max_num_blocks_per_seq * i + j for j in range(max_num_blocks_per_seq)]
+                block_start = max_num_blocks_per_seq * i
+                block_table = physical_block_ids[block_start : block_start + max_num_blocks_per_seq]
                 block_tables.append(block_table)
         else:
             # Continuous format: [num_shared_kv, kv_heads, head_dim]
@@ -494,6 +497,11 @@ class TestFlashAttentionInfer:
         assert torch.allclose(npu_res, golden_res, atol=0.001, rtol=0.001)
 
 @pytest.mark.parametrize("dtype,request_num,beam_size,q_seqlen,kv_seqlen,unshared_seqlen,num_head,kv_heads,embedding_size,block_size,is_varied_len,mask_type,shared_kv_type,unshared_kv_type", [
+    (torch.bfloat16, 1, 128, 1, 1024, 2, 32, 8, 128, 128, 0, 0, 1, 0),
+    (torch.bfloat16, 2, 128, 1, 1024, 2, 32, 8, 128, 128, 1, 0, 1, 0),
+    (torch.bfloat16, 1, 128, 1, 300, 2, 32, 8, 128, 256, 0, 0, 1, 0),
+    (torch.bfloat16, 2, 128, 1, 640, 2, 32, 8, 128, 256, 1, 0, 1, 0),
+    (torch.bfloat16, 1, 128, 1, 768, 2, 32, 8, 128, 384, 0, 0, 1, 0),
     (torch.bfloat16, 1, 128, 1, 1024, 2, 32, 8, 128, 128, 0, 0, 0, 1),
     (torch.bfloat16, 1, 256, 1, 1024, 2, 32, 8, 128, 128, 0, 0, 0, 1),
     (torch.bfloat16, 1, 512, 1, 1024, 2, 32, 8, 128, 128, 0, 0, 0, 1),

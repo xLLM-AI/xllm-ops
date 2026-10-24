@@ -36,7 +36,8 @@ template <
     class BlockMmadPV,
     class EpilogueFASoftmax,
     class EpilogueFARescale,
-    typename KVLEN_T>
+    typename KVLEN_T,
+    bool SHARED_PAGED>
 class SharedFaInferKernel {
     public:
         using ArchTag = typename BlockMmadQK::ArchTag;
@@ -100,6 +101,9 @@ class SharedFaInferKernel {
             }
 
             sharedKvLensGm.SetGlobalBuffer((__gm__ KVLEN_T *)params.sharedKvLens);
+            if constexpr (SHARED_PAGED) {
+                sharedBlockTableGm.SetGlobalBuffer((__gm__ int32_t *)params.sharedBlockTable);
+            }
 
             batchSize = tilingData->baseInfo.batchSize;
             beamSize = tilingData->baseInfo.beamSize;
@@ -110,6 +114,8 @@ class SharedFaInferKernel {
             scaleValue = tilingData->baseInfo.scaleValue;
             totalTokensQ = tilingData->baseInfo.totalTokensQ;
             sharedKvTokens = tilingData->baseInfo.sharedKvTokens;
+            sharedBlockSize = tilingData->sharedInfo.blockSize;
+            maxBlocksPerBatch = tilingData->sharedInfo.maxBlocksPerBatch;
 
             coreNum = tilingData->sharedInfo.usedCoreNum;
             coreIdx = AscendC::GetBlockIdx();
@@ -191,7 +197,7 @@ class SharedFaInferKernel {
                     GetQTaskInfo(taskArgs, qTaskId);
                     taskArgList[taskId % 4] = taskArgs;
                     kvLen = taskArgs.actualKvLen;
-                    kvBlockNum = (kvLen + kvSeqlenTemplateType - 1) / kvSeqlenTemplateType;
+                    kvBlockNum = GetKvSegmentNum(kvLen);
                 }
 
                 for (int32_t kvBlockId = 0; kvBlockId < kvBlockNum; kvBlockId++) {
@@ -346,6 +352,7 @@ class SharedFaInferKernel {
         static constexpr uint8_t SYNC_MODE = 4;
         Arch::Resource<ArchTag> resource;
         AscendC::GlobalTensor<KVLEN_T> sharedKvLensGm;
+        AscendC::GlobalTensor<int32_t> sharedBlockTableGm;
         AscendC::LocalTensor<ElementS> qkTensorList[2];
         AscendC::LocalTensor<ElementP> pL1TensorList[3];
         AscendC::LocalTensor<ElementOTmp> pvTensorList[2];
@@ -364,6 +371,8 @@ class SharedFaInferKernel {
         int32_t headDim{0};
         int32_t totalTokensQ{0};
         int32_t sharedKvTokens{0};
+        int32_t sharedBlockSize{0};
+        int32_t maxBlocksPerBatch{0};
         int64_t coreNum;
         int64_t coreIdx;
         int64_t subVecIdx{0};
@@ -399,12 +408,27 @@ class SharedFaInferKernel {
                 taskArgs.maxOutOffset = (taskArgs.qCoord + taskArgs.halfBlockQOffset) * qHeads + qHeadId;
             }
 
-            int32_t batchOffset = 0;
-            for (int bId = 0; bId < batchId; bId++) {
-                batchOffset += sharedKvLensGm.GetValue(bId);
+            if constexpr (!SHARED_PAGED) {
+                int32_t batchOffset = 0;
+                for (int bId = 0; bId < batchId; bId++) {
+                    batchOffset += sharedKvLensGm.GetValue(bId);
+                }
+                taskArgs.kvBatchOffset = batchOffset;
+            }
+        }
+
+        CATLASS_DEVICE int32_t GetKvSegmentNum(int32_t actualKvLen) const {
+            if constexpr (!SHARED_PAGED) {
+                return CeilDiv(actualKvLen, static_cast<int32_t>(kvSeqlenTemplateType));
             }
 
-            taskArgs.kvBatchOffset = batchOffset;
+            // A2/A3 paged kernels define a valid page as an integer multiple of
+            // the 128-row MMA tile. Split such a page into 128-row segments.
+            int32_t segmentsPerPage = CeilDiv(sharedBlockSize, static_cast<int32_t>(kvSeqlenTemplateType));
+            int32_t fullPages = actualKvLen / sharedBlockSize;
+            int32_t tailLength = actualKvLen % sharedBlockSize;
+            return fullPages * segmentsPerPage +
+                   CeilDiv(tailLength, static_cast<int32_t>(kvSeqlenTemplateType));
         }
 
         CATLASS_DEVICE void GetKvTaskInfo(SharedInfer::TaskArgs &taskArgs, int32_t kvBlockId, int32_t kvBlockNum, int32_t taskId) {
@@ -414,8 +438,26 @@ class SharedFaInferKernel {
             bool isLastKv = kvBlockId == kvBlockNum - 1;
             taskArgs.taskId = taskId;
             taskArgs.kvBlockId = kvBlockId;
-            taskArgs.blockKvLen = isLastKv ? (actualKvLen - kvBlockId * kvSeqlenTemplateType) : kvSeqlenTemplateType;
-            taskArgs.kvCoord = taskArgs.kvBatchOffset + kvBlockId * kvSeqlenTemplateType;
+            if constexpr (SHARED_PAGED) {
+                int32_t segmentsPerPage = CeilDiv(sharedBlockSize, static_cast<int32_t>(kvSeqlenTemplateType));
+                int32_t pageIndex = kvBlockId / segmentsPerPage;
+                int32_t offsetInPage =
+                    (kvBlockId - pageIndex * segmentsPerPage) * static_cast<int32_t>(kvSeqlenTemplateType);
+                int32_t logicalStart = pageIndex * sharedBlockSize + offsetInPage;
+                int32_t remaining = actualKvLen - logicalStart;
+                taskArgs.blockKvLen =
+                    remaining < static_cast<int32_t>(kvSeqlenTemplateType)
+                        ? remaining
+                        : static_cast<int32_t>(kvSeqlenTemplateType);
+
+                int32_t tableIndex = taskArgs.batchId * maxBlocksPerBatch + pageIndex;
+                int32_t physicalBlock = sharedBlockTableGm.GetValue(tableIndex);
+                taskArgs.kvCoord = physicalBlock * sharedBlockSize + offsetInPage;
+            } else {
+                taskArgs.blockKvLen = isLastKv ? (actualKvLen - kvBlockId * kvSeqlenTemplateType)
+                                               : kvSeqlenTemplateType;
+                taskArgs.kvCoord = taskArgs.kvBatchOffset + kvBlockId * kvSeqlenTemplateType;
+            }
             taskArgs.isFirstKv = isFirstKv;
             taskArgs.isUpdate = isUpdate;
             taskArgs.isLastKv = isLastKv;

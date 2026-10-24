@@ -36,7 +36,8 @@ template <
     class BlockMmadPV,
     class EpiloueSoftmax,
     typename KVLEN_T,
-    typename TABLE_T>
+    typename TABLE_T,
+    bool UNSHARED_PAGED>
 class UnSharedInferKernel {
     public:
         using ArchTag = typename BlockMmadQK::ArchTag;
@@ -85,7 +86,9 @@ class UnSharedInferKernel {
 
             decodeStepGm.SetGlobalBuffer((__gm__ KVLEN_T *)params.decodeStep);
             unsharedKvSeqLen = static_cast<int32_t>(decodeStepGm.GetValue(0));
-            blockTableGm.SetGlobalBuffer((__gm__ TABLE_T *)params.unsharedBlockTable);
+            if constexpr (UNSHARED_PAGED) {
+                blockTableGm.SetGlobalBuffer((__gm__ TABLE_T *)params.unsharedBlockTable);
+            }
 
             batchSize = tilingData->baseInfo.batchSize;
             beamSize = tilingData->baseInfo.beamSize;
@@ -340,7 +343,10 @@ class UnSharedInferKernel {
             taskArgs.taskIdMod3 = taskId % 3;
 
             int32_t batchId = groupTaskId / perBatchTaskNum;
-            int32_t cacheBlockId = blockTableGm.GetValue(batchId);
+            int32_t cacheBlockId = batchId;
+            if constexpr (UNSHARED_PAGED) {
+                cacheBlockId = blockTableGm.GetValue(batchId);
+            }
             int32_t groupCountBlockId = groupTaskId % perBatchTaskNum;
             
             taskArgs.batchId = batchId;
