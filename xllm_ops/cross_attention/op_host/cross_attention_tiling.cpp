@@ -34,6 +34,8 @@ enum InputIndex {
 };
 
 constexpr uint32_t Q_S_BLOCK_TILE = 128;
+// Maximum number of Q rows (qSBlockSize * qNBlockSize) one QK Mmad tile can hold.
+constexpr uint32_t MAX_ROWS_PER_QK_TILE = 16;
 constexpr uint32_t BLOCK_SIZE = 128;
 constexpr int32_t WORKSPACE_BLOCK_SIZE_DB = 128 * 128 * 4; // row * col * blockStackNum
 constexpr int32_t SCALE_VALUE_ATTR_INDEX = 0;
@@ -94,10 +96,14 @@ void TilingCrossAttentionFunc::FillSplitCoreTilingData()
   uint32_t totalTaskNum = 0;
   uint32_t groupSize = tiling_data_.get_groupSize();
   uint32_t qSeqlen = tiling_data_.get_qSeqlen();
-  uint32_t curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
+  uint32_t curQNBlockTile = std::min<uint32_t>(GetQNBlockTile(qSeqlen, groupSize), MAX_ROWS_PER_QK_TILE);
   uint32_t qNBlockNumPerGroup = (groupSize + curQNBlockTile - 1) / curQNBlockTile;
   uint32_t curQNBlockNum = qNBlockNumPerGroup * tiling_data_.get_kvHeads();
-  uint32_t curQSBlockTile = Q_S_BLOCK_TILE;
+  // Each QK task feeds one Mmad tile whose row count is qSBlockSize * qNBlockSize.
+  // The Mmad/copy-out path only handles up to MAX_ROWS_PER_QK_TILE rows, so cap the
+  // q-sequence tile per task to keep the product within that limit.
+  uint32_t curQSBlockTile = std::min(Q_S_BLOCK_TILE,
+                                     std::max<uint32_t>(1, MAX_ROWS_PER_QK_TILE / curQNBlockTile));
   uint32_t curQSBlockNum = (qSeqlen + curQSBlockTile - 1) / curQSBlockTile;
   uint32_t perBatchTaskNum = curQNBlockNum * curQSBlockNum;
   totalTaskNum = perBatchTaskNum * tiling_data_.get_batch();
