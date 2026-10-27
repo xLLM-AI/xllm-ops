@@ -20,7 +20,6 @@ limitations under the License.
 #include "catlass/arch/cross_core_sync.hpp"
 #include "catlass/arch/resource.hpp"
 #include "catlass/catlass.hpp"
-#include "catlass/debug.hpp"
 #include "catlass/epilogue/block/block_epilogue.hpp"
 #include "catlass/epilogue/dispatch_policy.hpp"
 #include "catlass/gemm/block/block_mmad.hpp"

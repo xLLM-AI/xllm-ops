@@ -15,11 +15,17 @@ if (BUILD_OPEN_PROJECT)
     )
 endif()
 
+# CrossAttention kernel uses the AtlasA2 catlass FA building blocks (Arch::AtlasA2,
+# MmadAtlasA2FAIQK/PV ...). Those blocks live behind CATLASS_ARCH == 2201, so the
+# define is required for every target, including ascend950.
+set(CA_CATLASS_ARCH_DEF "-DCATLASS_ARCH=2201")
+
 add_ops_compile_options(
     OP_NAME CrossAttention
     OPTIONS --cce-auto-sync=on
             -Wno-deprecated-declarations
             -Werror
+            ${CA_CATLASS_ARCH_DEF}
             -I${CANN_3RD_LIB_PATH}/catlass/include
             -I${CMAKE_CURRENT_LIST_DIR}/../../../
 )
