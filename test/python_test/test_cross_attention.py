@@ -208,3 +208,56 @@ def test_cross_attention(dtype, q_head_num, kv_head_num, head_dim, batch,
         compare_tensors(attn_golden, npu_res, atol, rtol)
     assert flag
 
+
+
+def test_cross_attention_specific_shape():
+    # Fixed-shape case: Q [1,256,16,128] BF16; K/V [3,128,4,128] BF16;
+    # block_table [1,1] INT32; actual_kv_lens [1] INT64 (68);
+    # scale = 1/sqrt(128) = 0.08838834764831845
+    try:
+        torch_npu.npu.set_device(0)
+    except Exception as e:
+        pytest.skip(f"NPU device not available: {e}")
+
+    torch.manual_seed(1234)
+
+    batch = 1
+    q_len = 256
+    kv_len = 68
+    block_size = 128
+    block_num = 3
+    # actual_kv_lens=68 only needs ceil(68,128)=1 block per request
+    max_block_num_per_req = ceil(kv_len, block_size)
+    q_head_num = 16
+    kv_head_num = 4
+    head_dim = 128
+    dtype = torch.bfloat16
+
+    query, key_cache, value_cache, block_tables, actual_kv_lens, scale = gen_input_data(
+        batch, q_len, kv_len, max_block_num_per_req, block_size, block_num,
+        q_head_num, kv_head_num, head_dim, dtype)
+
+    assert query.shape == (1, 256, 16, 128), f"query shape {query.shape}"
+    assert key_cache.shape == (3, 128, 4, 128), f"key_cache shape {key_cache.shape}"
+    assert value_cache.shape == (3, 128, 4, 128), f"value_cache shape {value_cache.shape}"
+    assert block_tables.shape == (1, 1), f"block_tables shape {block_tables.shape}"
+    assert actual_kv_lens.tolist() == [68], f"actual_kv_lens {actual_kv_lens}"
+
+    attn_golden = cpu_cross_attention(query, key_cache, value_cache, block_tables, actual_kv_lens, scale)
+
+    q_npu = query.npu()
+    key_npu = key_cache.npu()
+    value_npu = value_cache.npu()
+    block_table_npu = block_tables.npu()
+    kv_len_npu = actual_kv_lens.npu()
+
+    atol = 1e-2
+    rtol = 1e-2
+
+    npu_res = custom_ops.cross_attention_npu(q_npu, key_npu, value_npu, block_table_npu, kv_len_npu, scale)
+    npu_res = npu_res.cpu()
+
+    flag = torch.allclose(attn_golden, npu_res, atol=atol, rtol=rtol, equal_nan=True)
+    if not flag:
+        compare_tensors(attn_golden, npu_res, atol, rtol)
+    assert flag
