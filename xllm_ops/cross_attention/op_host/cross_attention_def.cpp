@@ -52,7 +52,7 @@ public:
         this->Attr("scale_value").AttrType(OPTIONAL).Float(0.0);
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");
-        this->AICore().AddConfig("ascend910_95");
+        this->AICore().AddConfig("ascend950");
     }
 };
 
