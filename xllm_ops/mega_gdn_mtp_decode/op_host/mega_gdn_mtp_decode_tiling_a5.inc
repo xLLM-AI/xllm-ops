@@ -271,14 +271,16 @@ static ge::graphStatus MegaGdnMtpDecodeTiling(
         info.speculative_tokens == kA5DeferredNormSpeculativeTokens)) &&
       ub_size >= kDeferredNormRequiredUbBytes;
   // Keep the row-streaming recurrent experiment isolated from the proven
-  // MTP keys.  These are precisely the A5 B4/MTP3 model geometries exercised
-  // by Qwen3.5-2B TP1 and Qwen3.5-27B TP1/TP2.  A2/A3, non-FLA layout, other
-  // batches/token counts and all other head geometries retain their old key.
+  // MTP keys. B5/NK16/NV48 also retains the measured C5 dispatch to key 403.
+  // A2/A3, non-FLA layout, other batches/token counts and all other head
+  // geometries retain their old key.
   const bool use_a5_regbase_two_owner =
       use_a5_two_owner_qk_group && info.speculative_tokens == 3;
   const bool use_a5_regbase_deferred =
       *fla_ssm_state_layout && is_ascend950 && use_deferred_norm &&
-      info.speculative_tokens == 3 && info.batch_size == 4 &&
+      info.speculative_tokens == 3 &&
+      (info.batch_size == 4 ||
+       (info.batch_size == 5 && info.num_v_heads == 48)) &&
       info.num_k_heads == 16 &&
       (info.num_v_heads == 16 || info.num_v_heads == 48);
   uint64_t tiling_key = GetTilingKey(info.speculative_tokens);
