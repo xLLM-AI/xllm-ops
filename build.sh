@@ -391,6 +391,14 @@ build_flash_linear_attention() {
     # 从 build.sh 的 SOC 解析结果中取第一个芯片类型传给子脚本。
     # SOC_VERSION_LIST 由 run_build 中的 resolve_soc_version_list 填充（本函数在其后调用）。
     local soc="${SOC_VERSION_LIST[0]}"
+
+    # 310P (ascend310p) 目标没有 flash-linear-attention-npu 发布产物（子模块仅支持 A2/A3/A5），
+    # 无条件构建会因 FLA_NPU_SOC 找不到对应 tier 而失败，故跳过并提示。
+    if [[ "${soc}" == "ascend310p" ]]; then
+        echo ">>> Skip flash-linear-attention-npu build: ascend310p has no published flash-linear-attention-npu tier"
+        return 0
+    fi
+
     local -a fla_args=()
     if [ -z "${soc}" ]; then
         echo "[WARN] SOC not resolved, flash-linear-attention-npu falls back to sub-script default ascend910_93"
