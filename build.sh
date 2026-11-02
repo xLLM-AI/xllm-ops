@@ -33,7 +33,9 @@ show_help() {
     echo '                       e.g. -c "ascend910b" or -c "ascend910b;ascend310p"'
     echo '  --build-transformer  Build ops-transformer third-party ops (default: enabled)'
     echo '  --no-build-transformer  Skip building ops-transformer third-party ops'
+    echo '  --no-install-transformer  Build ops-transformer but do not install its artifacts'
     echo '  --no-build-flash     Skip building flash-linear-attention-npu third-party ops'
+    echo '  --no-install-flash   Build flash-linear-attention-npu but do not install its wheel'
     echo "  -h, --help          Show this help message"
     echo ""
     echo "Examples:"
@@ -52,6 +54,9 @@ parse_args() {
     OP_NAME=""
     COMPUTE_UNIT=""
     BUILD_TRANSFORMER="true"
+    INSTALL_TRANSFORMER="true"
+    BUILD_FLASH="true"
+    INSTALL_FLASH="true"
 
     # 第一轮：解析 --key=value 形式参数
     for arg in "$@"; do
@@ -63,14 +68,19 @@ parse_args() {
                 COMPUTE_UNIT="${arg#*=}"
                 ;;
             --build-transformer)
-    BUILD_TRANSFORMER="true"
-    BUILD_FLASH="true"
+                BUILD_TRANSFORMER="true"
                 ;;
             --no-build-transformer)
                 BUILD_TRANSFORMER="false"
                 ;;
+            --no-install-transformer)
+                INSTALL_TRANSFORMER="false"
+                ;;
             --no-build-flash)
                 BUILD_FLASH="false"
+                ;;
+            --no-install-flash)
+                INSTALL_FLASH="false"
                 ;;
             -n|--op-name)
                 # 需要取下一个参数，在第二轮中处理
@@ -279,7 +289,12 @@ build_ops_transformer() {
     fi
 
     echo ">>> Building ops-transformer for SOC=${soc_str}"
-    stdbuf -oL bash "${transformer_script}" --soc="${soc_str}" all
+    local -a transformer_args=(--soc="${soc_str}" all)
+    if [[ "${INSTALL_TRANSFORMER}" != "true" ]]; then
+        echo "[INFO] ops-transformer artifact installation disabled (--no-install-transformer)"
+        transformer_args+=(--no-install)
+    fi
+    stdbuf -oL bash "${transformer_script}" "${transformer_args[@]}"
 }
 
 # ============================================================================
@@ -376,14 +391,19 @@ build_flash_linear_attention() {
     # 从 build.sh 的 SOC 解析结果中取第一个芯片类型传给子脚本。
     # SOC_VERSION_LIST 由 run_build 中的 resolve_soc_version_list 填充（本函数在其后调用）。
     local soc="${SOC_VERSION_LIST[0]}"
+    local -a fla_args=()
     if [ -z "${soc}" ]; then
         echo "[WARN] SOC not resolved, flash-linear-attention-npu falls back to sub-script default ascend910_93"
-        bash "${fla_script}"
-        return 0
+    else
+        echo "[INFO] build flash-linear-attention-npu (SOC=${soc})"
+        fla_args+=(--soc="${soc}")
     fi
 
-    echo "[INFO] build flash-linear-attention-npu (SOC=${soc})"
-    bash "${fla_script}" --soc="${soc}"
+    if [[ "${INSTALL_FLASH}" != "true" ]]; then
+        echo "[INFO] flash-linear-attention-npu wheel installation disabled (--no-install-flash)"
+        fla_args+=(--no-install)
+    fi
+    bash "${fla_script}" "${fla_args[@]}"
 }
 
 # ============================================================================
