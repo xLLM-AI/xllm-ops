@@ -32,6 +32,8 @@ SOC="${FLA_NPU_SOC:-ascend910_93}"
 BUILD=1
 # 是否安装 wheel，默认安装（1）；--no-install 时跳过安装
 INSTALL=1
+FLA_NPU_DISABLE_LOCAL_VERSION="${FLA_NPU_DISABLE_LOCAL_VERSION:-TRUE}"
+export FLA_NPU_DISABLE_LOCAL_VERSION
 # 需要编译的算子名称（数组）。默认为 KDA 全部算子；置空表示编译全部算子。
 # 通过 --ops=op1,op2,... 指定；也可用环境变量 NPU_OPS（逗号分隔）初始化。
 NPU_OPS_DEFAULT=(

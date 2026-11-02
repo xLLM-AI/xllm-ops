@@ -43,8 +43,10 @@ SOC="ascend910_93"
 # 自定义算子包 vendor 名称 (编译参数 --vendor_name 使用, CMake 会追加 _transformer 后缀)
 VENDOR_NAME="custom"
 
-# 并行编译线程数 (自动获取当前 CPU 核数)
-JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 16)"
+JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 32)"
+if [[ "${JOBS}" -lt 32 ]]; then
+    JOBS=32
+fi
 
 # 编译优化级别 (默认 O3)
 OPT_LEVEL="O3"
@@ -52,6 +54,8 @@ OPT_LEVEL="O3"
 # 是否将 torch_extension 打包进 .run 安装包 (默认开启)
 # 开启时: 先构建 whl 到 torch_extension/dist/, 再由 --pkg 打包进同一个 .run 包
 BUILD_TORCH_EXTENSION="true"
+# Whether to install build artifacts (default: enabled); --no-install skips it.
+INSTALL_ARTIFACTS="true"
 
 # -----------------------------------------------------------------------------
 # 路径定义
@@ -214,6 +218,14 @@ install_package() {
     echo ""
 }
 
+install_artifacts() {
+    if [[ "${INSTALL_ARTIFACTS}" == "true" ]]; then
+        install_package
+    else
+        echo "[INFO] skip artifact installation (--no-install)"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 # 函数: 补写 vendors/config.ini
 #
@@ -278,6 +290,12 @@ parse_args() {
             --no-torch-extension)
                 BUILD_TORCH_EXTENSION="false"
                 ;;
+            --no-install)
+                INSTALL_ARTIFACTS="false"
+                ;;
+            --install)
+                INSTALL_ARTIFACTS="true"
+                ;;
             install|build|all)
                 ACTION="${arg}"
                 ;;
@@ -333,7 +351,7 @@ main() {
     case "${action}" in
         install)
             install_deps
-            install_package
+            install_artifacts
             ;;
         build)
             build_ops
@@ -341,15 +359,16 @@ main() {
         all)
             install_deps
             build_ops
-            install_package
+            install_artifacts
             ;;
         *)
-            echo "Usage: bash build_ops_transformer.sh [install|build|all] [--soc=xxx] [--torch-extension|--no-torch-extension]"
+            echo "Usage: bash build_ops_transformer.sh [install|build|all] [--soc=xxx] [--torch-extension|--no-torch-extension] [--no-install]"
             echo "  install  Install dependencies and install build artifacts"
             echo "  build    Build only"
             echo "  all      Install dependencies + build + install artifacts (default)"
             echo "  --torch-extension      Package torch_extension whl into the .run package (enabled by default)"
             echo "  --no-torch-extension   Do not package torch_extension whl"
+            echo "  --no-install           Do not install built artifacts"
             exit 1
             ;;
     esac
