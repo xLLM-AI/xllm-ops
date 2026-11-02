@@ -43,8 +43,11 @@ SOC="ascend910_93"
 # 自定义算子包 vendor 名称 (编译参数 --vendor_name 使用, CMake 会追加 _transformer 后缀)
 VENDOR_NAME="custom"
 
-# 并行编译线程数 (自动获取当前 CPU 核数)
-JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 16)"
+# 并行编译线程数 (自动获取当前 CPU 核数，且至少为 32)
+JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 32)"
+if [[ "${JOBS}" -lt 32 ]]; then
+    JOBS=32
+fi
 
 # 编译优化级别 (默认 O3)
 OPT_LEVEL="O3"
