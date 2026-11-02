@@ -208,17 +208,18 @@ limitations under the License.
  #undef DEFINE_ENUM
  };
  
- #define GET_OP_API_FUNC(apiName) \
+
+#define GET_OP_API_FUNC(apiName) \
    reinterpret_cast<_##apiName>(GetOpApiFuncAddr(#apiName))
- 
- #define MEMCPY_TO_BUF(data_expression, size_expression)               \
+
+#define MEMCPY_TO_BUF(data_expression, size_expression)               \
    if (g_hashOffset + (size_expression) > kHashBufSize) {              \
      g_hashOffset = kHashBufMaxSize;                                   \
      return;                                                           \
    }                                                                   \
    memcpy(g_hashBuf + g_hashOffset, data_expression, size_expression); \
    g_hashOffset += size_expression;
- 
+
  inline const char *GetOpApiLibName(void) {
      return "libopapi.so";
  }
@@ -362,6 +363,10 @@ limitations under the License.
      acl_data_type = static_cast<aclDataType>(35);
    } else if (scalar_data_type == at::ScalarType::Float8_e4m3fn) {
      acl_data_type = static_cast<aclDataType>(36);
+#if __has_include(<c10/util/Float8_e8m0fnu.h>)
+   } else if (scalar_data_type == at::ScalarType::Float8_e8m0fnu) {
+     acl_data_type = static_cast<aclDataType>(37);  // ACL_FLOAT8_E8M0
+#endif
    } else {
      auto idx = static_cast<int64_t>(scalar_data_type);
      acl_data_type = (idx >= 0 && idx <= static_cast<int64_t>(at::ScalarType::NumOptions))
@@ -529,6 +534,10 @@ limitations under the License.
       return static_cast<aclDataType>(35); // ACL_FLOAT8_E5M2
     } else if (scalarType == at::ScalarType::Float8_e4m3fn) {
       return static_cast<aclDataType>(36); // ACL_FLOAT8_E4M3FN
+#if __has_include(<c10/util/Float8_e8m0fnu.h>)
+    } else if (scalarType == at::ScalarType::Float8_e8m0fnu) {
+      return static_cast<aclDataType>(37);  // ACL_FLOAT8_E8M0
+#endif
     }
     auto idx = static_cast<int64_t>(scalarType);
     if (idx < 0 || idx > static_cast<int64_t>(at::ScalarType::NumOptions)) {
@@ -536,12 +545,12 @@ limitations under the License.
     }
     return kATenScalarTypeToAclDataTypeTable[idx];
  }
- 
+
  template <typename T>
  T ConvertType(T value) {
    return value;
  }
- 
+
  template <typename Tuple, size_t... I>
  auto ConvertToOpApiFunc(const Tuple &params, void *opApiAddr,
                          std::index_sequence<I...>) {
@@ -735,4 +744,4 @@ limitations under the License.
    } while (false)
  
  #endif  // PYTORCH_NPU_HELPER_HPP_
- 
+
