@@ -21,28 +21,30 @@ extern "C" {
 // descriptor[:,3] addresses the persistent selection/resident slot.
 // All buffers are caller-owned contiguous ND device views. Host KV views
 // must wrap an already registered/mapped Host allocation. No implicit copy.
-// Consume a same-step plan from DsaKvOffloadingUpdateRopeWithPlan without modifying
-// it. descriptor/currentMap must still describe that plan's logical query rows.
+// Consume a same-step plan from DsaKvOffloadingUpdateRopeWithPlan without
+// modifying it. descriptor/currentMap must still describe that plan's logical
+// query rows.
 __attribute__((visibility("default"))) aclnnStatus
-aclnnDsaKvOffloadingServeRopePlannedGetWorkspaceSize(aclTensor* hostLatent,
-                                        aclTensor* hostRope,
-                                        const aclTensor* blockTable,
-                                        const aclTensor* descriptor,
-                                        const aclTensor* currentMap,
-                                        const aclTensor* planTokens,
-                                        const aclTensor* planSlots,
-                                        const aclTensor* appendSlots,
-                                        const aclTensor* currentLatent,
-                                        const aclTensor* currentRope,
-                                        aclTensor* selection,
-                                        aclTensor* selectionRope,
-                                        uint64_t* workspaceSize,
-                                        aclOpExecutor** executor);
+aclnnDsaKvOffloadingServeRopePlannedGetWorkspaceSize(
+    aclTensor* hostLatent,
+    aclTensor* hostRope,
+    const aclTensor* blockTable,
+    const aclTensor* descriptor,
+    const aclTensor* currentMap,
+    const aclTensor* planTokens,
+    const aclTensor* planSlots,
+    const aclTensor* appendSlots,
+    const aclTensor* currentLatent,
+    const aclTensor* currentRope,
+    aclTensor* selection,
+    aclTensor* selectionRope,
+    uint64_t* workspaceSize,
+    aclOpExecutor** executor);
 __attribute__((visibility("default"))) aclnnStatus
 aclnnDsaKvOffloadingServeRopePlanned(void* workspace,
-                        uint64_t workspaceSize,
-                        aclOpExecutor* executor,
-                        aclrtStream stream);
+                                     uint64_t workspaceSize,
+                                     aclOpExecutor* executor,
+                                     aclrtStream stream);
 #ifdef __cplusplus
 }
 #endif

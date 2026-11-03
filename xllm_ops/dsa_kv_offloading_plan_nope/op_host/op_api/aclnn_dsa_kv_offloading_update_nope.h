@@ -30,28 +30,29 @@ extern "C" {
 // outputs have [rows, 1, 2176] shape and must not alias any other argument.
 __attribute__((visibility("default"))) aclnnStatus
 aclnnDsaKvOffloadingUpdateNopeGetWorkspaceSize(aclTensor* hostLatent,
-                                  const aclTensor* blockTable,
-                                  const aclTensor* descriptor,
-                                  const aclTensor* currentMap,
-                                  const aclTensor* topk,
-                                  const aclTensor* appendSlots,
-                                  const aclTensor* currentLatent,
-                                  aclTensor* selection,
-                                  aclTensor* indices,
-                                  aclTensor* lengths,
-                                  aclTensor* selectionTable,
-                                  aclTensor* residentTokens,
-                                  aclTensor* residentSlots,
-                                  aclTensor* residentCount,
-                                  aclTensor* compactIndices,
-                                  uint64_t* workspaceSize,
-                                  aclOpExecutor** executor);
+                                               const aclTensor* blockTable,
+                                               const aclTensor* descriptor,
+                                               const aclTensor* currentMap,
+                                               const aclTensor* topk,
+                                               const aclTensor* appendSlots,
+                                               const aclTensor* currentLatent,
+                                               aclTensor* selection,
+                                               aclTensor* indices,
+                                               aclTensor* lengths,
+                                               aclTensor* selectionTable,
+                                               aclTensor* residentTokens,
+                                               aclTensor* residentSlots,
+                                               aclTensor* residentCount,
+                                               aclTensor* compactIndices,
+                                               uint64_t* workspaceSize,
+                                               aclOpExecutor** executor);
 __attribute__((visibility("default"))) aclnnStatus
 aclnnDsaKvOffloadingUpdateNope(void* workspace,
-                  uint64_t workspaceSize,
-                  aclOpExecutor* executor,
-                  aclrtStream stream);
-__attribute__((visibility("default"))) int64_t aclnnDsaKvOffloadingSelectionCapacity();
+                               uint64_t workspaceSize,
+                               aclOpExecutor* executor,
+                               aclrtStream stream);
+__attribute__((visibility("default"))) int64_t
+aclnnDsaKvOffloadingSelectionCapacity();
 #ifdef __cplusplus
 }
 #endif

@@ -73,67 +73,68 @@ int main() {
   Metadata append({4}), current({4, 1, 512}, ACL_BF16);
   Metadata selection({68, 128, 1, 512}, ACL_BF16);
   assert(dsa_kv_offloading::StableCommon(host.tensor,
-                          blockTable.tensor,
-                          descriptor.tensor,
-                          map.tensor,
-                          tokens.tensor,
-                          append.tensor,
-                          current.tensor,
-                          tokens.tensor,
-                          selection.tensor));
+                                         blockTable.tensor,
+                                         descriptor.tensor,
+                                         map.tensor,
+                                         tokens.tensor,
+                                         append.tensor,
+                                         current.tensor,
+                                         tokens.tensor,
+                                         selection.tensor));
   Metadata badMap({4, 5});
   assert(!dsa_kv_offloading::StableCommon(host.tensor,
-                           blockTable.tensor,
-                           descriptor.tensor,
-                           badMap.tensor,
-                           tokens.tensor,
-                           append.tensor,
-                           current.tensor,
-                           tokens.tensor,
-                           selection.tensor));
+                                          blockTable.tensor,
+                                          descriptor.tensor,
+                                          badMap.tensor,
+                                          tokens.tensor,
+                                          append.tensor,
+                                          current.tensor,
+                                          tokens.tensor,
+                                          selection.tensor));
   Metadata badLatent({8, 128, 1, 256}, ACL_BF16);
   assert(!dsa_kv_offloading::StableCommon(badLatent.tensor,
-                           blockTable.tensor,
-                           descriptor.tensor,
-                           map.tensor,
-                           tokens.tensor,
-                           append.tensor,
-                           current.tensor,
-                           tokens.tensor,
-                           selection.tensor));
+                                          blockTable.tensor,
+                                          descriptor.tensor,
+                                          map.tensor,
+                                          tokens.tensor,
+                                          append.tensor,
+                                          current.tensor,
+                                          tokens.tensor,
+                                          selection.tensor));
   Metadata resident({4, 1, 2176}), slots({4, 1, 2176}), count({4});
   Metadata indices({4, 1, 2176}), lengths({4}), selectionTable({4, 17});
   assert(dsa_kv_offloading::StableState(tokens.tensor,
-                         selection.tensor,
-                         resident.tensor,
-                         slots.tensor,
-                         count.tensor,
-                         indices.tensor,
-                         lengths.tensor,
-                         selectionTable.tensor));
+                                        selection.tensor,
+                                        resident.tensor,
+                                        slots.tensor,
+                                        count.tensor,
+                                        indices.tensor,
+                                        lengths.tensor,
+                                        selectionTable.tensor));
   Metadata shortCount({3});
   assert(!dsa_kv_offloading::StableState(tokens.tensor,
-                          selection.tensor,
-                          resident.tensor,
-                          slots.tensor,
-                          shortCount.tensor,
-                          indices.tensor,
-                          lengths.tensor,
-                          selectionTable.tensor));
+                                         selection.tensor,
+                                         resident.tensor,
+                                         slots.tensor,
+                                         shortCount.tensor,
+                                         indices.tensor,
+                                         lengths.tensor,
+                                         selectionTable.tensor));
   Metadata hr({8, 128, 1, 64}, ACL_BF16);
   Metadata cr({4, 1, 64}, ACL_BF16), sr({68, 128, 1, 64}, ACL_BF16);
   assert(dsa_kv_offloading::StableRope(hr.tensor,
-                        cr.tensor,
-                        sr.tensor,
-                        host.tensor,
-                        tokens.tensor,
-                        selection.tensor));
+                                       cr.tensor,
+                                       sr.tensor,
+                                       host.tensor,
+                                       tokens.tensor,
+                                       selection.tensor));
   Metadata wrongRope({8, 128, 1, 128}, ACL_BF16);
   assert(!dsa_kv_offloading::StableRope(wrongRope.tensor,
-                         cr.tensor,
-                         sr.tensor,
-                         host.tensor,
-                         tokens.tensor,
-                         selection.tensor));
-  std::cout << "DSA_KV_OFFLOADING_METADATA_CONTRACT_OK (19 contract assertions)\n";
+                                        cr.tensor,
+                                        sr.tensor,
+                                        host.tensor,
+                                        tokens.tensor,
+                                        selection.tensor));
+  std::cout
+      << "DSA_KV_OFFLOADING_METADATA_CONTRACT_OK (19 contract assertions)\n";
 }

@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # DSA KV Offloading 算子设计
 
-[English](../en/dsa_kv_offloading_c0.md) | 简体中文
+[English](../en/dsa_kv_offloading.md) | 简体中文
 
 ## 产品支持情况
 
@@ -19,8 +19,11 @@ DSA KV offloading 系列算子把一批 query 的逻辑 top-k token 规划到 se
 与历史 miss 搬到设备侧 selection payload，供后续 sparse attention 读取。
 算子只负责规划与搬运，不实现 sparse attention 或 top-k indexer。
 
-四个 AscendC kernel 共用 `common/include/kernel/dsa_kv_offloading_plan_serve.h` 中的唯一
-规划/搬运实现，由编译期参数 `ExportPlan`、RoPE 维度和 `ImmutablePlan` 选择行为：
+四个 AscendC kernel 共用
+`xllm_ops/dsa_kv_offloading_common/op_kernel/dsa_kv_offloading_plan_serve.h` 中的唯一
+规划/搬运实现。各 kernel 显式添加该目录的 include 路径并声明共享算子依赖；安装时也将
+头文件放在各 kernel 旁，保证安装包脱离原始源码树后仍可找到共享头文件。
+由编译期参数 `ExportPlan`、RoPE 维度和 `ImmutablePlan` 选择行为：
 
 | Kernel | 职责 |
 | --- | --- |
@@ -157,12 +160,15 @@ RoPE Update 将负 miss 写入独立 `planSlots`，attention 的 `indices` 单�
 通过仓库标准入口构建这四个 kernel：
 
 ```bash
-bash build.sh --pkg \
+bash build.sh \
   -n "dsa_kv_offloading_plan_nope;dsa_kv_offloading_plan_rope;dsa_kv_offloading_serve_nope;dsa_kv_offloading_serve_rope" \
   -c ascend910_93
 ```
 
 回归测试位于
 [`test_dsa_kv_offloading_default_build.py`](../../test/python_test/test_dsa_kv_offloading_default_build.py)、
+[`test_dsa_kv_offloading_kernel_build.py`](../../test/python_test/test_dsa_kv_offloading_kernel_build.py)、
 [`test_dsa_kv_offloading.py`](../../test/python_test/test_dsa_kv_offloading.py) 和
-[`dsa_kv_offloading_contract_test.cpp`](../../test/cpp_test/dsa_kv_offloading_contract_test.cpp)。
+[`dsa_kv_offloading_contract_test.cpp`](../../test/cpp_test/dsa_kv_offloading_contract_test.cpp)、
+[`dsa_kv_offloading_stable_contract_test.cpp`](../../test/cpp_test/dsa_kv_offloading_stable_contract_test.cpp) 和
+[`dsa_kv_offloading_stable_rope_contract_test.cpp`](../../test/cpp_test/dsa_kv_offloading_stable_rope_contract_test.cpp)。

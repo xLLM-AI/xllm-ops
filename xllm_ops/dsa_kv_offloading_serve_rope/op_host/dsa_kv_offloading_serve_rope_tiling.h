@@ -23,5 +23,6 @@ TILING_DATA_FIELD_DEF(uint32_t, mapStride);
 TILING_DATA_FIELD_DEF(uint32_t, tableStride);
 TILING_DATA_FIELD_DEF(uint32_t, workerCount);
 END_TILING_DATA_DEF;
-REGISTER_TILING_DATA_CLASS(DsaKvOffloadingServeRope, DsaKvOffloadingServeRopeTilingData)
+REGISTER_TILING_DATA_CLASS(DsaKvOffloadingServeRope,
+                           DsaKvOffloadingServeRopeTilingData)
 }  // namespace optiling

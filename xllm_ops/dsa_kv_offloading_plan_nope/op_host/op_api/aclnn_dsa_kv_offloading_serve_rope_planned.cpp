@@ -78,10 +78,8 @@ extern "C" aclnnStatus aclnnDsaKvOffloadingServeRopePlannedGetWorkspaceSize(
                         planSlots,
                         appendSlots,
                         currentLatent,
-                        currentRope,
-                        selection,
-                        selectionRope),
-                 DFX_OUT());
+                        currentRope),
+                 DFX_OUT(hostLatent, hostRope, selection, selectionRope));
   auto uniqueExecutor = CREATE_EXECUTOR();
   if (uniqueExecutor.get() == nullptr) return ACLNN_ERR_INNER_CREATE_EXECUTOR;
   auto status = LaunchServe(hostLatent,
@@ -103,10 +101,11 @@ extern "C" aclnnStatus aclnnDsaKvOffloadingServeRopePlannedGetWorkspaceSize(
   uniqueExecutor.ReleaseTo(executor);
   return ACLNN_SUCCESS;
 }
-extern "C" aclnnStatus aclnnDsaKvOffloadingServeRopePlanned(void* workspace,
-                                               uint64_t workspaceSize,
-                                               aclOpExecutor* executor,
-                                               aclrtStream stream) {
+extern "C" aclnnStatus aclnnDsaKvOffloadingServeRopePlanned(
+    void* workspace,
+    uint64_t workspaceSize,
+    aclOpExecutor* executor,
+    aclrtStream stream) {
   L2_DFX_PHASE_2(aclnnDsaKvOffloadingServeRopePlanned);
   return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
 }

@@ -24,32 +24,33 @@ extern "C" {
 // planTokens/planSlots are immutable for all same-step Serve-only consumers.
 // Each layer owns separate selection payload; the plan does not share KV data.
 __attribute__((visibility("default"))) aclnnStatus
-aclnnDsaKvOffloadingUpdateRopeWithPlanGetWorkspaceSize(aclTensor* hostLatent,
-                                          const aclTensor* blockTable,
-                                          const aclTensor* descriptor,
-                                          const aclTensor* currentMap,
-                                          const aclTensor* topk,
-                                          const aclTensor* appendSlots,
-                                          const aclTensor* currentLatent,
-                                          aclTensor* selection,
-                                          aclTensor* indices,
-                                          aclTensor* lengths,
-                                          aclTensor* selectionTable,
-                                          aclTensor* residentTokens,
-                                          aclTensor* residentSlots,
-                                          aclTensor* residentCount,
-                                          aclTensor* hostRope,
-                                          const aclTensor* currentRope,
-                                          aclTensor* selectionRope,
-                                          aclTensor* planTokens,
-                                          aclTensor* planSlots,
-                                          uint64_t* workspaceSize,
-                                          aclOpExecutor** executor);
+aclnnDsaKvOffloadingUpdateRopeWithPlanGetWorkspaceSize(
+    aclTensor* hostLatent,
+    const aclTensor* blockTable,
+    const aclTensor* descriptor,
+    const aclTensor* currentMap,
+    const aclTensor* topk,
+    const aclTensor* appendSlots,
+    const aclTensor* currentLatent,
+    aclTensor* selection,
+    aclTensor* indices,
+    aclTensor* lengths,
+    aclTensor* selectionTable,
+    aclTensor* residentTokens,
+    aclTensor* residentSlots,
+    aclTensor* residentCount,
+    aclTensor* hostRope,
+    const aclTensor* currentRope,
+    aclTensor* selectionRope,
+    aclTensor* planTokens,
+    aclTensor* planSlots,
+    uint64_t* workspaceSize,
+    aclOpExecutor** executor);
 __attribute__((visibility("default"))) aclnnStatus
 aclnnDsaKvOffloadingUpdateRopeWithPlan(void* workspace,
-                          uint64_t workspaceSize,
-                          aclOpExecutor* executor,
-                          aclrtStream stream);
+                                       uint64_t workspaceSize,
+                                       aclOpExecutor* executor,
+                                       aclrtStream stream);
 #ifdef __cplusplus
 }
 #endif

@@ -54,40 +54,41 @@ int main() {
   Metadata current({8, 1, 64}, ACL_BF16);
   Metadata selected_rope({64 * 17, 128, 1, 64}, ACL_BF16);
   assert(dsa_kv_offloading::StableRope(rope.tensor,
-                        current.tensor,
-                        selected_rope.tensor,
-                        host.tensor,
-                        topk.tensor,
-                        selection.tensor));
+                                       current.tensor,
+                                       selected_rope.tensor,
+                                       host.tensor,
+                                       topk.tensor,
+                                       selection.tensor));
   // Latent and rotary payload share the full resident capacity.
   assert(dsa_kv_offloading::StableSelectionRows(selection.tensor) == 64);
   Metadata short_selection({8 * 17, 128, 1, 64}, ACL_BF16);
   assert(!dsa_kv_offloading::StableRope(rope.tensor,
-                         current.tensor,
-                         short_selection.tensor,
-                         host.tensor,
-                         topk.tensor,
-                         selection.tensor));
+                                        current.tensor,
+                                        short_selection.tensor,
+                                        host.tensor,
+                                        topk.tensor,
+                                        selection.tensor));
   Metadata bad_host({31, 128, 1, 64}, ACL_BF16);
   assert(!dsa_kv_offloading::StableRope(bad_host.tensor,
-                         current.tensor,
-                         selected_rope.tensor,
-                         host.tensor,
-                         topk.tensor,
-                         selection.tensor));
+                                        current.tensor,
+                                        selected_rope.tensor,
+                                        host.tensor,
+                                        topk.tensor,
+                                        selection.tensor));
   Metadata bad_current({64, 1, 64}, ACL_BF16);
   assert(!dsa_kv_offloading::StableRope(rope.tensor,
-                         bad_current.tensor,
-                         selected_rope.tensor,
-                         host.tensor,
-                         topk.tensor,
-                         selection.tensor));
+                                        bad_current.tensor,
+                                        selected_rope.tensor,
+                                        host.tensor,
+                                        topk.tensor,
+                                        selection.tensor));
   Metadata wrong_dtype({64 * 17, 128, 1, 64}, ACL_INT32);
   assert(!dsa_kv_offloading::StableRope(rope.tensor,
-                         current.tensor,
-                         wrong_dtype.tensor,
-                         host.tensor,
-                         topk.tensor,
-                         selection.tensor));
-  std::cout << "DSA_KV_OFFLOADING_STABLE_ROPE_METADATA_CONTRACT_OK (6 assertions)\n";
+                                        current.tensor,
+                                        wrong_dtype.tensor,
+                                        host.tensor,
+                                        topk.tensor,
+                                        selection.tensor));
+  std::cout
+      << "DSA_KV_OFFLOADING_STABLE_ROPE_METADATA_CONTRACT_OK (6 assertions)\n";
 }
