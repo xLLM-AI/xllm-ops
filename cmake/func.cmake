@@ -364,13 +364,25 @@ function(add_ops_src_copy)
         if (NOT TARGET ${OPS_UTILS_INC_KERNEL_TARGET})
             get_filename_component(_ROOT_OPS_SRC_DIR    "${SRC_COPY_DST}" DIRECTORY)
             set(OPS_UTILS_INC_KERNEL_DIR ${_ROOT_OPS_SRC_DIR}/ascendc/common)
-            add_custom_command(OUTPUT ${OPS_UTILS_INC_KERNEL_DIR}
-                    COMMAND mkdir -p ${OPS_UTILS_INC_KERNEL_DIR}/regbase
-                    COMMAND cp -rf ${OPS_ADV_UTILS_KERNEL_INC}/*.* ${OPS_UTILS_INC_KERNEL_DIR}
+            # Track individual headers so an existing directory cannot hide
+            # added, changed, or missing files during incremental builds.
+            file(GLOB OPS_UTILS_INC_KERNEL_FILES LIST_DIRECTORIES false CONFIGURE_DEPENDS
+                    "${OPS_ADV_UTILS_KERNEL_INC}/*.*")
+            set(OPS_UTILS_INC_KERNEL_OUTPUTS)
+            foreach(_kernel_header ${OPS_UTILS_INC_KERNEL_FILES})
+                get_filename_component(_kernel_header_name "${_kernel_header}" NAME)
+                list(APPEND OPS_UTILS_INC_KERNEL_OUTPUTS
+                        "${OPS_UTILS_INC_KERNEL_DIR}/${_kernel_header_name}")
+            endforeach()
+            add_custom_command(OUTPUT ${OPS_UTILS_INC_KERNEL_OUTPUTS}
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${OPS_UTILS_INC_KERNEL_DIR}/regbase"
+                    COMMAND ${CMAKE_COMMAND} -E copy ${OPS_UTILS_INC_KERNEL_FILES} "${OPS_UTILS_INC_KERNEL_DIR}"
+                    DEPENDS ${OPS_UTILS_INC_KERNEL_FILES}
+                    VERBATIM
             )
 
             add_custom_target(${OPS_UTILS_INC_KERNEL_TARGET}
-                    DEPENDS ${OPS_UTILS_INC_KERNEL_DIR}
+                    DEPENDS ${OPS_UTILS_INC_KERNEL_OUTPUTS}
             )
         endif ()
     endif ()
