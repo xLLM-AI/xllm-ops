@@ -14,20 +14,21 @@ limitations under the License.
 ==============================================================================*/
 #include "dsa_kv_offloading_plan_serve.h"
 using namespace xllm_ops::dsa_kv_offloading;
-extern "C" __global__ __aicore__ void dsa_kv_offloading_plan_nope(GM_ADDR in_descriptor,
-                                                   GM_ADDR in_topk,
-                                                   GM_ADDR in_resident_tokens,
-                                                   GM_ADDR in_resident_slots,
-                                                   GM_ADDR in_resident_count,
-                                                   GM_ADDR out_resident_tokens,
-                                                   GM_ADDR out_resident_slots,
-                                                   GM_ADDR out_resident_count,
-                                                   GM_ADDR out_indices,
-                                                   GM_ADDR out_lengths,
-                                                   GM_ADDR out_table,
-                                                   GM_ADDR out_compact_indices,
-                                                   GM_ADDR workspace,
-                                                   GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void dsa_kv_offloading_plan_nope(
+    GM_ADDR in_descriptor,
+    GM_ADDR in_topk,
+    GM_ADDR in_resident_tokens,
+    GM_ADDR in_resident_slots,
+    GM_ADDR in_resident_count,
+    GM_ADDR out_resident_tokens,
+    GM_ADDR out_resident_slots,
+    GM_ADDR out_resident_count,
+    GM_ADDR out_indices,
+    GM_ADDR out_lengths,
+    GM_ADDR out_table,
+    GM_ADDR out_compact_indices,
+    GM_ADDR workspace,
+    GM_ADDR tiling) {
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
   if (g_coreType == AIC) return;
   GET_TILING_DATA(data, tiling);

@@ -11,10 +11,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 add_op_to_compiled_list()
+set(dsa_kv_offloading_plan_nope_depends dsa_kv_offloading_common PARENT_SCOPE)
+get_filename_component(DSA_KV_OFFLOADING_KERNEL_INCLUDE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../dsa_kv_offloading_common/op_kernel" ABSOLUTE)
 if(BUILD_OPEN_PROJECT)
   target_sources(op_host_aclnnExc PRIVATE dsa_kv_offloading_plan_nope_def.cpp)
 endif()
-add_ops_compile_options(OP_NAME DsaKvOffloadingPlanNope OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Werror)
+add_ops_compile_options(OP_NAME DsaKvOffloadingPlanNope OPTIONS
+  --cce-auto-sync=off -Wno-deprecated-declarations -Werror
+  "-I${DSA_KV_OFFLOADING_KERNEL_INCLUDE}")
+# Keep installed kernels self-contained when the source-tree include is absent.
+install(FILES "${DSA_KV_OFFLOADING_KERNEL_INCLUDE}/dsa_kv_offloading_plan_serve.h"
+  DESTINATION "${IMPL_INSTALL_DIR}/ascendc/dsa_kv_offloading_plan_nope")
 if(NOT BUILD_OPS_RTY_KERNEL)
   add_modules_sources(OPTYPE dsa_kv_offloading_plan_nope ACLNNTYPE aclnn_exclude)
 endif()

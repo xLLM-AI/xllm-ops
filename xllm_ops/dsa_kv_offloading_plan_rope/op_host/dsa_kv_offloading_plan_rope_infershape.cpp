@@ -59,5 +59,7 @@ static graphStatus InferType(gert::InferDataTypeContext* context) {
   context->SetOutputDataType(7, ge::DT_INT32);
   return GRAPH_SUCCESS;
 }
-IMPL_OP_INFERSHAPE(DsaKvOffloadingPlanRope).InferShape(InferShape).InferDataType(InferType);
+IMPL_OP_INFERSHAPE(DsaKvOffloadingPlanRope)
+    .InferShape(InferShape)
+    .InferDataType(InferType);
 }  // namespace ge

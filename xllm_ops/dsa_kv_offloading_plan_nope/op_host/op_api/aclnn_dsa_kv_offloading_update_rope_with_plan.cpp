@@ -70,12 +70,14 @@ extern "C" aclnnStatus aclnnDsaKvOffloadingUpdateRopeWithPlanGetWorkspaceSize(
                    hostLatent,
                    topk,
                    selection) &&
-        xllm_ops::dsa_kv_offloading::Tensor(planTokens, op::DataType::DT_INT32) &&
-        xllm_ops::dsa_kv_offloading::Tensor(planSlots, op::DataType::DT_INT32) &&
-        xllm_ops::dsa_kv_offloading::Shape(planTokens,
-                            {topk->GetViewShape().GetDim(0), 1, 2176}) &&
-        xllm_ops::dsa_kv_offloading::Shape(planSlots,
-                            {topk->GetViewShape().GetDim(0), 1, 2176}) &&
+        xllm_ops::dsa_kv_offloading::Tensor(planTokens,
+                                            op::DataType::DT_INT32) &&
+        xllm_ops::dsa_kv_offloading::Tensor(planSlots,
+                                            op::DataType::DT_INT32) &&
+        xllm_ops::dsa_kv_offloading::Shape(
+            planTokens, {topk->GetViewShape().GetDim(0), 1, 2176}) &&
+        xllm_ops::dsa_kv_offloading::Shape(
+            planSlots, {topk->GetViewShape().GetDim(0), 1, 2176}) &&
         Distinct({hostLatent,
                   blockTable,
                   descriptor,
@@ -104,19 +106,23 @@ extern "C" aclnnStatus aclnnDsaKvOffloadingUpdateRopeWithPlanGetWorkspaceSize(
                         topk,
                         appendSlots,
                         currentLatent,
-                        selection,
-                        indices,
-                        lengths,
-                        selectionTable,
-                        residentTokens,
-                        residentSlots,
-                        residentCount,
                         hostRope,
                         currentRope,
-                        selectionRope,
-                        planTokens,
-                        planSlots),
-                 DFX_OUT());
+                        residentTokens,
+                        residentSlots,
+                        residentCount),
+                 DFX_OUT(hostLatent,
+                         selection,
+                         indices,
+                         lengths,
+                         selectionTable,
+                         residentTokens,
+                         residentSlots,
+                         residentCount,
+                         hostRope,
+                         selectionRope,
+                         planTokens,
+                         planSlots));
   auto uniqueExecutor = CREATE_EXECUTOR();
   if (uniqueExecutor.get() == nullptr) return ACLNN_ERR_INNER_CREATE_EXECUTOR;
   auto status = LaunchRopePlan(descriptor,
@@ -150,10 +156,11 @@ extern "C" aclnnStatus aclnnDsaKvOffloadingUpdateRopeWithPlanGetWorkspaceSize(
   uniqueExecutor.ReleaseTo(executor);
   return ACLNN_SUCCESS;
 }
-extern "C" aclnnStatus aclnnDsaKvOffloadingUpdateRopeWithPlan(void* workspace,
-                                                 uint64_t workspaceSize,
-                                                 aclOpExecutor* executor,
-                                                 aclrtStream stream) {
+extern "C" aclnnStatus aclnnDsaKvOffloadingUpdateRopeWithPlan(
+    void* workspace,
+    uint64_t workspaceSize,
+    aclOpExecutor* executor,
+    aclrtStream stream) {
   L2_DFX_PHASE_2(aclnnDsaKvOffloadingUpdateRopeWithPlan);
   return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
 }

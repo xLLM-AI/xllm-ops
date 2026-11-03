@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # DSA KV Offloading Operator Design
 
-[简体中文](../zh/dsa_kv_offloading_c0.md) | English
+[简体中文](../zh/dsa_kv_offloading.md) | English
 
 ## Product Support
 
@@ -21,7 +21,10 @@ payload for the following sparse attention. The operators only plan and move
 data; they do not implement sparse attention or the top-k indexer.
 
 Four AscendC kernels share the single planning/movement implementation in
-`common/include/kernel/dsa_kv_offloading_plan_serve.h`. The compile-time parameters
+`xllm_ops/dsa_kv_offloading_common/op_kernel/dsa_kv_offloading_plan_serve.h`.
+Each kernel explicitly includes this directory and declares the shared operator
+dependency. The header is also installed beside each kernel so installed packages
+can resolve it without the original source tree. The compile-time parameters
 `ExportPlan`, the RoPE dimension, and `ImmutablePlan` select the behavior:
 
 | Kernel | Responsibility |
@@ -169,13 +172,17 @@ definitions, host tiling, and device kernels are in:
 Build the four kernels through the standard entry point:
 
 ```bash
-bash build.sh --pkg \
+bash build.sh \
   -n "dsa_kv_offloading_plan_nope;dsa_kv_offloading_plan_rope;dsa_kv_offloading_serve_nope;dsa_kv_offloading_serve_rope" \
   -c ascend910_93
 ```
 
 Regression tests are in
 [`test_dsa_kv_offloading_default_build.py`](../../test/python_test/test_dsa_kv_offloading_default_build.py),
+[`test_dsa_kv_offloading_kernel_build.py`](../../test/python_test/test_dsa_kv_offloading_kernel_build.py),
 [`test_dsa_kv_offloading.py`](../../test/python_test/test_dsa_kv_offloading.py),
 and
-[`dsa_kv_offloading_contract_test.cpp`](../../test/cpp_test/dsa_kv_offloading_contract_test.cpp).
+[`dsa_kv_offloading_contract_test.cpp`](../../test/cpp_test/dsa_kv_offloading_contract_test.cpp),
+[`dsa_kv_offloading_stable_contract_test.cpp`](../../test/cpp_test/dsa_kv_offloading_stable_contract_test.cpp),
+and
+[`dsa_kv_offloading_stable_rope_contract_test.cpp`](../../test/cpp_test/dsa_kv_offloading_stable_rope_contract_test.cpp).

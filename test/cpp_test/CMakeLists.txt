@@ -101,13 +101,23 @@ if("$ENV{VCPKG_TARGET_TRIPLET}" MATCHES "x64-linux")
   set(ASCEND_CANN_INCLUDE_NAME "x86_64-linux")
 endif()
 
-# Common include directories/compile options/link options/libraries
-set(COMMON_INCLUDE_DIRS
+# CANN-only configuration is shared by the torch-enabled common target and
+# the host-only contract tests, which must not link torch.
+set(CANN_INCLUDE_DIRS
     "${INCLUDE_BASE_DIR}"
     "${INCLUDE_BASE_DIR}/aclnn"
     "${INCLUDE_BASE_DIR}/aclnn/op_dev"
     "${INCLUDE_BASE_DIR}/platform"
     "${ASCEND_PATH}/${ASCEND_CANN_INCLUDE_NAME}/include/exe_graph/runtime"
+)
+set(CANN_LIBS
+    "${ASCEND_PATH}/lib64/libascendcl.so"
+    "${ASCEND_PATH}/lib64/libnnopbase.so"
+)
+
+# Common include directories/compile options/link options/libraries
+set(COMMON_INCLUDE_DIRS
+    ${CANN_INCLUDE_DIRS}
     "${PYTHON_LIB_DIR}/torch/include/torch/csrc/api/include"
     "${PYTHON_LIB_DIR}/torch_npu/include"
     "${PYTHON_LIB_DIR}/torch/include"
@@ -130,8 +140,7 @@ set(COMMON_LINK_OPTS
 )
 
 set(COMMON_LIBS
-    "${ASCEND_PATH}/lib64/libascendcl.so"
-    "${ASCEND_PATH}/lib64/libnnopbase.so"
+    ${CANN_LIBS}
     "${ASCEND_PATH}/lib64/libacl_op_compiler.so"
     "${ASCEND_PATH}/lib64/libascendalog.so"
     "${ASCEND_PATH}/lib64/libtiling_api.a"
@@ -224,6 +233,25 @@ include(GoogleTest)
 gtest_discover_tests(group_gemm_gtest)
 gtest_discover_tests(multi_latent_attention_gtest)
 gtest_discover_tests(convert_kv_cache_format_test)
+
+# DSA KV offloading host-only metadata contracts. These use a plain main()
+# with assert, so keep assertions enabled in release builds; they only need
+# CANN (no torch), and the repository root for the xllm_ops/... include path.
+add_library(dsa_contract_common INTERFACE)
+target_include_directories(dsa_contract_common INTERFACE
+  ${CANN_INCLUDE_DIRS}
+  "${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+target_link_libraries(dsa_contract_common INTERFACE ${CANN_LIBS})
+foreach(dsa_contract_test
+    dsa_kv_offloading_contract_test
+    dsa_kv_offloading_stable_contract_test
+    dsa_kv_offloading_stable_rope_contract_test)
+  add_executable(${dsa_contract_test} ${dsa_contract_test}.cpp)
+  target_compile_options(${dsa_contract_test} PRIVATE -UNDEBUG)
+  target_link_libraries(${dsa_contract_test} PRIVATE dsa_contract_common)
+  add_test(NAME ${dsa_contract_test} COMMAND ${dsa_contract_test})
+endforeach()
 
 # Host-only registration coverage uses the installed operator package rather
 # than compiling its inference source directly, so a missing build glob fails.

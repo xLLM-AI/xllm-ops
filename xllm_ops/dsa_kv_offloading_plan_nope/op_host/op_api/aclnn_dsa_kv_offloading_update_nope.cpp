@@ -60,9 +60,10 @@ extern "C" aclnnStatus aclnnDsaKvOffloadingUpdateNopeGetWorkspaceSize(
                     indices,
                     lengths,
                     selectionTable) &&
-        xllm_ops::dsa_kv_offloading::Tensor(compactIndices, op::DataType::DT_INT32) &&
-        xllm_ops::dsa_kv_offloading::Shape(compactIndices,
-                            {topk->GetViewShape().GetDim(0), 1, 2176}) &&
+        xllm_ops::dsa_kv_offloading::Tensor(compactIndices,
+                                            op::DataType::DT_INT32) &&
+        xllm_ops::dsa_kv_offloading::Shape(
+            compactIndices, {topk->GetViewShape().GetDim(0), 1, 2176}) &&
         Distinct({hostLatent,
                   blockTable,
                   descriptor,
@@ -87,14 +88,18 @@ extern "C" aclnnStatus aclnnDsaKvOffloadingUpdateNopeGetWorkspaceSize(
                         topk,
                         appendSlots,
                         currentLatent,
-                        selection,
-                        indices,
-                        lengths,
-                        selectionTable,
                         residentTokens,
                         residentSlots,
                         residentCount),
-                 DFX_OUT());
+                 DFX_OUT(hostLatent,
+                         selection,
+                         indices,
+                         lengths,
+                         selectionTable,
+                         residentTokens,
+                         residentSlots,
+                         residentCount,
+                         compactIndices));
   auto uniqueExecutor = CREATE_EXECUTOR();
   if (uniqueExecutor.get() == nullptr) return ACLNN_ERR_INNER_CREATE_EXECUTOR;
   auto status = LaunchNopePlan(descriptor,
@@ -128,9 +133,9 @@ extern "C" aclnnStatus aclnnDsaKvOffloadingUpdateNopeGetWorkspaceSize(
   return ACLNN_SUCCESS;
 }
 extern "C" aclnnStatus aclnnDsaKvOffloadingUpdateNope(void* workspace,
-                                         uint64_t workspaceSize,
-                                         aclOpExecutor* executor,
-                                         aclrtStream stream) {
+                                                      uint64_t workspaceSize,
+                                                      aclOpExecutor* executor,
+                                                      aclrtStream stream) {
   L2_DFX_PHASE_2(aclnnDsaKvOffloadingUpdateNope);
   return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
 }
