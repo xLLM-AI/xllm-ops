@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The xLLM Authors.
-"""Migrated from vllm-ascend fbb4d867d22095047473e3c7ca9db053f5f4c7b0:
-tests/e2e/nightly/single_node/ops/singlecard_ops/test_npu_hc_pre.py.
-Both the implicit and external-pre-mix cases exercise the four-output hc_pre_va API.
-"""
+"""Both the implicit and external-pre-mix cases exercise the four-output hc_pre_va API."""
 
 import ctypes
 import gc
