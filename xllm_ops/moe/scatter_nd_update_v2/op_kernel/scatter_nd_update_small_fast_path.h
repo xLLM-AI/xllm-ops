@@ -159,7 +159,12 @@ private:
     {
         DataCopyExtParams outParams{1, static_cast<uint32_t>(scatterLength_ * sizeof(T)), 0, 0, 0};
         for (uint64_t r = 0; r < indexRow_; ++r) {
-            uint64_t outOffset = static_cast<uint64_t>(linearLocal_.GetValue(r));
+            const int32_t linear_index = linearLocal_.GetValue(r);
+            // Match the general scatter path: padding must never write.
+            if (linear_index < 0) {
+                continue;
+            }
+            uint64_t outOffset = static_cast<uint64_t>(linear_index);
             DataCopyPad(outputGm_[outOffset], updLocal_[r * scatterAlignLength_], outParams);
         }
         PipeMte3ToS();
