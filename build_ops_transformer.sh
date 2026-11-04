@@ -34,6 +34,7 @@ OPS=(
     key_pool
     pool_key_indexer
     sparse_flash_attention
+    mla_prolog_v3
 )
 
 # 目标 Ascend SoC 芯片型号 (可选: ascend910b / ascend910_93 / ascend950 / ascend960dt 等)
