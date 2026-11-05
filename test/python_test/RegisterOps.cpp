@@ -991,6 +991,23 @@ at::Tensor hc_post_va_impl_npu(const at::Tensor& x,
   return y;
 }
 
+at::Tensor ada_rms_norm_impl_npu(const at::Tensor& x,
+                               const at::Tensor& scale,
+                               const at::Tensor& shift,
+                               const c10::optional<at::Tensor>& weight,
+                               double epsilon) {
+  TORCH_CHECK(x.is_privateuseone(), "x must be on NPU");
+  TORCH_CHECK(std::isfinite(epsilon) && epsilon > 0.0 &&
+              std::isfinite(static_cast<float>(epsilon)) &&
+              static_cast<float>(epsilon) > 0.0f,
+              "eps must remain finite and > 0 after conversion to FP32");
+  at::Tensor out = at::empty(x.sizes(), x.options());
+  if (x.numel() != 0) {
+    EXEC_NPU_CMD(aclnnAdaRmsNorm, x, scale, shift, weight, epsilon, out);
+  }
+  return out;
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> add_rms_norm_bias_impl_npu(
     const at::Tensor& x1,
     const at::Tensor& x2,
@@ -2680,6 +2697,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cross_attention", &cross_attention_impl_npu, "cross_attention");
   m.def("beam_search", &beam_search_impl_npu, "beam_search");
   m.def("beam_search_group", &beam_search_group_impl_npu, "beam_search_group");
+  m.def("ada_rms_norm", &ada_rms_norm_impl_npu, "ada_rms_norm",
+        pybind11::arg("x"), pybind11::arg("scale"), pybind11::arg("shift"),
+        pybind11::arg("weight") = pybind11::none(),
+        pybind11::arg("eps") = 1e-6);
   m.def("beam_search_rec_final_select",
         &beam_search_rec_final_select_impl_npu,
         "beam_search_rec_final_select");
