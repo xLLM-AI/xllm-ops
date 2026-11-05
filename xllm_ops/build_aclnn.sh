@@ -294,6 +294,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
+        "ada_rms_norm"
         "moe_init_routing_custom"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
