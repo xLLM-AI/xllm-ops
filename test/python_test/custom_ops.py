@@ -253,6 +253,17 @@ def gamma_add_rms_norm_npu(x1, x2, gamma, eps=1e-6,
         x1, x2, gamma, eps, add_gamma_offset)
 
 
+# split_qkv_norm_rope: fused SplitQKV + QK-RMSNorm + RoPE (NeoX half-split).
+#   qkv:[B,S,(Nq+2*Nk)*D+tail], gamma:[D], cos/sin:[B,S,rope_stride].
+#   Returns (q, k, v): BSND [B,S,H*D] or BNSD [B,H,S,D] when layout_bnsd=True.
+def split_qkv_norm_rope_npu(qkv, q_gamma, k_gamma, cos, sin, num_q_heads,
+                            num_kv_heads, eps=1e-6, gqa_expand=False,
+                            layout_bnsd=False):
+    return custom_ops_lib.split_qkv_norm_rope(
+        qkv, q_gamma, k_gamma, cos, sin, num_q_heads, num_kv_heads, eps,
+        gqa_expand, layout_bnsd)
+
+
 def hc_pre_va_npu(
     hidden: torch.Tensor,
     hc_fn: torch.Tensor,
