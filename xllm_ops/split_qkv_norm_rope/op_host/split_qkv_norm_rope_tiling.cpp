@@ -42,14 +42,14 @@ inline uint32_t RoundUp(uint32_t value, uint32_t align)
 }
 
 // UB 需求（与 kernel 侧 InitBuffer 一致）
-uint64_t CalcUbNeed(uint32_t padStride, uint32_t ropeStride, uint32_t headTotal, uint32_t elemBytes)
+uint64_t CalcUbNeed(uint32_t tile, uint32_t padStride, uint32_t ropeStride, uint32_t headTotal, uint32_t elemBytes)
 {
-    const uint64_t tile = SQNR_TOKEN_TILE;
-    uint64_t need = tile * 2 * (static_cast<uint64_t>(padStride) * elemBytes +
-                                static_cast<uint64_t>(ropeStride) * elemBytes * 2);  // inQkv/inCos/inSin ×2
-    need += 2ull * tile * headTotal * SQNR_HEAD_DIM * elemBytes;                          // out ×2
-    need += 2ull * SQNR_HEAD_DIM * elemBytes + 2ull * SQNR_HEAD_DIM * 4;                  // inGamma ×2 + gamma fp32 ×2
-    need += tile * SQNR_MAX_HEADS * 4;                                                    // sumsq
+    uint64_t need = static_cast<uint64_t>(tile) * 2 *
+                    (static_cast<uint64_t>(padStride) * elemBytes +
+                     static_cast<uint64_t>(ropeStride) * elemBytes * 2);   // inQkv/inCos/inSin ×2
+    need += 2ull * tile * headTotal * SQNR_HEAD_DIM * elemBytes;            // out ×2
+    need += 2ull * SQNR_HEAD_DIM * elemBytes + 2ull * SQNR_HEAD_DIM * 4;    // inGamma ×2 + gamma fp32 ×2
+    need += static_cast<uint64_t>(tile) * SQNR_MAX_HEADS * 4;               // sumsq
     return need;
 }
 }  // namespace
@@ -106,7 +106,8 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(numHeadQ % numHeadK != 0, OP_LOGE(context, "num_q_heads %% num_kv_heads != 0."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(headTotal > SQNR_MAX_HEADS, OP_LOGE(context, "Nq+Nk+Nv=%u > %u.", headTotal, SQNR_MAX_HEADS),
+    const uint32_t qkHeads = numHeadQ + numHeadK;
+    OP_CHECK_IF(qkHeads > SQNR_MAX_HEADS, OP_LOGE(context, "Nq+Nk=%u > %u.", qkHeads, SQNR_MAX_HEADS),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(qkvStride < headTotal * SQNR_HEAD_DIM,
                 OP_LOGE(context, "qkv stride %u < heads*D = %u.", qkvStride, headTotal * SQNR_HEAD_DIM),
@@ -124,24 +125,41 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     (void)compileInfo;
 
     const uint32_t totalTokens = batch * seqLen;
-    uint32_t blockDim = (aivNum < (totalTokens + SQNR_TOKEN_TILE - 1) / SQNR_TOKEN_TILE)
+    const ge::DataType dtype = qkvDesc->GetDataType();
+    // kernel 用 sizeof(T) 计算 UB 布局，host 必须与之对齐：当前仅支持 2 字节 dtype
+    uint32_t elemBytes = 0;
+    if (dtype == ge::DT_BF16 || dtype == ge::DT_FLOAT16) {
+        elemBytes = 2;
+    } else {
+        OP_LOGE(context, "unsupported dtype %d, expect BF16/FLOAT16.", static_cast<int32_t>(dtype));
+        return ge::GRAPH_FAILED;
+    }
+    const uint32_t padStride = RoundUp(qkvStride, 16);  // 32B 对齐的 UB 行距
+
+    // 按 UB 预算从大到小挑 tile 行数：行数越大越能摊薄每 tile 的固定开销
+    uint32_t tokenTile = 0;
+    for (uint32_t cand = SQNR_TOKEN_TILE; cand >= 1; cand >>= 1) {
+        if (CalcUbNeed(cand, padStride, ropeStride, headTotal, elemBytes) <= ubSize) {
+            tokenTile = cand;
+            break;
+        }
+    }
+    OP_CHECK_IF(tokenTile == 0,
+                OP_LOGE(context, "UB insufficient even at tile=1: stride=%u pad=%u heads=%u.",
+                        qkvStride, padStride, headTotal),
+                return ge::GRAPH_FAILED);
+
+    uint32_t blockDim = (aivNum < (totalTokens + tokenTile - 1) / tokenTile)
                             ? aivNum
-                            : (totalTokens + SQNR_TOKEN_TILE - 1) / SQNR_TOKEN_TILE;
+                            : (totalTokens + tokenTile - 1) / tokenTile;
     if (blockDim == 0) {
         blockDim = 1;
     }
-    uint32_t tokenPerCore = RoundUp((totalTokens + blockDim - 1) / blockDim, SQNR_TOKEN_TILE);
+    uint32_t tokenPerCore = RoundUp((totalTokens + blockDim - 1) / blockDim, tokenTile);
     blockDim = (totalTokens + tokenPerCore - 1) / tokenPerCore;
     if (blockDim == 0) {
         blockDim = 1;
     }
-
-    const ge::DataType dtype = qkvDesc->GetDataType();
-    const uint32_t elemBytes = 2;
-    const uint32_t padStride = RoundUp(qkvStride, 16);  // 32B 对齐的 UB 行距
-
-    const uint64_t ubNeed = CalcUbNeed(padStride, ropeStride, headTotal, elemBytes);
-    OP_CHECK_IF(ubNeed > ubSize, OP_LOGE(context, "UB need %llu > %llu.", ubNeed, ubSize), return ge::GRAPH_FAILED);
 
     SplitQkvNormRopeTilingData tilingData;
     tilingData.set_batch(batch);
@@ -155,7 +173,7 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     tilingData.set_ropeStride(ropeStride);
     tilingData.set_totalTokens(totalTokens);
     tilingData.set_tokenPerCore(tokenPerCore);
-    tilingData.set_tokenTile(SQNR_TOKEN_TILE);
+    tilingData.set_tokenTile(tokenTile);
     tilingData.set_lastBlockTokenNum(totalTokens - tokenPerCore * (blockDim - 1));
     tilingData.set_eps(eps);
     tilingData.set_reciprocal(1.0f / static_cast<float>(SQNR_HEAD_DIM));
@@ -181,9 +199,8 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     OP_CHECK_NULL_WITH_CONTEXT(context, workspace);
     workspace[0] = 0;
 
-    OP_LOGE(context,
-            "tokens=%u blockDim=%u tokenPerCore=%u lastCore=%u stride=%u pad=%u rope=%u heads=%u/%u gqa=%d bnsd=%d",
-            totalTokens, blockDim, tokenPerCore, tilingData.get_lastBlockTokenNum(), qkvStride, padStride,
+    OP_LOGI(context, "tokens=%u blockDim=%u tokenPerCore=%u tile=%u lastCore=%u stride=%u pad=%u rope=%u heads=%u/%u gqa=%d bnsd=%d",
+            totalTokens, blockDim, tokenPerCore, tokenTile, tilingData.get_lastBlockTokenNum(), qkvStride, padStride,
             ropeStride, numHeadQ, numHeadK, static_cast<int32_t>(gqaExpand), static_cast<int32_t>(layoutBNSD));
     return ge::GRAPH_SUCCESS;
 }

@@ -43,7 +43,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 ```text
 B, S      = batch / sequence
 D         = head_dim，固定 128
-Nq, Nk, Nv= q / k / v 头数，v1 约束 Nv == Nk，Nq % Nk == 0，Nq+Nk+Nv <= 16
+Nq, Nk, Nv= q / k / v 头数，v1 约束 Nv == Nk，Nq % Nk == 0，Nq+Nk <= 64
 stride    = qkv 行跨度（元素），>= (Nq+Nk+Nv)*D，尾部 tail 列被忽略
 kv_interleaved = 行内 KV 布局：false 为 [Q | K... | V... | tail]，true 为 [Q | K0 V0 K1 V1 ... | tail]
 ropeStride= cos/sin 行跨度（元素），取值 [64, 128]；只用前 64 维
@@ -106,9 +106,10 @@ aclnnStatus aclnnSplitQkvNormRope(
 约束（host 侧校验，失败返回 `ACLNN_ERR_PARAM_INVALID`）：
 
 - `D == 128`，`stride >= (Nq+2*Nk)*D`，`ropeStride ∈ [64,128]`；
-- `Nq > 0`、`Nk > 0`、`Nq % Nk == 0`、`Nq+Nk+Nv <= 16`；
+- `Nq > 0`、`Nk > 0`、`Nq % Nk == 0`、`Nq+Nk <= 64`；
 - 输入输出 dtype 一致，`q_gamma`/`k_gamma` 长度为 `D`；
-- UB 需求 `<= 253952 B`（主场景实测 44544 B）。
+- UB 需求 `<= 253952 B`；`tokenTile` 由 host 按 UB 预算从 `8/4/2/1` 自动选择
+  （主场景 6/2 取 8，共 88,576 B）。
 
 ## 算法
 
@@ -146,14 +147,19 @@ bf16 行距      = padStride * 2 = 2592 B   # 2592 = 81*32
 
 ## Tiling
 
-`tokenTile` 固定 8（`stride*2` 与 32 B 的对齐周期决定），核间按 token 连续段切分：
+`tokenTile` 由 host 按 UB 预算从 `8/4/2/1` 里挑最大的可行值（行数越大越摊薄固定开销），
+核间按 token 连续段切分：
 
 ```text
-blockDim     = min(aivNum, ceil(totalTokens / 8))
-tokenPerCore = RoundUp(ceil(totalTokens / blockDim), 8)
-blockDim     = ceil(totalTokens / tokenPerCore)      # 回算
+pick tile    = max{t in 8,4,2,1 : ubNeed(t) <= ubSize}   # 8 不可行时降到 4/2/1
+blockDim     = min(aivNum, ceil(totalTokens / tile))
+tokenPerCore = RoundUp(ceil(totalTokens / blockDim), tile)
+blockDim     = ceil(totalTokens / tokenPerCore)          # 回算
 lastBlockTokenNum = totalTokens - tokenPerCore*(blockDim-1)
 ```
+
+主场景 6/2/128（stride 1286）`ubNeed(8) = 88,576 B`，取 `tile = 8`；
+宽头数模型（如 48/16，stride 10288）`ubNeed(8/4)` 超预算，自动降到 `tile = 2`。
 
 ACLNN 路径 `aivNum = ascendcPlatform.GetCoreNumAiv() = 54`，主场景
 （`S = 12915`）：`blockDim = 54`、`tokenPerCore = 240`、`lastBlockTokenNum = 195`，

@@ -256,3 +256,66 @@ def test_split_qkv_norm_rope_kv_interleaved(
         k_npu.cpu().float(), k_ref.float(), atol=atol, rtol=rtol)
     torch.testing.assert_close(
         v_npu.cpu().float(), v_ref.float(), atol=0, rtol=0)
+
+
+# 宽头数用例：验证 host 按 UB 预算自动降 tokenTile（8 -> 4 -> 2）
+# (batch, seq, nq, nkv, rope_stride, gqa_expand, layout_bnsd, kv_interleaved)
+WIDE_CASES = [
+    (1, 256, 16, 8, 64, True, False, True),    # headTotal=32, stride=4096 -> tile 4
+    (1, 256, 32, 8, 64, True, False, True),    # headTotal=48, stride=6144 -> tile 4
+    (1, 256, 48, 16, 64, True, False, True),   # headTotal=80, stride=10288 -> tile 2
+    (1, 256, 16, 8, 64, False, False, False),  # 块状布局 + 大 head 数
+]
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "batch,seq,nq,nkv,rope_stride,gqa_expand,layout_bnsd,kv_interleaved", WIDE_CASES)
+def test_split_qkv_norm_rope_wide_heads(
+        batch, seq, nq, nkv, rope_stride, gqa_expand, layout_bnsd,
+        kv_interleaved, dtype):
+    if not _get_device():
+        return
+
+    torch.manual_seed(20261106)
+    eps = 1e-6
+    stride = (nq + 2 * nkv) * HEAD_DIM
+
+    qkv = (torch.randn(batch, seq, stride, dtype=torch.float32) * 0.5).to(dtype)
+    q_gamma = (1.0 + 0.1 * torch.randn(HEAD_DIM, dtype=torch.float32)).to(dtype)
+    k_gamma = (1.0 + 0.1 * torch.randn(HEAD_DIM, dtype=torch.float32)).to(dtype)
+
+    inv_freq = 1.0 / (10000.0**(torch.arange(
+        0, HEAD_DIM, 2, dtype=torch.float32) / HEAD_DIM))
+    pos = torch.arange(seq, dtype=torch.float32).view(1, seq, 1)
+    freqs = pos * inv_freq.view(1, 1, -1)
+    cos = torch.zeros(batch, seq, rope_stride, dtype=torch.float32)
+    sin = torch.zeros(batch, seq, rope_stride, dtype=torch.float32)
+    cos[..., :HALF_DIM] = freqs.cos().expand(batch, seq, HALF_DIM)
+    sin[..., :HALF_DIM] = freqs.sin().expand(batch, seq, HALF_DIM)
+    cos = cos.to(dtype)
+    sin = sin.to(dtype)
+
+    q_ref, k_ref, v_ref = split_qkv_norm_rope_torch(
+        qkv, q_gamma, k_gamma, cos, sin, nq, nkv, eps, gqa_expand, layout_bnsd)
+    qkvi = _to_interleaved(qkv, nq, nkv) if kv_interleaved else qkv
+
+    q_npu, k_npu, v_npu = custom_ops.split_qkv_norm_rope_npu(
+        qkvi.npu(), q_gamma.npu(), k_gamma.npu(), cos.npu(), sin.npu(),
+        nq, nkv, eps, gqa_expand, layout_bnsd, kv_interleaved)
+    torch.npu.synchronize()
+
+    if dtype == torch.float16:
+        atol = rtol = 2e-3
+    else:
+        atol = rtol = 2e-2
+
+    assert tuple(q_npu.shape) == tuple(q_ref.shape)
+    assert tuple(k_npu.shape) == tuple(k_ref.shape)
+    assert tuple(v_npu.shape) == tuple(v_ref.shape)
+    torch.testing.assert_close(
+        q_npu.cpu().float(), q_ref.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(
+        k_npu.cpu().float(), k_ref.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(
+        v_npu.cpu().float(), v_ref.float(), atol=0, rtol=0)

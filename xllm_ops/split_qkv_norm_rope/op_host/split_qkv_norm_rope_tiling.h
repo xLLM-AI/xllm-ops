@@ -28,7 +28,7 @@ limitations under the License.
 namespace optiling {
 constexpr uint32_t SQNR_HEAD_DIM = 128;
 constexpr uint32_t SQNR_TOKEN_TILE = 8;
-constexpr uint32_t SQNR_MAX_HEADS = 16;
+constexpr uint32_t SQNR_MAX_HEADS = 64;
 constexpr uint32_t SQNR_FLAG_GQA_EXPAND = 1u << 0;
 constexpr uint32_t SQNR_FLAG_LAYOUT_BNSD = 1u << 1;
 constexpr uint32_t SQNR_FLAG_KV_INTERLEAVED = 1u << 2;  // 输入行内 KV 按 head 交错 [K_i,V_i]

@@ -28,8 +28,8 @@ using namespace AscendC;
 
 constexpr uint32_t kHeadDim = 128;              // head_dim 固定 128
 constexpr uint32_t kHalfDim = kHeadDim / 2;     // 64，RoPE half-split 分界
-constexpr uint32_t kMaxHeads = 16;              // sumsq UB 上界：Nq+Nk <= kMaxHeads
-constexpr uint32_t kTokenTile = 8;              // 每 tile 的 token 行数；8 行是可整块搬送的最小 32B 对齐周期（行宽 2572B=4×643，nTok 需为 8 的倍数），也是 UB 预算安全点；16 行经核算结构性放不下
+constexpr uint32_t kMaxHeads = 64;              // sumsq UB 上界：Nq+Nk <= kMaxHeads
+constexpr uint32_t kTokenTile = 8;              // 默认每 tile 行数；host 会按 UB 预算从 8/4/2/1 里选
 // 每 tile 的 sumsq 个数 = kTokenTile × (Nq+Nk)，scale 链按 64 lane 向上取整分段
 
 constexpr uint32_t kFlagGqaExpand = 1u << 0;    // 1：k/v 扩张到 Nq 头
@@ -62,7 +62,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     __ubuf__ T *outT, __ubuf__ T *xb, __ubuf__ T *cosT, __ubuf__ T *sinT,
     __ubuf__ float *gammaQ, __ubuf__ float *gammaK, __ubuf__ float *sumsq,
     uint16_t numHeadQ, uint16_t numHeadK, uint16_t xStride, uint16_t outStride, uint16_t ropeStride,
-    uint16_t kvHeadStep, float eps, float recip)
+    uint16_t tileRows, uint16_t kvHeadStep, float eps, float recip)
 {
     using namespace AscendC::Reg;
     RegTensor<float> y1;
@@ -91,10 +91,10 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     const uint16_t qkHeads = static_cast<uint16_t>(numHeadQ + numHeadK);
     // 输入行内 KV 区起点（k/v 区）；q 头从行首按 D 连续，k 头按 kvHeadStep 步进
     const uint32_t kvHeadBase = static_cast<uint32_t>(numHeadQ) * kHeadDim;
-    // sumsq 段数：每段 64 lane，向上取整覆盖 kTokenTile*(Nq+Nk) 个有效元素；
+    // sumsq 段数：每段 64 lane，向上取整覆盖 tileRows*(Nq+Nk) 个有效元素；
     // 末段多出的 lane 只写回 sumsq，pass2 只按 (t,h) 单点广播读取，不回读这些 lane。
     constexpr uint16_t kSeg = 64;
-    const uint16_t segs = static_cast<uint16_t>((kTokenTile * qkHeads + kSeg - 1) / kSeg);
+    const uint16_t segs = static_cast<uint16_t>((tileRows * qkHeads + kSeg - 1) / kSeg);
 
     // γq / γk 每 tile 各装载 1 次
     LoadAlign(gq1, gammaQ);
@@ -103,7 +103,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     LoadAlign(gk2, gammaK + kHalfDim);
 
     // pass 1：每 (token, head) 的 sumsq（q/k 直接从 T 载入）
-    for (uint16_t t = 0; t < static_cast<uint16_t>(kTokenTile); ++t) {
+    for (uint16_t t = 0; t < tileRows; ++t) {
         __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
         for (uint16_t h = 0; h < numHeadQ; ++h) {
             __ubuf__ T *src = row + static_cast<uint32_t>(h) * kHeadDim;
@@ -147,7 +147,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
 
     // pass 2：norm + rope，结果直接 pack 成 T 写进输出 tile
-    for (uint16_t t = 0; t < static_cast<uint16_t>(kTokenTile); ++t) {
+    for (uint16_t t = 0; t < tileRows; ++t) {
         __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
         __ubuf__ T *orow = outT + static_cast<uint32_t>(t) * outStride;
         LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, cosT + static_cast<uint32_t>(t) * ropeStride);
@@ -231,6 +231,7 @@ public:
         blockDim_ = tiling->blockDim;
         tokenPerCore_ = tiling->tokenPerCore;
         lastBlkTokens_ = tiling->lastBlockTokenNum;
+        tileRows_ = (tiling->tokenTile != 0) ? tiling->tokenTile : kTokenTile;
         eps_ = tiling->eps;
         recip_ = tiling->reciprocal;
 
@@ -250,23 +251,23 @@ public:
         vGm_.SetGlobalBuffer((__gm__ T *)vOut, tiling->totalTokens * kvOutHeads_ * kHeadDim);
 
         // 深度 2：支持「下一个 tile 预取」+「上一个 tile 延后写出」
-        pipe_->InitBuffer(inQkv_, 2, kTokenTile * padStride_ * sizeof(T));
-        pipe_->InitBuffer(inCos_, 2, kTokenTile * ropeStride_ * sizeof(T));
-        pipe_->InitBuffer(inSin_, 2, kTokenTile * ropeStride_ * sizeof(T));
+        pipe_->InitBuffer(inQkv_, 2, tileRows_ * padStride_ * sizeof(T));
+        pipe_->InitBuffer(inCos_, 2, tileRows_ * ropeStride_ * sizeof(T));
+        pipe_->InitBuffer(inSin_, 2, tileRows_ * ropeStride_ * sizeof(T));
         pipe_->InitBuffer(inGamma_, 2, kHeadDim * sizeof(T));
-        pipe_->InitBuffer(outTile_, 2, kTokenTile * numHeadTotal_ * kHeadDim * sizeof(T));
+        pipe_->InitBuffer(outTile_, 2, tileRows_ * numHeadTotal_ * kHeadDim * sizeof(T));
 
         pipe_->InitBuffer(bufGammaQ_, kHeadDim * sizeof(float));
         pipe_->InitBuffer(bufGammaK_, kHeadDim * sizeof(float));
-        pipe_->InitBuffer(bufSum_, kTokenTile * kMaxHeads * sizeof(float));
+        pipe_->InitBuffer(bufSum_, tileRows_ * kMaxHeads * sizeof(float));
 
         // 本核 token 区间与 tile 数（供三级流水使用）
         const uint32_t blockIdx = AscendC::GetBlockIdx();
         blkStart_ = blockIdx * tokenPerCore_;
         blkTokens_ = (blockIdx == blockDim_ - 1) ? lastBlkTokens_ : tokenPerCore_;
-        tileNum_ = (blkTokens_ + kTokenTile - 1) / kTokenTile;
+        tileNum_ = (blkTokens_ + tileRows_ - 1) / tileRows_;
 
-        // 只有一条路径：sumsq 段数按 ceil(kTokenTile*(Nq+Nk)/64) 运行期算，任意 Nq+Nk <= kMaxHeads 均可覆盖。
+        // 只有一条路径：sumsq 段数按 ceil(tileRows*(Nq+Nk)/64) 运行期算，任意 Nq+Nk <= kMaxHeads 均可覆盖。
     }
 
     __aicore__ inline void Process()
@@ -290,8 +291,8 @@ public:
 private:
     __aicore__ inline uint32_t TileTokens(uint32_t k) const
     {
-        const uint32_t left = blkTokens_ - k * kTokenTile;
-        return left > kTokenTile ? kTokenTile : left;
+        const uint32_t left = blkTokens_ - k * tileRows_;
+        return left > tileRows_ ? tileRows_ : left;
     }
 
     __aicore__ inline void CopyInGamma()
@@ -318,7 +319,7 @@ private:
     // 只发 DMA，不等：深度 2 的队列允许它和上一个 tile 的计算并行
     __aicore__ inline void CopyInTile(uint32_t k)
     {
-        const uint32_t t0 = blkStart_ + k * kTokenTile;
+        const uint32_t t0 = blkStart_ + k * tileRows_;
         const uint32_t nTok = TileTokens(k);
         DataCopyPadExtParams<T> pad{false, 0, 0, 0};
 
@@ -358,7 +359,7 @@ private:
         if (!kvInterleaved_) {
             //   UB 侧 blockLen/srcGap/dstGap 单位均为 32B 块
             AscendC::DataCopyParams vParams{
-                static_cast<uint16_t>(kTokenTile),
+                static_cast<uint16_t>(tileRows_),
                 static_cast<uint16_t>(vElems * sizeof(T) / 32),
                 static_cast<uint16_t>((padStride_ - vElems) * sizeof(T) / 32),
                 static_cast<uint16_t>((rowElems - vElems) * sizeof(T) / 32)};
@@ -367,7 +368,7 @@ private:
             const uint16_t headBlocks = static_cast<uint16_t>(kHeadDim * sizeof(T) / 32);
             for (uint16_t h = 0; h < static_cast<uint16_t>(numHeadV_); ++h) {
                 AscendC::DataCopyParams vParams{
-                    static_cast<uint16_t>(kTokenTile),
+                    static_cast<uint16_t>(tileRows_),
                     headBlocks,
                     static_cast<uint16_t>((padStride_ - kHeadDim) * sizeof(T) / 32),
                     static_cast<uint16_t>((rowElems - kHeadDim) * sizeof(T) / 32)};
@@ -387,6 +388,7 @@ private:
             (__ubuf__ float *)sumL.GetPhyAddr(), static_cast<uint16_t>(numHeadQ_),
             static_cast<uint16_t>(numHeadK_), static_cast<uint16_t>(padStride_),
             static_cast<uint16_t>(rowElems), static_cast<uint16_t>(ropeStride_),
+            static_cast<uint16_t>(tileRows_),
             static_cast<uint16_t>(kvInterleaved_ ? 2 * kHeadDim : kHeadDim), eps_, recip_);
         AscendC::PipeBarrier<PIPE_V>();
         inQkv_.FreeTensor(xb);
@@ -398,7 +400,7 @@ private:
 
     __aicore__ inline void CopyOutTile(uint32_t k)
     {
-        const uint32_t t0 = blkStart_ + k * kTokenTile;
+        const uint32_t t0 = blkStart_ + k * tileRows_;
         const uint32_t nTok = TileTokens(k);
         LocalTensor<T> ob = outTile_.DeQue<T>();
 
@@ -509,6 +511,7 @@ private:
     uint32_t blkStart_ = 0;
     uint32_t blkTokens_ = 0;
     uint32_t tileNum_ = 0;
+    uint32_t tileRows_ = kTokenTile;
     float eps_ = 1e-6f;
     float recip_ = 1.0f / 128.0f;
     bool gqaExpand_ = false;
