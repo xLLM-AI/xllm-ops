@@ -34,6 +34,7 @@ constexpr size_t ATTR_NUM_KV_HEADS = 1;
 constexpr size_t ATTR_EPSILON = 2;
 constexpr size_t ATTR_GQA_EXPAND = 3;
 constexpr size_t ATTR_LAYOUT_BNSD = 4;
+constexpr size_t ATTR_KV_INTERLEAVED = 5;
 
 inline uint32_t RoundUp(uint32_t value, uint32_t align)
 {
@@ -46,10 +47,8 @@ uint64_t CalcUbNeed(uint32_t padStride, uint32_t ropeStride, uint32_t headTotal,
     const uint64_t tile = SQNR_TOKEN_TILE;
     uint64_t need = tile * 2 * (static_cast<uint64_t>(padStride) * elemBytes +
                                 static_cast<uint64_t>(ropeStride) * elemBytes * 2);  // inQkv/inCos/inSin ×2
-    need += tile * (static_cast<uint64_t>(padStride) * 4 + static_cast<uint64_t>(ropeStride) * 4 * 2 +
-                    static_cast<uint64_t>(headTotal) * SQNR_HEAD_DIM * 4);                // xf/cos/sin/outF
     need += 2ull * tile * headTotal * SQNR_HEAD_DIM * elemBytes;                          // out ×2
-    need += 2ull * SQNR_HEAD_DIM * elemBytes + 2ull * SQNR_HEAD_DIM * 4;                  // gamma ×2
+    need += 2ull * SQNR_HEAD_DIM * elemBytes + 2ull * SQNR_HEAD_DIM * 4;                  // inGamma ×2 + gamma fp32 ×2
     need += tile * SQNR_MAX_HEADS * 4;                                                    // sumsq
     return need;
 }
@@ -94,9 +93,11 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     const float *epsPtr = attrs->GetAttrPointer<float>(ATTR_EPSILON);
     const bool *gqaPtr = attrs->GetAttrPointer<bool>(ATTR_GQA_EXPAND);
     const bool *bnsdPtr = attrs->GetAttrPointer<bool>(ATTR_LAYOUT_BNSD);
+    const bool *kvIntPtr = attrs->GetAttrPointer<bool>(ATTR_KV_INTERLEAVED);
     const float eps = (epsPtr != nullptr) ? *epsPtr : 1e-6f;
     const bool gqaExpand = (gqaPtr != nullptr) ? *gqaPtr : false;
     const bool layoutBNSD = (bnsdPtr != nullptr) ? *bnsdPtr : false;
+    const bool kvInterleaved = (kvIntPtr != nullptr) ? *kvIntPtr : false;
 
     const uint32_t numHeadV = numHeadK;  // v1：Nv == Nk
     const uint32_t headTotal = numHeadQ + numHeadK + numHeadV;
@@ -164,6 +165,9 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     }
     if (layoutBNSD) {
         flags |= SQNR_FLAG_LAYOUT_BNSD;
+    }
+    if (kvInterleaved) {
+        flags |= SQNR_FLAG_KV_INTERLEAVED;
     }
     tilingData.set_flags(flags);
     tilingData.set_blockDim(blockDim);

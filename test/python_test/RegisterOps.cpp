@@ -1070,7 +1070,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> split_qkv_norm_rope_impl_npu(
     int64_t num_kv_heads,
     double epsilon,
     bool gqa_expand,
-    bool layout_bnsd) {
+    bool layout_bnsd,
+    bool kv_interleaved) {
   constexpr int64_t kHeadDim = 128;
   auto sizes = qkv.sizes().vec();
   const int64_t batch = sizes[0];
@@ -1101,6 +1102,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> split_qkv_norm_rope_impl_npu(
                eps_f,
                gqa_expand,
                layout_bnsd,
+               kv_interleaved,
                q,
                k,
                v);

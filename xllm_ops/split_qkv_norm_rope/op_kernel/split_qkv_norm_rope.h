@@ -28,50 +28,41 @@ using namespace AscendC;
 
 constexpr uint32_t kHeadDim = 128;              // head_dim 固定 128
 constexpr uint32_t kHalfDim = kHeadDim / 2;     // 64，RoPE half-split 分界
-constexpr uint32_t kMaxHeads = 16;              // UB 上界：Nq+Nk+Nv <= 16
-constexpr uint32_t kTokenTile = 8;              // 32B 对齐（见设计文档 §5.4）
+constexpr uint32_t kMaxHeads = 16;              // sumsq UB 上界：Nq+Nk <= kMaxHeads
+constexpr uint32_t kTokenTile = 8;              // 每 tile 的 token 行数；8 行是可整块搬送的最小 32B 对齐周期（行宽 2572B=4×643，nTok 需为 8 的倍数），也是 UB 预算安全点；16 行经核算结构性放不下
 // 每 tile 的 sumsq 个数 = kTokenTile × (Nq+Nk)，scale 链按 64 lane 向上取整分段
 
 constexpr uint32_t kFlagGqaExpand = 1u << 0;    // 1：k/v 扩张到 Nq 头
 constexpr uint32_t kFlagLayoutBNSD = 1u << 1;   // 1：[B,N,S,D]；0：[B,S,N*D]
+constexpr uint32_t kFlagKvInterleaved = 1u << 2;  // 1：输入行内 KV 按 head 交错 [K_i,V_i]；0：[全部 K | 全部 V]
 
 // ---------------------------------------------------------------------------
-// VF：逐行 QK-RMSNorm + 半分化 RoPE（只处理 q/k 头；v 在 VF 内做 fp32 直通）
-//   outF      : [kTokenTile, (Nq+Nk+Nv)*128] fp32 密集输出
-//   xf        : [kTokenTile, padStride]      fp32 qkv 整行
-//   cosf/sinf : [kTokenTile, ropeStride]     fp32（只用前 64 维，NeoX 半维）
-//   gammaQ/K  : [128]                        fp32
-//   sumsq     : [kTokenTile, kMaxHeads]      fp32 workspace
-// 固定处理 kTokenTile 行（末 tile 的脏行不会被拷出）。
+// SqnrNormRopeVfPack：逐行 QK-RMSNorm + 半分化 RoPE（只处理 q/k 头；v 由外层 UB→UB 直通拷贝）
+//   outT      : T 输出 tile，[kTokenTile, numHeadTotal*128]，行距 outStride
+//   xb        : T qkv tile，[kTokenTile, padStride]，行距 xStride
+//   cosT/sinT : T cos/sin，[kTokenTile, ropeStride]，只用前 64 维（NeoX 半维）
+//   gammaQ/K  : fp32 [128]
+//   sumsq     : fp32 workspace，[kTokenTile, Nq+Nk]，行距 = Nq+Nk（容量按 kMaxHeads 上界分配）
+// 固定处理 kTokenTile 行；末 tile 的脏行不会被拷出。
 //
-// 实测约束（详见设计文档 §10.1）：
-//   1) 行距必须 32B 对齐，否则 LoadAlign/StoreAlign 读错位（padStride 的由来）
-//   2) 拆成「q 组/k 组」两个 callee 会让活跃寄存器翻倍，慢 1.5x，故保持单循环
-//   3) 「保留 x1/x2 跨 pass」会把 LocalMemBar 从 1 次/tile 变成 64 次/tile，慢 2.6x
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// 快路径 VF（来自性能优化工作流 round1 选中的 sqnr-vf-instr-cut，每 tile 指令 2281 → ~1600）：
-//   pass1 每 (t,h)：Mul 起手 + 一次 MulAddDst 累加（9 → 6 条，删 Duplicate 与两次 Add）
-//   sumsq 行距 = Nq+Nk（= 8），整 tile 64 个 sumsq 恰好占一个寄存器宽度；
-//   每 tile 只做一次 64-lane scale 链（Muls/Adds/Sqrt/Div），per-head 只留 1 次 DIST_BRC 载入
-//   γ 每 tile 只装载 1 次，per token 折进 cos/sin：a=γ1·cos、c=γ1·sin、d=γ2·cos、b=-γ2·sin
-//   RoPE 每半 1 次 Mul + 1 次 MulAddDst（删掉专职取负的 Mul 与独立 Sub）
-// 前提：无（sumsq 段数按 Nq+Nk 运行期计算）。
-// ---------------------------------------------------------------------------
-// 快路径 VF（UNPACK 通路，Step 1）：
-//   in : xb 为 T（bf16/fp16）的 qkv tile，q/k 头直接从 T 载入（DIST_UNPACK_B16）再 Cast 到 fp32；
-//        cos/sin 同样直接从 T 载入；gammaQ/K 仍是 fp32
-//   out: outT 直接是输出 tile 的 T（每 token 行距 = numHeadTotal*128）
-//   与 pack 版的差别仅在"数据从哪来"：省掉整趟 cast-in（q/k 头 1024 元素/token）与
-//   cos/sin 的 fp32 缓冲；指令序（pass1 / 64-lane scale 链 / pass2 pack-store）完全一致。
-//   UNPACK 语义已由 perfopt/probe_unpack 在 bf16 上验证：1:1、顺序不变、两个 64-lane 半区都正确。
+// 实现要点（当前实现的约束）：
+//   1) q/k 与 cos/sin 全部用 LoadAlign<T, DIST_UNPACK_B16> 拆到 32 位 lane，紧跟一条寄存器内
+//      Cast<float, T, layoutZMrgZ>；无整 tile 的 cast-in 预处理与 fp32 tile 副本（gamma 仍是 fp32）。
+//   2) γ 折进 cos/sin（a=γ1·cos、c=γ1·sin、d=γ2·cos、b=-γ2·sin）；折进后的 4 个常量无法在
+//      运行期选择（VF 内禁止运行期分支、寄存器不可运行期索引），故 q 组/k 组循环体各实例化一次，
+//      仍在同一 __simd_vf__、同一寄存器预算内。
+//   3) UB 行距必须 32B 对齐，否则 LoadAlign/StoreAlign 读错位（padStride 的由来）。
+//   4) pass1 每 (t,h)：两半各一次取数+Cast，Mul 起手 + 一次 MulAddDst 累加 + ReduceSum + 单元素写回；
+//      scale 链每 tile 一次（segs 段 64-lane，Muls/Adds/Sqrt/Div），per-head 只留 1 次 DIST_BRC 广播；
+//      RoPE 每半 1 次 Mul + 1 次 MulAddDst。
+//   5) 输出在寄存器内 Cast 成 T 后 StoreAlign DIST_PACK_B32 直写（pack-store），无整块 cast-out。
 // ---------------------------------------------------------------------------
 template <typename T>
 __simd_vf__ inline void SqnrNormRopeVfPack(
     __ubuf__ T *outT, __ubuf__ T *xb, __ubuf__ T *cosT, __ubuf__ T *sinT,
     __ubuf__ float *gammaQ, __ubuf__ float *gammaK, __ubuf__ float *sumsq,
     uint16_t numHeadQ, uint16_t numHeadK, uint16_t xStride, uint16_t outStride, uint16_t ropeStride,
-    float eps, float recip)
+    uint16_t kvHeadStep, float eps, float recip)
 {
     using namespace AscendC::Reg;
     RegTensor<float> y1;
@@ -98,6 +89,8 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     MaskReg mOne = CreateMask<float, MaskPattern::VL1>();
 
     const uint16_t qkHeads = static_cast<uint16_t>(numHeadQ + numHeadK);
+    // 输入行内 KV 区起点（k/v 区）；q 头从行首按 D 连续，k 头按 kvHeadStep 步进
+    const uint32_t kvHeadBase = static_cast<uint32_t>(numHeadQ) * kHeadDim;
     // sumsq 段数：每段 64 lane，向上取整覆盖 kTokenTile*(Nq+Nk) 个有效元素；
     // 末段多出的 lane 只写回 sumsq，pass2 只按 (t,h) 单点广播读取，不回读这些 lane。
     constexpr uint16_t kSeg = 64;
@@ -112,7 +105,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     // pass 1：每 (token, head) 的 sumsq（q/k 直接从 T 载入）
     for (uint16_t t = 0; t < static_cast<uint16_t>(kTokenTile); ++t) {
         __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
-        for (uint16_t h = 0; h < qkHeads; ++h) {
+        for (uint16_t h = 0; h < numHeadQ; ++h) {
             __ubuf__ T *src = row + static_cast<uint32_t>(h) * kHeadDim;
             LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
             Cast<float, T, AscendC::layoutZMrgZ>(y1, tv, mFull);
@@ -123,6 +116,19 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
             ReduceSum(acc, acc, mFull);
             StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(
                 sumsq + static_cast<uint32_t>(t) * qkHeads + h, acc, mOne);
+        }
+        // k 头：块状布局 kvHeadStep = D（= 连续），KV 交错布局 kvHeadStep = 2D（跨过 v）
+        for (uint16_t h = 0; h < numHeadK; ++h) {
+            __ubuf__ T *src = row + kvHeadBase + static_cast<uint32_t>(h) * kvHeadStep;
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
+            Cast<float, T, AscendC::layoutZMrgZ>(y1, tv, mFull);
+            Mul(acc, y1, y1, mFull);
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + kHalfDim);
+            Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mFull);
+            MulAddDst(acc, y2, y2, mFull);
+            ReduceSum(acc, acc, mFull);
+            StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(
+                sumsq + static_cast<uint32_t>(t) * qkHeads + numHeadQ + h, acc, mOne);
         }
     }
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
@@ -182,7 +188,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
         Mul(cb, gk2, sn, mFull);
         for (uint16_t h = 0; h < numHeadK; ++h) {
             uint32_t hh = static_cast<uint32_t>(numHeadQ) + h;
-            __ubuf__ T *src = row + hh * kHeadDim;
+            __ubuf__ T *src = row + kvHeadBase + static_cast<uint32_t>(h) * kvHeadStep;
             __ubuf__ T *dst = orow + hh * kHeadDim;
             LoadAlign<float, LoadDist::DIST_BRC_B32>(sg, sumsq + static_cast<uint32_t>(t) * qkHeads + hh);
             LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
@@ -230,6 +236,7 @@ public:
 
         gqaExpand_ = (tiling->flags & kFlagGqaExpand) != 0;
         layoutBNSD_ = (tiling->flags & kFlagLayoutBNSD) != 0;
+        kvInterleaved_ = (tiling->flags & kFlagKvInterleaved) != 0;
         kvOutHeads_ = gqaExpand_ ? numHeadQ_ : numHeadK_;
         gqaGroup_ = (numHeadK_ == 0) ? 1 : (numHeadQ_ / numHeadK_);
 
@@ -253,13 +260,13 @@ public:
         pipe_->InitBuffer(bufGammaK_, kHeadDim * sizeof(float));
         pipe_->InitBuffer(bufSum_, kTokenTile * kMaxHeads * sizeof(float));
 
-        // 本核 token 区间与 tile 数（供三级流水与 VF 分派使用）
+        // 本核 token 区间与 tile 数（供三级流水使用）
         const uint32_t blockIdx = AscendC::GetBlockIdx();
         blkStart_ = blockIdx * tokenPerCore_;
         blkTokens_ = (blockIdx == blockDim_ - 1) ? lastBlkTokens_ : tokenPerCore_;
         tileNum_ = (blkTokens_ + kTokenTile - 1) / kTokenTile;
 
-        // 只有一条路径：sumsq 段数按 ceil(kTokenTile*(Nq+Nk)/64) 运行期算，头数不再限制为 8。
+        // 只有一条路径：sumsq 段数按 ceil(kTokenTile*(Nq+Nk)/64) 运行期算，任意 Nq+Nk <= kMaxHeads 均可覆盖。
     }
 
     __aicore__ inline void Process()
@@ -315,7 +322,7 @@ private:
         const uint32_t nTok = TileTokens(k);
         DataCopyPadExtParams<T> pad{false, 0, 0, 0};
 
-        // 每 token 一行单独搬：GM 行距 2572B 非 32B 对齐，UB 侧落到 32B 对齐的 padStride 行距
+        // 每 token 一行单独搬：GM 行距（qkvStride_*sizeof(T)）不保证 32B 对齐，UB 侧落到 32B 对齐的 padStride 行距
         LocalTensor<T> xb = inQkv_.AllocTensor<T>();
         for (uint32_t t = 0; t < nTok; ++t) {
             DataCopyPad(xb[t * padStride_], qkvGm_[(t0 + t) * qkvStride_],
@@ -340,32 +347,47 @@ private:
         LocalTensor<T> cb = inCos_.DeQue<T>();
         LocalTensor<T> sb = inSin_.DeQue<T>();
 
-        // ---- 快路径判定 + 输出 tile 分配（pack-store 直写目标）----
+        // ---- 输出 tile 分配（pack-store 直写目标）----
         AscendC::LocalTensor<T> ob = outTile_.AllocTensor<T>();
         const uint32_t rowElems = numHeadTotal_ * kHeadDim;
         const uint32_t qkElems = (numHeadQ_ + numHeadK_) * kHeadDim;
         const uint32_t vElems = numHeadV_ * kHeadDim;
 
-        // ---- v 直通：一次多行 UB→UB 拷贝，原样 T，不经 fp32 ----
-        //   UB 侧 blockLen/srcGap/dstGap 单位均为 32B 块
-        AscendC::DataCopyParams vParams{
-            static_cast<uint16_t>(kTokenTile),
-            static_cast<uint16_t>(vElems * sizeof(T) / 32),
-            static_cast<uint16_t>((padStride_ - vElems) * sizeof(T) / 32),
-            static_cast<uint16_t>((rowElems - vElems) * sizeof(T) / 32)};
-        AscendC::DataCopy(ob[qkElems], xb[qkElems], vParams);
+        // ---- v 直通：UB→UB 拷贝，原样 T，不经 fp32 ----
+        //   块状布局一次多行搬完；KV 交错布局下 v 头间隔 2D，按 head 逐个搬
+        if (!kvInterleaved_) {
+            //   UB 侧 blockLen/srcGap/dstGap 单位均为 32B 块
+            AscendC::DataCopyParams vParams{
+                static_cast<uint16_t>(kTokenTile),
+                static_cast<uint16_t>(vElems * sizeof(T) / 32),
+                static_cast<uint16_t>((padStride_ - vElems) * sizeof(T) / 32),
+                static_cast<uint16_t>((rowElems - vElems) * sizeof(T) / 32)};
+            AscendC::DataCopy(ob[qkElems], xb[qkElems], vParams);
+        } else {
+            const uint16_t headBlocks = static_cast<uint16_t>(kHeadDim * sizeof(T) / 32);
+            for (uint16_t h = 0; h < static_cast<uint16_t>(numHeadV_); ++h) {
+                AscendC::DataCopyParams vParams{
+                    static_cast<uint16_t>(kTokenTile),
+                    headBlocks,
+                    static_cast<uint16_t>((padStride_ - kHeadDim) * sizeof(T) / 32),
+                    static_cast<uint16_t>((rowElems - kHeadDim) * sizeof(T) / 32)};
+                AscendC::DataCopy(ob[qkElems + static_cast<uint32_t>(h) * kHeadDim],
+                                  xb[(numHeadQ_ + 2 * h + 1) * kHeadDim], vParams);
+            }
+        }
 
         // ---- norm + rope (VF)：q/k 与 cos/sin 直接从 T 载入，无 cast-in ----
         AscendC::LocalTensor<float> sumL = bufSum_.Get<float>();
         AscendC::LocalTensor<float> gqf = bufGammaQ_.Get<float>();
         AscendC::LocalTensor<float> gkf = bufGammaK_.Get<float>();
-        // v 已由上面的多行拷贝完成；VF 读 xb/cb/sb，故三个队列在 VF 之后才释放。
+        // v 已由上面的拷贝完成；VF 读 xb/cb/sb，故三个队列在 VF 之后才释放。
         SqnrNormRopeVfPack<T>((__ubuf__ T *)ob.GetPhyAddr(), (__ubuf__ T *)xb.GetPhyAddr(),
             (__ubuf__ T *)cb.GetPhyAddr(), (__ubuf__ T *)sb.GetPhyAddr(),
             (__ubuf__ float *)gqf.GetPhyAddr(), (__ubuf__ float *)gkf.GetPhyAddr(),
             (__ubuf__ float *)sumL.GetPhyAddr(), static_cast<uint16_t>(numHeadQ_),
             static_cast<uint16_t>(numHeadK_), static_cast<uint16_t>(padStride_),
-            static_cast<uint16_t>(rowElems), static_cast<uint16_t>(ropeStride_), eps_, recip_);
+            static_cast<uint16_t>(rowElems), static_cast<uint16_t>(ropeStride_),
+            static_cast<uint16_t>(kvInterleaved_ ? 2 * kHeadDim : kHeadDim), eps_, recip_);
         AscendC::PipeBarrier<PIPE_V>();
         inQkv_.FreeTensor(xb);
         inCos_.FreeTensor(cb);
@@ -491,6 +513,7 @@ private:
     float recip_ = 1.0f / 128.0f;
     bool gqaExpand_ = false;
     bool layoutBNSD_ = false;
+    bool kvInterleaved_ = false;
 };
 
 }  // namespace kernels

@@ -168,3 +168,91 @@ def test_split_qkv_norm_rope(batch, seq, nq, nkv, tail, rope_stride,
     # v is a pure copy of the input columns, so it must match bit-exactly.
     torch.testing.assert_close(
         v_npu.cpu().float(), v_ref.float(), atol=0, rtol=0)
+
+
+def _to_interleaved(qkv, num_q_heads, num_kv_heads):
+    """Repack ``[Q | K... | V... | tail]`` -> ``[Q | K0 V0 K1 V1 ... | tail]``."""
+    b, s, _ = qkv.shape
+    q_end = num_q_heads * HEAD_DIM
+    kv_end = q_end + 2 * num_kv_heads * HEAD_DIM
+    q = qkv[..., :q_end]
+    k = qkv[..., q_end:q_end + num_kv_heads * HEAD_DIM].reshape(
+        b, s, num_kv_heads, HEAD_DIM)
+    v = qkv[..., q_end + num_kv_heads * HEAD_DIM:kv_end].reshape(
+        b, s, num_kv_heads, HEAD_DIM)
+    kv_interleaved = torch.stack([k, v], dim=3).reshape(
+        b, s, 2 * num_kv_heads * HEAD_DIM)
+    return torch.cat([q, kv_interleaved, qkv[..., kv_end:]], dim=-1).contiguous()
+
+
+# (batch, seq, nq, nkv, stride_tail, rope_stride, gqa_expand, layout_bnsd)
+INTERLEAVED_CASES = [
+    (1, 512, 6, 2, 6, 64, False, False),   # main scenario, K_iV_i interleaved
+    (1, 512, 6, 2, 6, 64, True, False),    # interleaved + GQA expand
+    (1, 7, 6, 2, 6, 64, False, False),     # interleaved tail tile
+    (2, 64, 6, 2, 6, 64, False, True),     # interleaved + BNSD + B > 1
+]
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "batch,seq,nq,nkv,tail,rope_stride,gqa_expand,layout_bnsd", INTERLEAVED_CASES)
+def test_split_qkv_norm_rope_kv_interleaved(
+        batch, seq, nq, nkv, tail, rope_stride, gqa_expand, layout_bnsd, dtype):
+    if not _get_device():
+        return
+
+    torch.manual_seed(20261106)
+    eps = 1e-6
+    stride = (nq + 2 * nkv) * HEAD_DIM + tail
+
+    qkv = (torch.randn(batch, seq, stride, dtype=torch.float32) * 0.5).to(dtype)
+    q_gamma = (1.0 + 0.1 * torch.randn(HEAD_DIM, dtype=torch.float32)).to(dtype)
+    k_gamma = (1.0 + 0.1 * torch.randn(HEAD_DIM, dtype=torch.float32)).to(dtype)
+
+    inv_freq = 1.0 / (10000.0**(torch.arange(
+        0, HEAD_DIM, 2, dtype=torch.float32) / HEAD_DIM))
+    pos = torch.arange(seq, dtype=torch.float32).view(1, seq, 1)
+    freqs = pos * inv_freq.view(1, 1, -1)
+    cos = torch.zeros(batch, seq, rope_stride, dtype=torch.float32)
+    sin = torch.zeros(batch, seq, rope_stride, dtype=torch.float32)
+    cos[..., :HALF_DIM] = freqs.cos().expand(batch, seq, HALF_DIM)
+    sin[..., :HALF_DIM] = freqs.sin().expand(batch, seq, HALF_DIM)
+    cos = cos.to(dtype)
+    sin = sin.to(dtype)
+
+    # Reference consumes the block layout; the kernel consumes the interleaved one.
+    q_ref, k_ref, v_ref = split_qkv_norm_rope_torch(
+        qkv, q_gamma, k_gamma, cos, sin, nq, nkv, eps, gqa_expand, layout_bnsd)
+    qkvi = _to_interleaved(qkv, nq, nkv)
+
+    q_npu, k_npu, v_npu = custom_ops.split_qkv_norm_rope_npu(
+        qkvi.npu(),
+        q_gamma.npu(),
+        k_gamma.npu(),
+        cos.npu(),
+        sin.npu(),
+        nq,
+        nkv,
+        eps,
+        gqa_expand,
+        layout_bnsd,
+        True,  # kv_interleaved
+    )
+    torch.npu.synchronize()
+
+    if dtype == torch.float16:
+        atol = rtol = 2e-3
+    else:
+        atol = rtol = 2e-2
+
+    assert tuple(q_npu.shape) == tuple(q_ref.shape)
+    assert tuple(k_npu.shape) == tuple(k_ref.shape)
+    assert tuple(v_npu.shape) == tuple(v_ref.shape)
+
+    torch.testing.assert_close(
+        q_npu.cpu().float(), q_ref.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(
+        k_npu.cpu().float(), k_ref.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(
+        v_npu.cpu().float(), v_ref.float(), atol=0, rtol=0)

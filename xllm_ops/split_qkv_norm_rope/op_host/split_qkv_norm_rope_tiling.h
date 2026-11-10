@@ -31,6 +31,7 @@ constexpr uint32_t SQNR_TOKEN_TILE = 8;
 constexpr uint32_t SQNR_MAX_HEADS = 16;
 constexpr uint32_t SQNR_FLAG_GQA_EXPAND = 1u << 0;
 constexpr uint32_t SQNR_FLAG_LAYOUT_BNSD = 1u << 1;
+constexpr uint32_t SQNR_FLAG_KV_INTERLEAVED = 1u << 2;  // 输入行内 KV 按 head 交错 [K_i,V_i]
 
 // 入口 tilingKey 固定 0：kernel 只有一个入口（无 TILING_KEY_IS 分支），
 // dtype 由框架按 bin 展开（kernel 侧用 DTYPE_QKV），因此 SetTilingKey(0)。

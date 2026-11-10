@@ -32,6 +32,7 @@ constexpr size_t OUT_V = 2;
 constexpr int64_t kHeadDim = 128;
 constexpr size_t ATTR_NUM_Q_HEADS = 0;
 constexpr size_t ATTR_NUM_KV_HEADS = 1;
+constexpr size_t ATTR_GQA_EXPAND = 3;
 constexpr size_t ATTR_LAYOUT_BNSD = 4;
 
 void SetOutputShape(gert::Shape *out, int64_t batch, int64_t seqLen, int64_t heads, bool bnsd)
@@ -69,11 +70,13 @@ static ge::graphStatus InferShapeSplitQkvNormRope(gert::InferShapeContext *conte
 
     int64_t numHeadQ = 1;
     int64_t numHeadK = 1;
+    bool gqaExpand = false;
     bool layoutBNSD = false;
     const gert::RuntimeAttrs *attrs = context->GetAttrs();
     if (attrs != nullptr) {
         const int64_t *nq = attrs->GetAttrPointer<int64_t>(ATTR_NUM_Q_HEADS);
         const int64_t *nk = attrs->GetAttrPointer<int64_t>(ATTR_NUM_KV_HEADS);
+        const bool *gqa = attrs->GetAttrPointer<bool>(ATTR_GQA_EXPAND);
         const bool *bnsd = attrs->GetAttrPointer<bool>(ATTR_LAYOUT_BNSD);
         if (nq != nullptr) {
             numHeadQ = *nq;
@@ -81,14 +84,19 @@ static ge::graphStatus InferShapeSplitQkvNormRope(gert::InferShapeContext *conte
         if (nk != nullptr) {
             numHeadK = *nk;
         }
+        if (gqa != nullptr) {
+            gqaExpand = *gqa;
+        }
         if (bnsd != nullptr) {
             layoutBNSD = *bnsd;
         }
     }
 
     SetOutputShape(qShape, batch, seqLen, numHeadQ, layoutBNSD);
-    SetOutputShape(kShape, batch, seqLen, numHeadK, layoutBNSD);
-    SetOutputShape(vShape, batch, seqLen, numHeadK, layoutBNSD);  // v1：Nv == Nk
+    // gqa_expand 时 k/v 输出扩张到 Nq 头，与 kernel 的 kvOutHeads_ 保持一致
+    const int64_t kvHeads = gqaExpand ? numHeadQ : numHeadK;
+    SetOutputShape(kShape, batch, seqLen, kvHeads, layoutBNSD);
+    SetOutputShape(vShape, batch, seqLen, kvHeads, layoutBNSD);  // v1：Nv == Nk
     return GRAPH_SUCCESS;
 }
 

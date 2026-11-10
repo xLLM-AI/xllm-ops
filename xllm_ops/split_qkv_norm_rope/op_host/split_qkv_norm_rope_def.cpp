@@ -82,6 +82,7 @@ public:
         this->Attr("epsilon").AttrType(OPTIONAL).Float(1e-6f);
         this->Attr("gqa_expand").AttrType(OPTIONAL).Bool(false);
         this->Attr("layout_bnsd").AttrType(OPTIONAL).Bool(false);
+        this->Attr("kv_interleaved").AttrType(OPTIONAL).Bool(false);
 
         // 仅 Ascend 950（DAV_3510）
         OpAICoreConfig a5Cfg;

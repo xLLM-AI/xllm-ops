@@ -45,6 +45,7 @@ B, S      = batch / sequence
 D         = head_dim，固定 128
 Nq, Nk, Nv= q / k / v 头数，v1 约束 Nv == Nk，Nq % Nk == 0，Nq+Nk+Nv <= 16
 stride    = qkv 行跨度（元素），>= (Nq+Nk+Nv)*D，尾部 tail 列被忽略
+kv_interleaved = 行内 KV 布局：false 为 [Q | K... | V... | tail]，true 为 [Q | K0 V0 K1 V1 ... | tail]
 ropeStride= cos/sin 行跨度（元素），取值 [64, 128]；只用前 64 维
 ```
 
@@ -73,7 +74,7 @@ aclnnStatus aclnnSplitQkvNormRopeGetWorkspaceSize(
     const aclTensor *qkv, const aclTensor *qGamma, const aclTensor *kGamma,
     const aclTensor *cos, const aclTensor *sin,
     int64_t numHeadQ, int64_t numHeadK, float epsilon,
-    bool gqaExpand, bool layoutBNSD,
+    bool gqaExpand, bool layoutBNSD, bool kvInterleaved,
     aclTensor *qOut, aclTensor *kOut, aclTensor *vOut,
     uint64_t *workspaceSize, aclOpExecutor **executor);
 
@@ -100,6 +101,7 @@ aclnnStatus aclnnSplitQkvNormRope(
 | `epsilon` | Float | 1e-6 | RMSNorm eps |
 | `gqa_expand` | Bool | false | k/v 是否扩张到 `Nq` 头 |
 | `layout_bnsd` | Bool | false | 输出布局 `[B,H,S,D]` / `[B,S,H*D]` |
+| `kv_interleaved` | Bool | false | 输入行内 KV 是否按 head 交错 `[K_i,V_i]`（JoyOV2 `to_qkv` 的打包方式） |
 
 约束（host 侧校验，失败返回 `ACLNN_ERR_PARAM_INVALID`）：
 
