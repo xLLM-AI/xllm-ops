@@ -67,19 +67,23 @@ ge::graphStatus tile_varlen(gert::TilingContext* context) {
   const gert::Shape& state_indices =
       context->GetInputShape(9)->GetStorageShape();
   if (qkv.GetDimNum() != 2 || z.GetDimNum() != 3 || conv.GetDimNum() != 3 ||
-      state_indices.GetDimNum() != 1) {
+      (state_indices.GetDimNum() != 1 && state_indices.GetDimNum() != 2)) {
     return ge::GRAPH_FAILED;
   }
   const int64_t tokens = qkv.GetDim(0);
   const int64_t channels = qkv.GetDim(1);
   const int64_t batch = state_indices.GetDim(0);
+  const bool split_indices = state_indices.GetDimNum() == 2;
+  if (split_indices && state_indices.GetDim(1) != 2) {
+    return ge::GRAPH_FAILED;
+  }
   const int64_t slots = conv.GetDim(0);
   const int64_t stride = conv.GetDim(1) - 2;
   const int64_t nv = z.GetDim(1);
   const int64_t qk_width = channels - nv * 128;
-  if (tokens < 1 || batch < 1 || batch > 128 || slots < 1 || slots > 1024 ||
-      stride < 2 || stride > 17 || nv < 1 || qk_width < 256 ||
-      qk_width % 256 != 0) {
+  if (tokens < 1 || batch < 1 || batch > 128 || slots < 1 ||
+      (!split_indices && slots > 1024) || stride < 2 || stride > 17 || nv < 1 ||
+      qk_width < 256 || qk_width % 256 != 0) {
     return ge::GRAPH_FAILED;
   }
   const int64_t nk = qk_width / 256;
@@ -97,7 +101,12 @@ ge::graphStatus tile_varlen(gert::TilingContext* context) {
       !has_shape(context->GetInputShape(6)->GetStorageShape(), {nv}) ||
       !has_shape(context->GetInputShape(7)->GetStorageShape(), {nv}) ||
       !has_shape(context->GetInputShape(8)->GetStorageShape(),
-                 {slots * stride, nv, 128, 128}) ||
+                 {split_indices
+                      ? context->GetInputShape(8)->GetStorageShape().GetDim(0)
+                      : slots * stride,
+                  nv,
+                  128,
+                  128}) ||
       !has_shape(context->GetInputShape(10)->GetStorageShape(), {batch}) ||
       !has_shape(context->GetInputShape(11)->GetStorageShape(), {128}) ||
       !has_shape(context->GetInputShape(12)->GetStorageShape(), {batch + 1})) {
@@ -123,6 +132,7 @@ ge::graphStatus tile_varlen(gert::TilingContext* context) {
   }
   MegaGdnMtpDecodeVarlenTilingData data;
   data.set_batch_size(batch);
+  data.set_state_index_width(split_indices ? 2 : 1);
   data.set_sequence_length(stride);
   data.set_num_k_heads(nk);
   data.set_num_v_heads(nv);

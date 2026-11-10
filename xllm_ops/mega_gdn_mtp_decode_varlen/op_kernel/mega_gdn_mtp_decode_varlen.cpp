@@ -20,6 +20,7 @@ struct MegaGdnMtpDecodeVarlenTilingData {
   int64_t sequence_length;
   int64_t num_k_heads;
   int64_t num_v_heads;
+  int64_t state_index_width;
 };
 
 template <bool FlaSsmStateLayout>
@@ -64,7 +65,8 @@ AICORE PTO_INLINE void run_varlen(
       static_cast<int32_t>(data.num_v_heads),
       static_cast<int32_t>(data.batch_size),
       static_cast<int32_t>(data.sequence_length),
-      reinterpret_cast<__gm__ int32_t*>(cu_seqlens));
+      reinterpret_cast<__gm__ int32_t*>(cu_seqlens),
+      static_cast<int32_t>(data.state_index_width));
 }
 
 extern "C" __global__ __aicore__ void mega_gdn_mtp_decode_varlen(
