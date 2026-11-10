@@ -8,6 +8,11 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+set(XLLM_OPS_SOURCE_IDENTITY_DEPENDENCY)
+if(EXISTS "${CMAKE_SOURCE_DIR}/../.xllm_ops_source_identity")
+    set(XLLM_OPS_SOURCE_IDENTITY_DEPENDENCY "${CMAKE_SOURCE_DIR}/../.xllm_ops_source_identity")
+endif()
+
 function(filter_copy_files SELECTED_FILES SELECTED_DIRS)
     set(_selected_files "")
     set(_selected_dirs "")
@@ -249,6 +254,9 @@ function(add_ops_info_target)
             ${OPS_INFO_JSON}
             COMMAND mkdir -p ${CUSTOM_OPS_INFO_DIR}
             COMMAND cp -f ${OPS_INFO_JSON} ${CUSTOM_OPS_INFO_DIR}
+            DEPENDS ${OPS_INFO_INI} ${OPS_INFO_INNER_INI} ${OPS_INFO_EXCLUDE_INI}
+                    ${ASCENDC_CMAKE_UTIL_DIR}/parse_ini_to_json.py
+                    ${XLLM_OPS_SOURCE_IDENTITY_DEPENDENCY}
     )
 
     add_custom_target(${OPS_INFO_TARGET} ALL
@@ -428,12 +436,14 @@ function(add_ops_src_copy)
                     COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
                     COMMAND rm -rf ${SRC_COPY_DST}/op_kernel/
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS ${XLLM_OPS_SOURCE_IDENTITY_DEPENDENCY}
             )
         else()
             add_custom_command(OUTPUT ${_BUILD_FLAG}
                     COMMAND mkdir -p ${SRC_COPY_DST}
                     COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS ${XLLM_OPS_SOURCE_IDENTITY_DEPENDENCY}
             )
         endif()
 
@@ -538,7 +548,9 @@ function(add_bin_compile_target)
 
             set(DYNAMIC_PY_FILE ${OP_SRC_OUT_DIR}/${op_type}.py)
             add_custom_command(OUTPUT ${DYNAMIC_PY_FILE}
-                    COMMAND cp -rf ${ASCEND_IMPL_OUT_DIR}/dynamic/${op_file}.py ${DYNAMIC_PY_FILE}
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            ${ASCEND_IMPL_OUT_DIR}/dynamic/${op_file}.py ${DYNAMIC_PY_FILE}
+                    DEPENDS ${ASCEND_IMPL_OUT_DIR}/dynamic/${op_file}.py
                     # COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/scripts/update_get_kernel_source.sh ${DYNAMIC_PY_FILE}
             )
 
@@ -628,6 +640,7 @@ function(add_bin_compile_target)
             add_custom_command(OUTPUT ${_BUILD_FLAG}
                     COMMAND ${_BUILD_COMMAND}
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS ${DYNAMIC_PY_FILE} ${XLLM_OPS_SOURCE_IDENTITY_DEPENDENCY}
                     WORKING_DIRECTORY ${GEN_OUT_DIR}
             )
 

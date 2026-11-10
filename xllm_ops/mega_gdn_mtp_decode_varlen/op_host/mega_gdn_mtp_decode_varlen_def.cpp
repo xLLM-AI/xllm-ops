@@ -115,6 +115,7 @@ class MegaGdnMtpDecodeVarlen final : public OpDef {
         .NeedCheckSupportFlag(false)
         .PrecisionReduceFlag(false)
         .ExtendCfgInfo("coreType.value", "AiCore");
+    this->AICore().AddConfig("ascend910b", config);
     this->AICore().AddConfig("ascend910_93", config);
   }
 };

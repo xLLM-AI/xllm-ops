@@ -9,6 +9,8 @@ add_ops_compile_options(
     OPTIONS --cce-auto-sync=on
             -Wno-deprecated-declarations
             -Wno-error
+            -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel
+            -I${CMAKE_CURRENT_SOURCE_DIR}/../../mega_gdn_mtp_decode/op_kernel
             -I${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/pto-isa/include
 )
 

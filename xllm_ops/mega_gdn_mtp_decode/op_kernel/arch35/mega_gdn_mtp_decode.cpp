@@ -8,6 +8,7 @@ struct MegaGdnMtpDecodeTilingData {
   int64_t sequence_length;
   int64_t num_k_heads;
   int64_t num_v_heads;
+  int64_t state_index_width;
 };
 
 #if defined(PTO_NPU_ARCH_A5)
@@ -24,43 +25,41 @@ template <int32_t SpeculativeTokens,
           bool FlaSsmStateLayout = true,
           bool UseRegBase = false>
 #endif
-AICORE PTO_INLINE void RunMegaGdnMtpDecode(
-    GM_ADDR qkv,
-    GM_ADDR z,
-    GM_ADDR b,
-    GM_ADDR a,
-    GM_ADDR conv_weight,
-    GM_ADDR conv_state,
-    GM_ADDR a_log,
-    GM_ADDR dt_bias,
-    GM_ADDR ssm_state,
-    GM_ADDR read_state_indices,
-    GM_ADDR write_state_indices,
-    GM_ADDR num_accepted_tokens,
-    GM_ADDR norm_weight,
-    GM_ADDR conv_out,
-    GM_ADDR conv_state_out,
-    GM_ADDR ssm_state_out,
-    GM_ADDR out,
-    int32_t num_k_heads,
-    int32_t num_v_heads,
-    int32_t batch_size,
-    int32_t runtime_sequence_length) {
+AICORE PTO_INLINE void RunMegaGdnMtpDecode(GM_ADDR qkv,
+                                           GM_ADDR z,
+                                           GM_ADDR b,
+                                           GM_ADDR a,
+                                           GM_ADDR conv_weight,
+                                           GM_ADDR conv_state,
+                                           GM_ADDR a_log,
+                                           GM_ADDR dt_bias,
+                                           GM_ADDR ssm_state,
+                                           GM_ADDR read_state_indices,
+                                           GM_ADDR write_state_indices,
+                                           GM_ADDR num_accepted_tokens,
+                                           GM_ADDR norm_weight,
+                                           GM_ADDR conv_out,
+                                           GM_ADDR conv_state_out,
+                                           GM_ADDR ssm_state_out,
+                                           GM_ADDR out,
+                                           int32_t num_k_heads,
+                                           int32_t num_v_heads,
+                                           int32_t batch_size,
+                                           int32_t runtime_sequence_length,
+                                           int32_t state_index_width) {
 #if defined(PTO_NPU_ARCH_A5)
-  mega_gdn_mtp_decode_pto::Run<
-      SpeculativeTokens,
-      UseQkGroupCache,
-      UseDeferredNorm,
-      UseTwoOwnerQkGroups,
-      FlaSsmStateLayout,
-      UseRegBase>(
+  mega_gdn_mtp_decode_pto::Run<SpeculativeTokens,
+                               UseQkGroupCache,
+                               UseDeferredNorm,
+                               UseTwoOwnerQkGroups,
+                               FlaSsmStateLayout,
+                               UseRegBase>(
 #else
-  mega_gdn_mtp_decode_pto::Run<
-      SpeculativeTokens,
-      UseQkGroupCache,
-      UseDeferredNorm,
-      FlaSsmStateLayout,
-      UseRegBase>(
+  mega_gdn_mtp_decode_pto::Run<SpeculativeTokens,
+                               UseQkGroupCache,
+                               UseDeferredNorm,
+                               FlaSsmStateLayout,
+                               UseRegBase>(
 #endif
       reinterpret_cast<__gm__ bfloat16_t*>(qkv),
       reinterpret_cast<__gm__ bfloat16_t*>(z),
@@ -82,7 +81,8 @@ AICORE PTO_INLINE void RunMegaGdnMtpDecode(
       num_k_heads,
       num_v_heads,
       batch_size,
-      runtime_sequence_length);
+      runtime_sequence_length,
+      state_index_width);
 }
 
 extern "C" __global__ __aicore__ void mega_gdn_mtp_decode(
@@ -115,84 +115,77 @@ extern "C" __global__ __aicore__ void mega_gdn_mtp_decode(
   (void)workspace;
 
 #if defined(PTO_NPU_ARCH_A5)
-#define RUN_MTP_IMPL(                                                       \
-    K,                                                                       \
-    USE_QK_GROUP_CACHE,                                                      \
-    USE_DEFERRED_NORM,                                                       \
-    USE_TWO_OWNER_QK_GROUPS,                                                 \
-    FLA_SSM_STATE_LAYOUT,                                                    \
-    USE_REGBASE)                                                             \
-  RunMegaGdnMtpDecode<                                                      \
-      K,                                                                    \
-      USE_QK_GROUP_CACHE,                                                   \
-      USE_DEFERRED_NORM,                                                    \
-      USE_TWO_OWNER_QK_GROUPS,                                              \
-      FLA_SSM_STATE_LAYOUT,                                                 \
-      USE_REGBASE>
+#define RUN_MTP_IMPL(K,                        \
+                     USE_QK_GROUP_CACHE,       \
+                     USE_DEFERRED_NORM,        \
+                     USE_TWO_OWNER_QK_GROUPS,  \
+                     FLA_SSM_STATE_LAYOUT,     \
+                     USE_REGBASE)              \
+  RunMegaGdnMtpDecode<K,                       \
+                      USE_QK_GROUP_CACHE,      \
+                      USE_DEFERRED_NORM,       \
+                      USE_TWO_OWNER_QK_GROUPS, \
+                      FLA_SSM_STATE_LAYOUT,    \
+                      USE_REGBASE>
 #else
-#define RUN_MTP_IMPL(                                                       \
-    K,                                                                       \
-    USE_QK_GROUP_CACHE,                                                      \
-    USE_DEFERRED_NORM,                                                       \
-    USE_TWO_OWNER_QK_GROUPS,                                                 \
-    FLA_SSM_STATE_LAYOUT,                                                    \
-    USE_REGBASE)                                                             \
-  RunMegaGdnMtpDecode<                                                      \
-      K,                                                                    \
-      USE_QK_GROUP_CACHE,                                                   \
-      USE_DEFERRED_NORM,                                                    \
-      FLA_SSM_STATE_LAYOUT>
+#define RUN_MTP_IMPL(K,                       \
+                     USE_QK_GROUP_CACHE,      \
+                     USE_DEFERRED_NORM,       \
+                     USE_TWO_OWNER_QK_GROUPS, \
+                     FLA_SSM_STATE_LAYOUT,    \
+                     USE_REGBASE)             \
+  RunMegaGdnMtpDecode<K,                      \
+                      USE_QK_GROUP_CACHE,     \
+                      USE_DEFERRED_NORM,      \
+                      FLA_SSM_STATE_LAYOUT>
 #endif
 
-#define RUN_MTP(                                                            \
-    K,                                                                       \
-    USE_QK_GROUP_CACHE,                                                      \
-    USE_DEFERRED_NORM,                                                       \
-    USE_TWO_OWNER_QK_GROUPS,                                                 \
-    FLA_SSM_STATE_LAYOUT)                                                    \
-  RUN_MTP_WITH_REGBASE(                                                     \
-      K,                                                                    \
-      USE_QK_GROUP_CACHE,                                                   \
-      USE_DEFERRED_NORM,                                                    \
-      USE_TWO_OWNER_QK_GROUPS,                                              \
-      FLA_SSM_STATE_LAYOUT,                                                 \
-      false)
+#define RUN_MTP(K,                              \
+                USE_QK_GROUP_CACHE,             \
+                USE_DEFERRED_NORM,              \
+                USE_TWO_OWNER_QK_GROUPS,        \
+                FLA_SSM_STATE_LAYOUT)           \
+  RUN_MTP_WITH_REGBASE(K,                       \
+                       USE_QK_GROUP_CACHE,      \
+                       USE_DEFERRED_NORM,       \
+                       USE_TWO_OWNER_QK_GROUPS, \
+                       FLA_SSM_STATE_LAYOUT,    \
+                       false)
 
-#define RUN_MTP_WITH_REGBASE(                                               \
-    K,                                                                       \
-    USE_QK_GROUP_CACHE,                                                      \
-    USE_DEFERRED_NORM,                                                       \
-    USE_TWO_OWNER_QK_GROUPS,                                                 \
-    FLA_SSM_STATE_LAYOUT,                                                    \
-    USE_REGBASE)                                                             \
-  RUN_MTP_IMPL(                                                             \
-      K,                                                                    \
-      USE_QK_GROUP_CACHE,                                                   \
-      USE_DEFERRED_NORM,                                                    \
-      USE_TWO_OWNER_QK_GROUPS,                                              \
-      FLA_SSM_STATE_LAYOUT,                                                 \
-      USE_REGBASE)(                                                         \
-      qkv,                                                                   \
-      z,                                                                     \
-      b,                                                                     \
-      a,                                                                     \
-      conv_weight,                                                           \
-      conv_state,                                                            \
-      a_log,                                                                 \
-      dt_bias,                                                               \
-      ssm_state,                                                             \
-      read_state_indices,                                                    \
-      write_state_indices,                                                   \
-      num_accepted_tokens,                                                   \
-      norm_weight,                                                           \
-      conv_out,                                                              \
-      conv_state_out,                                                        \
-      ssm_state_out,                                                         \
-      out,                                                                   \
-      static_cast<int32_t>(tiling_data.num_k_heads),                         \
-      static_cast<int32_t>(tiling_data.num_v_heads),                         \
-      static_cast<int32_t>(tiling_data.batch_size),                          \
-      static_cast<int32_t>(tiling_data.sequence_length))
+#define RUN_MTP_WITH_REGBASE(K,                          \
+                             USE_QK_GROUP_CACHE,         \
+                             USE_DEFERRED_NORM,          \
+                             USE_TWO_OWNER_QK_GROUPS,    \
+                             FLA_SSM_STATE_LAYOUT,       \
+                             USE_REGBASE)                \
+  RUN_MTP_IMPL(K,                                        \
+               USE_QK_GROUP_CACHE,                       \
+               USE_DEFERRED_NORM,                        \
+               USE_TWO_OWNER_QK_GROUPS,                  \
+               FLA_SSM_STATE_LAYOUT,                     \
+               USE_REGBASE)(                             \
+      qkv,                                               \
+      z,                                                 \
+      b,                                                 \
+      a,                                                 \
+      conv_weight,                                       \
+      conv_state,                                        \
+      a_log,                                             \
+      dt_bias,                                           \
+      ssm_state,                                         \
+      read_state_indices,                                \
+      write_state_indices,                               \
+      num_accepted_tokens,                               \
+      norm_weight,                                       \
+      conv_out,                                          \
+      conv_state_out,                                    \
+      ssm_state_out,                                     \
+      out,                                               \
+      static_cast<int32_t>(tiling_data.num_k_heads),     \
+      static_cast<int32_t>(tiling_data.num_v_heads),     \
+      static_cast<int32_t>(tiling_data.batch_size),      \
+      static_cast<int32_t>(tiling_data.sequence_length), \
+      static_cast<int32_t>(tiling_data.state_index_width))
 
   if constexpr (TILING_KEY_IS(101)) {
     RUN_MTP(1, false, false, false, true);

@@ -1,223 +1,267 @@
+#ifndef XLLM_OPS_MEGA_GDN_DECODE_PTO_KERNEL_H_
+#define XLLM_OPS_MEGA_GDN_DECODE_PTO_KERNEL_H_
+
 // Preserve upstream main for non-A5 targets.
-#if defined(GDN_PREFILL_TARGET_A5) || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510) || (defined(__CCE_AICORE__) && __CCE_AICORE__ == 310)
+#if defined(GDN_PREFILL_TARGET_A5) ||                  \
+    (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510) || \
+    (defined(__CCE_AICORE__) && __CCE_AICORE__ == 310)
 #include "arch35/mega_gdn_decode_pto_kernel.h"
 #else
 /* Copyright 2026 The xLLM Authors. All Rights Reserved. */
 
-#pragma once
+#include <cstdint>
+#include <pto/pto-inst.hpp>
+#include <type_traits>
 
 #include "kernel_operator.h"
-#include <pto/pto-inst.hpp>
-
-#include <cstdint>
-#include <type_traits>
 
 namespace mega_gdn_decode_pto {
 
 using namespace pto;
 
-AICORE PTO_INLINE void VectorBarrier()
-{
+AICORE PTO_INLINE void VectorBarrier() {
 #if defined(PTO_NPU_ARCH_A5)
-    pipe_barrier(PIPE_ALL);
+  pipe_barrier(PIPE_ALL);
 #else
-    pipe_barrier(PIPE_V);
+  pipe_barrier(PIPE_V);
 #endif
 }
 
-template <typename T, int Rows, int Cols, int RowValid = Rows,
-          int ColValid = Cols, pto::PadValue PadVal = pto::PadValue::Null>
-using TileUbDataND =
-    pto::Tile<pto::TileType::Vec, T, Rows, Cols, pto::BLayout::RowMajor,
-              RowValid, ColValid, pto::SLayout::NoneBox, 512, PadVal>;
-
-template <typename T, int Rows, int Cols, int RowValid = Rows,
-          int ColValid = Cols, pto::PadValue PadVal = pto::PadValue::Null>
-using TileUbDataDN =
-    pto::Tile<pto::TileType::Vec, T, Rows, Cols, pto::BLayout::ColMajor,
-              RowValid, ColValid, pto::SLayout::NoneBox, 512, PadVal>;
-
-template <typename T1, typename T2, int32_t Shape1, int32_t Shape2,
-          int32_t Shape3, int32_t Shape4, int32_t Shape5, int32_t Stride1,
-          int32_t Stride2, int32_t Stride3, int32_t Stride4, int32_t Stride5,
-          uint32_t UbRows, uint32_t UbCols,
+template <typename T,
+          int Rows,
+          int Cols,
+          int RowValid = Rows,
+          int ColValid = Cols,
           pto::PadValue PadVal = pto::PadValue::Null>
-AICORE PTO_INLINE void CopyGmToUb(__gm__ T1 *handle, int32_t ubAddress,
-                                  int32_t ubOffset, int32_t validRows,
-                                  int32_t validCols)
-{
-    static_assert(std::is_same_v<T1, T2>);
-    pto::Shape<Shape1, Shape2, Shape3, pto::DYNAMIC, pto::DYNAMIC> shape;
-    shape.shape[3] = validRows;
-    shape.shape[4] = validCols;
-    pto::GlobalTensor<
-        T1, pto::Shape<Shape1, Shape2, Shape3, pto::DYNAMIC, pto::DYNAMIC>,
-        pto::Stride<Stride1, Stride2, Stride3, Stride4, Stride5>>
-        tensor(handle, shape);
+using TileUbDataND = pto::Tile<pto::TileType::Vec,
+                               T,
+                               Rows,
+                               Cols,
+                               pto::BLayout::RowMajor,
+                               RowValid,
+                               ColValid,
+                               pto::SLayout::NoneBox,
+                               512,
+                               PadVal>;
 
-    TileUbDataND<T2, UbRows, UbCols, pto::DYNAMIC, pto::DYNAMIC, PadVal>
-        tile(validRows, validCols);
+template <typename T,
+          int Rows,
+          int Cols,
+          int RowValid = Rows,
+          int ColValid = Cols,
+          pto::PadValue PadVal = pto::PadValue::Null>
+using TileUbDataDN = pto::Tile<pto::TileType::Vec,
+                               T,
+                               Rows,
+                               Cols,
+                               pto::BLayout::ColMajor,
+                               RowValid,
+                               ColValid,
+                               pto::SLayout::NoneBox,
+                               512,
+                               PadVal>;
+
+template <typename T1,
+          typename T2,
+          int32_t Shape1,
+          int32_t Shape2,
+          int32_t Shape3,
+          int32_t Shape4,
+          int32_t Shape5,
+          int32_t Stride1,
+          int32_t Stride2,
+          int32_t Stride3,
+          int32_t Stride4,
+          int32_t Stride5,
+          uint32_t UbRows,
+          uint32_t UbCols,
+          pto::PadValue PadVal = pto::PadValue::Null>
+AICORE PTO_INLINE void CopyGmToUb(__gm__ T1* handle,
+                                  int32_t ubAddress,
+                                  int32_t ubOffset,
+                                  int32_t validRows,
+                                  int32_t validCols) {
+  static_assert(std::is_same_v<T1, T2>);
+  pto::Shape<Shape1, Shape2, Shape3, pto::DYNAMIC, pto::DYNAMIC> shape;
+  shape.shape[3] = validRows;
+  shape.shape[4] = validCols;
+  pto::GlobalTensor<
+      T1,
+      pto::Shape<Shape1, Shape2, Shape3, pto::DYNAMIC, pto::DYNAMIC>,
+      pto::Stride<Stride1, Stride2, Stride3, Stride4, Stride5> >
+      tensor(handle, shape);
+
+  TileUbDataND<T2, UbRows, UbCols, pto::DYNAMIC, pto::DYNAMIC, PadVal> tile(
+      validRows, validCols);
+  pto::TASSIGN(tile, ubAddress + ubOffset * sizeof(T2));
+  pto::TLOAD(tile, tensor);
+
+  if constexpr (PadVal != pto::PadValue::Null) {
+    if (validRows != static_cast<int32_t>(UbRows) ||
+        validCols != static_cast<int32_t>(UbCols)) {
+      TileUbDataND<T2, UbRows, UbCols, UbRows, UbCols, PadVal> padded;
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      pto::TASSIGN(padded, ubAddress + ubOffset * sizeof(T2));
+      pto::TFILLPAD_INPLACE(padded, tile);
+      set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      VectorBarrier();
+    }
+  }
+}
+
+AICORE PTO_INLINE void CopyConvHistoryGmToUb(__gm__ bfloat16_t* handle,
+                                             int32_t ubAddress,
+                                             int32_t convDim) {
+  using HistoryShape = pto::Shape<1, 1, 1, 3, 128>;
+  using HistoryStride = pto::Stride<1, 1, 1, pto::DYNAMIC, 1>;
+  HistoryShape shape;
+  HistoryStride stride(convDim);
+  pto::GlobalTensor<bfloat16_t, HistoryShape, HistoryStride> tensor(
+      handle, shape, stride);
+  TileUbDataND<bfloat16_t, 3, 128> tile;
+  pto::TASSIGN(tile, ubAddress);
+  pto::TLOAD(tile, tensor);
+}
+
+AICORE PTO_INLINE void CopyConvHistoryUbToGm(__gm__ bfloat16_t* handle,
+                                             int32_t ubAddress,
+                                             int32_t convDim) {
+  using HistoryShape = pto::Shape<1, 1, 1, 3, 128>;
+  using HistoryStride = pto::Stride<1, 1, 1, pto::DYNAMIC, 1>;
+  HistoryShape shape;
+  HistoryStride stride(convDim);
+  pto::GlobalTensor<bfloat16_t, HistoryShape, HistoryStride> tensor(
+      handle, shape, stride);
+  TileUbDataND<bfloat16_t, 3, 128> tile;
+  pto::TASSIGN(tile, ubAddress);
+  pto::TSTORE(tensor, tile);
+}
+
+AICORE PTO_INLINE void CopyConvWeightsGmToUb(__gm__ bfloat16_t* handle,
+                                             int32_t ubAddress,
+                                             int32_t convDim) {
+  using WeightShape = pto::Shape<1, 1, 1, 4, 128>;
+  using WeightStride = pto::Stride<1, 1, 1, pto::DYNAMIC, 1>;
+  WeightShape shape;
+  WeightStride stride(convDim);
+  pto::GlobalTensor<bfloat16_t, WeightShape, WeightStride> tensor(
+      handle, shape, stride);
+  TileUbDataND<bfloat16_t, 4, 128> tile;
+  pto::TASSIGN(tile, ubAddress);
+  pto::TLOAD(tile, tensor);
+}
+
+template <typename T1,
+          typename T2,
+          int32_t Shape1,
+          int32_t Shape2,
+          int32_t Shape3,
+          int32_t Shape4,
+          int32_t Shape5,
+          int32_t Stride1,
+          int32_t Stride2,
+          int32_t Stride3,
+          int32_t Stride4,
+          int32_t Stride5,
+          uint32_t UbRows,
+          uint32_t UbCols>
+AICORE PTO_INLINE void CopyUbToGm(__gm__ T1* handle,
+                                  int32_t ubAddress,
+                                  int32_t ubOffset,
+                                  int32_t validRows,
+                                  int32_t validCols) {
+  static_assert(std::is_same_v<T1, T2>);
+  pto::Shape<Shape1, Shape2, Shape3, pto::DYNAMIC, pto::DYNAMIC> shape;
+  shape.shape[3] = validRows;
+  shape.shape[4] = validCols;
+  pto::GlobalTensor<
+      T1,
+      pto::Shape<Shape1, Shape2, Shape3, pto::DYNAMIC, pto::DYNAMIC>,
+      pto::Stride<Stride1, Stride2, Stride3, Stride4, Stride5> >
+      tensor(handle, shape);
+
+  constexpr bool kUseNd = static_cast<uint64_t>(UbCols) * sizeof(T2) >= 32;
+  if constexpr (kUseNd) {
+    TileUbDataND<T2, UbRows, UbCols, pto::DYNAMIC, pto::DYNAMIC> tile(
+        validRows, validCols);
     pto::TASSIGN(tile, ubAddress + ubOffset * sizeof(T2));
-    pto::TLOAD(tile, tensor);
-
-    if constexpr (PadVal != pto::PadValue::Null) {
-        if (validRows != static_cast<int32_t>(UbRows) ||
-            validCols != static_cast<int32_t>(UbCols)) {
-            TileUbDataND<T2, UbRows, UbCols, UbRows, UbCols, PadVal> padded;
-            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-            pto::TASSIGN(padded, ubAddress + ubOffset * sizeof(T2));
-            pto::TFILLPAD_INPLACE(padded, tile);
-            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
-            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
-            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            VectorBarrier();
-        }
-    }
-}
-
-AICORE PTO_INLINE void CopyConvHistoryGmToUb(
-    __gm__ bfloat16_t *handle, int32_t ubAddress, int32_t convDim)
-{
-    using HistoryShape = pto::Shape<1, 1, 1, 3, 128>;
-    using HistoryStride = pto::Stride<1, 1, 1, pto::DYNAMIC, 1>;
-    HistoryShape shape;
-    HistoryStride stride(convDim);
-    pto::GlobalTensor<bfloat16_t, HistoryShape, HistoryStride> tensor(
-        handle, shape, stride);
-    TileUbDataND<bfloat16_t, 3, 128> tile;
-    pto::TASSIGN(tile, ubAddress);
-    pto::TLOAD(tile, tensor);
-}
-
-AICORE PTO_INLINE void CopyConvHistoryUbToGm(
-    __gm__ bfloat16_t *handle, int32_t ubAddress, int32_t convDim)
-{
-    using HistoryShape = pto::Shape<1, 1, 1, 3, 128>;
-    using HistoryStride = pto::Stride<1, 1, 1, pto::DYNAMIC, 1>;
-    HistoryShape shape;
-    HistoryStride stride(convDim);
-    pto::GlobalTensor<bfloat16_t, HistoryShape, HistoryStride> tensor(
-        handle, shape, stride);
-    TileUbDataND<bfloat16_t, 3, 128> tile;
-    pto::TASSIGN(tile, ubAddress);
     pto::TSTORE(tensor, tile);
-}
-
-AICORE PTO_INLINE void CopyConvWeightsGmToUb(
-    __gm__ bfloat16_t *handle, int32_t ubAddress, int32_t convDim)
-{
-    using WeightShape = pto::Shape<1, 1, 1, 4, 128>;
-    using WeightStride = pto::Stride<1, 1, 1, pto::DYNAMIC, 1>;
-    WeightShape shape;
-    WeightStride stride(convDim);
-    pto::GlobalTensor<bfloat16_t, WeightShape, WeightStride> tensor(
-        handle, shape, stride);
-    TileUbDataND<bfloat16_t, 4, 128> tile;
-    pto::TASSIGN(tile, ubAddress);
-    pto::TLOAD(tile, tensor);
-}
-
-template <typename T1, typename T2, int32_t Shape1, int32_t Shape2,
-          int32_t Shape3, int32_t Shape4, int32_t Shape5, int32_t Stride1,
-          int32_t Stride2, int32_t Stride3, int32_t Stride4, int32_t Stride5,
-          uint32_t UbRows, uint32_t UbCols>
-AICORE PTO_INLINE void CopyUbToGm(__gm__ T1 *handle, int32_t ubAddress,
-                                  int32_t ubOffset, int32_t validRows,
-                                  int32_t validCols)
-{
-    static_assert(std::is_same_v<T1, T2>);
-    pto::Shape<Shape1, Shape2, Shape3, pto::DYNAMIC, pto::DYNAMIC> shape;
-    shape.shape[3] = validRows;
-    shape.shape[4] = validCols;
-    pto::GlobalTensor<
-        T1, pto::Shape<Shape1, Shape2, Shape3, pto::DYNAMIC, pto::DYNAMIC>,
-        pto::Stride<Stride1, Stride2, Stride3, Stride4, Stride5>>
-        tensor(handle, shape);
-
-    constexpr bool kUseNd = static_cast<uint64_t>(UbCols) * sizeof(T2) >= 32;
-    if constexpr (kUseNd) {
-        TileUbDataND<T2, UbRows, UbCols, pto::DYNAMIC, pto::DYNAMIC> tile(
-            validRows, validCols);
-        pto::TASSIGN(tile, ubAddress + ubOffset * sizeof(T2));
-        pto::TSTORE(tensor, tile);
-    } else {
-        TileUbDataDN<T2, UbRows, UbCols, pto::DYNAMIC, pto::DYNAMIC> tile(
-            validRows, validCols);
-        pto::TASSIGN(tile, ubAddress + ubOffset * sizeof(T2));
-        pto::TSTORE(tensor, tile);
-    }
+  } else {
+    TileUbDataDN<T2, UbRows, UbCols, pto::DYNAMIC, pto::DYNAMIC> tile(
+        validRows, validCols);
+    pto::TASSIGN(tile, ubAddress + ubOffset * sizeof(T2));
+    pto::TSTORE(tensor, tile);
+  }
 }
 
 template <typename T, int32_t Rows, int32_t Cols>
-AICORE PTO_INLINE void Sigmoid(TileUbDataND<T, Rows, Cols> &dst,
-                               TileUbDataND<T, Rows, Cols> &src)
-{
-    TMULS(src, src, -1);
-    VectorBarrier();
-    TEXP(src, src);
-    VectorBarrier();
-    TADDS(src, src, 1);
-    VectorBarrier();
-    TRECIP(dst, src);
+AICORE PTO_INLINE void Sigmoid(TileUbDataND<T, Rows, Cols>& dst,
+                               TileUbDataND<T, Rows, Cols>& src) {
+  TMULS(src, src, -1);
+  VectorBarrier();
+  TEXP(src, src);
+  VectorBarrier();
+  TADDS(src, src, 1);
+  VectorBarrier();
+  TRECIP(dst, src);
 }
 
 template <typename T, int32_t Rows, int32_t Cols>
-AICORE PTO_INLINE void Silu(TileUbDataND<T, Rows, Cols> &dst,
-                            TileUbDataND<T, Rows, Cols> &src,
-                            TileUbDataND<T, Rows, Cols> &tmp)
-{
-    TMOV(tmp, src);
-    VectorBarrier();
+AICORE PTO_INLINE void Silu(TileUbDataND<T, Rows, Cols>& dst,
+                            TileUbDataND<T, Rows, Cols>& src,
+                            TileUbDataND<T, Rows, Cols>& tmp) {
+  TMOV(tmp, src);
+  VectorBarrier();
 #if defined(PTO_NPU_ARCH_A5)
-    TMULS(src, src, -1);
-    VectorBarrier();
-    TEXP(src, src);
-    VectorBarrier();
-    TADDS(src, src, 1);
-    VectorBarrier();
-    // Match AscendC::Silu exactly. Multiplying by a separately rounded
-    // reciprocal can cross a BF16 rounding boundary after the fused conv.
-    TDIV(dst, tmp, src);
+  TMULS(src, src, -1);
+  VectorBarrier();
+  TEXP(src, src);
+  VectorBarrier();
+  TADDS(src, src, 1);
+  VectorBarrier();
+  // Match AscendC::Silu exactly. Multiplying by a separately rounded
+  // reciprocal can cross a BF16 rounding boundary after the fused conv.
+  TDIV(dst, tmp, src);
 #else
-    Sigmoid(dst, src);
-    VectorBarrier();
-    TMUL(dst, tmp, dst);
+  Sigmoid(dst, src);
+  VectorBarrier();
+  TMUL(dst, tmp, dst);
 #endif
 }
 
 template <typename T, int32_t Rows, int32_t Cols>
-AICORE PTO_INLINE void CausalConvSilu(TileUbDataND<T, Rows, Cols> &dst,
-                                      TileUbDataND<T, Rows, Cols> &src,
-                                      TileUbDataND<T, Rows, Cols> &tmp)
-{
-    TMOV(tmp, src);
-    VectorBarrier();
-    TMULS(src, src, -1);
-    VectorBarrier();
-    TEXP(src, src);
-    VectorBarrier();
-    TADDS(src, src, 1);
-    VectorBarrier();
-    // Numerical contract: match AscendC::Silu at the CausalConv BF16
-    // hand-off; reciprocal followed by multiply can cross a BF16 midpoint.
-    TDIV(dst, tmp, src);
+AICORE PTO_INLINE void CausalConvSilu(TileUbDataND<T, Rows, Cols>& dst,
+                                      TileUbDataND<T, Rows, Cols>& src,
+                                      TileUbDataND<T, Rows, Cols>& tmp) {
+  TMOV(tmp, src);
+  VectorBarrier();
+  TMULS(src, src, -1);
+  VectorBarrier();
+  TEXP(src, src);
+  VectorBarrier();
+  TADDS(src, src, 1);
+  VectorBarrier();
+  // Numerical contract: match AscendC::Silu at the CausalConv BF16
+  // hand-off; reciprocal followed by multiply can cross a BF16 midpoint.
+  TDIV(dst, tmp, src);
 }
 
 template <typename T, int32_t Rows, int32_t Cols>
-AICORE PTO_INLINE void MulAddDst(TileUbDataND<T, Rows, Cols> &dst,
-                                 TileUbDataND<T, Rows, Cols> &src0,
-                                 TileUbDataND<T, Rows, Cols> &src1,
-                                 TileUbDataND<T, Rows, Cols> &tmp)
-{
+AICORE PTO_INLINE void MulAddDst(TileUbDataND<T, Rows, Cols>& dst,
+                                 TileUbDataND<T, Rows, Cols>& src0,
+                                 TileUbDataND<T, Rows, Cols>& src1,
+                                 TileUbDataND<T, Rows, Cols>& tmp) {
 #if defined(PTO_NPU_ARCH_A5)
-    (void)tmp;
-    TMULADDDST(dst, src0, src1);
+  (void)tmp;
+  TMULADDDST(dst, src0, src1);
 #else
-    TMUL(tmp, src0, src1);
-    VectorBarrier();
-    TADD(dst, dst, tmp);
+  TMUL(tmp, src0, src1);
+  VectorBarrier();
+  TADD(dst, dst, tmp);
 #endif
 }
 
@@ -226,253 +270,238 @@ template <typename TileDst, typename TileRow, typename TileCol>
 __tf__ PTO_INTERNAL void OuterProductAdd128Impl(
     typename TileDst::TileDType __in__ __out__ dst,
     typename TileRow::TileDType __in__ row,
-    typename TileCol::TileDType __in__ col)
-{
-    __ubuf__ float *dstPtr =
-        reinterpret_cast<__ubuf__ float *>(__cce_get_tile_ptr(dst));
-    __ubuf__ float *rowPtr =
-        reinterpret_cast<__ubuf__ float *>(__cce_get_tile_ptr(row));
-    __ubuf__ uint32_t *colPtr =
-        reinterpret_cast<__ubuf__ uint32_t *>(__cce_get_tile_ptr(col));
-    __ubuf__ uint32_t *broadcast =
-        reinterpret_cast<__ubuf__ uint32_t *>(TMP_UB_OFFSET);
-    __ubuf__ float *colValues = reinterpret_cast<__ubuf__ float *>(broadcast);
+    typename TileCol::TileDType __in__ col) {
+  __ubuf__ float* dstPtr =
+      reinterpret_cast<__ubuf__ float*>(__cce_get_tile_ptr(dst));
+  __ubuf__ float* rowPtr =
+      reinterpret_cast<__ubuf__ float*>(__cce_get_tile_ptr(row));
+  __ubuf__ uint32_t* colPtr =
+      reinterpret_cast<__ubuf__ uint32_t*>(__cce_get_tile_ptr(col));
+  __ubuf__ uint32_t* broadcast =
+      reinterpret_cast<__ubuf__ uint32_t*>(TMP_UB_OFFSET);
+  __ubuf__ float* colValues = reinterpret_cast<__ubuf__ float*>(broadcast);
 
-    vbrcb(broadcast, colPtr, 1, 8, 16);
-    VectorBarrier();
-    vmla(dstPtr, rowPtr, colValues, 128, 1, 1, 0, 16, 0, 1);
-    vmla(dstPtr + 64, rowPtr + 64, colValues, 128, 1, 1, 0, 16, 0, 1);
+  vbrcb(broadcast, colPtr, 1, 8, 16);
+  VectorBarrier();
+  vmla(dstPtr, rowPtr, colValues, 128, 1, 1, 0, 16, 0, 1);
+  vmla(dstPtr + 64, rowPtr + 64, colValues, 128, 1, 1, 0, 16, 0, 1);
 }
 
 template <typename TileDst, typename TileRow, typename TileCol>
-AICORE PTO_INLINE void OuterProductAdd128(TileDst &dst, TileRow &row,
-                                          TileCol &col)
-{
-    OuterProductAdd128Impl<TileDst, TileRow, TileCol>(
-        dst.data(), row.data(), col.data());
+AICORE PTO_INLINE void OuterProductAdd128(TileDst& dst,
+                                          TileRow& row,
+                                          TileCol& col) {
+  OuterProductAdd128Impl<TileDst, TileRow, TileCol>(
+      dst.data(), row.data(), col.data());
 }
 #endif
 
 #if !defined(PTO_NPU_ARCH_A5)
 template <typename TileDst, typename TileSrc, typename TileTmp>
 __tf__ PTO_INTERNAL void ColSum128Impl(typename TileDst::TileDType __out__ dst,
-                                      typename TileSrc::TileDType __in__ src,
-                                      typename TileTmp::TileDType __out__ tmp)
-{
-    __ubuf__ float *dstPtr =
-        reinterpret_cast<__ubuf__ float *>(__cce_get_tile_ptr(dst));
-    __ubuf__ float *srcPtr =
-        reinterpret_cast<__ubuf__ float *>(__cce_get_tile_ptr(src));
-    (void)tmp;
+                                       typename TileSrc::TileDType __in__ src,
+                                       typename TileTmp::TileDType __out__
+                                           tmp) {
+  __ubuf__ float* dstPtr =
+      reinterpret_cast<__ubuf__ float*>(__cce_get_tile_ptr(dst));
+  __ubuf__ float* srcPtr =
+      reinterpret_cast<__ubuf__ float*>(__cce_get_tile_ptr(src));
+  (void)tmp;
 
-    set_mask_norm();
-    set_vector_mask(-1, -1);
-#define MEGA_GDN_COLSUM_BUTTERFLY_STAGE(rows)                                  \
-    vadd(srcPtr, srcPtr, srcPtr + (rows) * 128, (rows) * 2,                  \
-         1, 1, 1, 8, 8, 8);                                                  \
-    VectorBarrier()
-    MEGA_GDN_COLSUM_BUTTERFLY_STAGE(64);
-    MEGA_GDN_COLSUM_BUTTERFLY_STAGE(32);
-    MEGA_GDN_COLSUM_BUTTERFLY_STAGE(16);
-    MEGA_GDN_COLSUM_BUTTERFLY_STAGE(8);
-    MEGA_GDN_COLSUM_BUTTERFLY_STAGE(4);
-    MEGA_GDN_COLSUM_BUTTERFLY_STAGE(2);
-    MEGA_GDN_COLSUM_BUTTERFLY_STAGE(1);
+  set_mask_norm();
+  set_vector_mask(-1, -1);
+#define MEGA_GDN_COLSUM_BUTTERFLY_STAGE(rows)                                \
+  vadd(srcPtr, srcPtr, srcPtr + (rows) * 128, (rows) * 2, 1, 1, 1, 8, 8, 8); \
+  VectorBarrier()
+  MEGA_GDN_COLSUM_BUTTERFLY_STAGE(64);
+  MEGA_GDN_COLSUM_BUTTERFLY_STAGE(32);
+  MEGA_GDN_COLSUM_BUTTERFLY_STAGE(16);
+  MEGA_GDN_COLSUM_BUTTERFLY_STAGE(8);
+  MEGA_GDN_COLSUM_BUTTERFLY_STAGE(4);
+  MEGA_GDN_COLSUM_BUTTERFLY_STAGE(2);
+  MEGA_GDN_COLSUM_BUTTERFLY_STAGE(1);
 #undef MEGA_GDN_COLSUM_BUTTERFLY_STAGE
-    copy_ubuf_to_ubuf(dstPtr, srcPtr, 0, 1, 16, 0, 0);
-    VectorBarrier();
+  copy_ubuf_to_ubuf(dstPtr, srcPtr, 0, 1, 16, 0, 0);
+  VectorBarrier();
 }
 #endif
 
 template <typename TileDst, typename TileSrc, typename TileTmp>
-AICORE PTO_INLINE void ColSum128(TileDst &dst, TileSrc &src, TileTmp &tmp)
-{
+AICORE PTO_INLINE void ColSum128(TileDst& dst, TileSrc& src, TileTmp& tmp) {
 #if defined(PTO_NPU_ARCH_A5)
-    (void)tmp;
-    // Contract: TileLang lowers tl.sum(axis=0) for [128, 64] to a butterfly
-    // tree with descending row strides on both 910B and A5. The product tile
-    // is dead after reduction, so compact partial sums into its lower rows.
-    const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(src.data());
-    constexpr std::uintptr_t rowBytes = 128 * sizeof(float);
-    TileUbDataND<float, 64, 128> low64;
-    TileUbDataND<float, 64, 128> high64;
-    TASSIGN(low64, base);
-    TASSIGN(high64, base + 64 * rowBytes);
-    TADD(low64, low64, high64);
-    VectorBarrier();
+  (void)tmp;
+  // Contract: TileLang lowers tl.sum(axis=0) for [128, 64] to a butterfly
+  // tree with descending row strides on both 910B and A5. The product tile
+  // is dead after reduction, so compact partial sums into its lower rows.
+  const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(src.data());
+  constexpr std::uintptr_t rowBytes = 128 * sizeof(float);
+  TileUbDataND<float, 64, 128> low64;
+  TileUbDataND<float, 64, 128> high64;
+  TASSIGN(low64, base);
+  TASSIGN(high64, base + 64 * rowBytes);
+  TADD(low64, low64, high64);
+  VectorBarrier();
 
-    TileUbDataND<float, 32, 128> low32;
-    TileUbDataND<float, 32, 128> high32;
-    TASSIGN(low32, base);
-    TASSIGN(high32, base + 32 * rowBytes);
-    TADD(low32, low32, high32);
-    VectorBarrier();
+  TileUbDataND<float, 32, 128> low32;
+  TileUbDataND<float, 32, 128> high32;
+  TASSIGN(low32, base);
+  TASSIGN(high32, base + 32 * rowBytes);
+  TADD(low32, low32, high32);
+  VectorBarrier();
 
-    TileUbDataND<float, 16, 128> low16;
-    TileUbDataND<float, 16, 128> high16;
-    TASSIGN(low16, base);
-    TASSIGN(high16, base + 16 * rowBytes);
-    TADD(low16, low16, high16);
-    VectorBarrier();
+  TileUbDataND<float, 16, 128> low16;
+  TileUbDataND<float, 16, 128> high16;
+  TASSIGN(low16, base);
+  TASSIGN(high16, base + 16 * rowBytes);
+  TADD(low16, low16, high16);
+  VectorBarrier();
 
-    TileUbDataND<float, 8, 128> low8;
-    TileUbDataND<float, 8, 128> high8;
-    TASSIGN(low8, base);
-    TASSIGN(high8, base + 8 * rowBytes);
-    TADD(low8, low8, high8);
-    VectorBarrier();
+  TileUbDataND<float, 8, 128> low8;
+  TileUbDataND<float, 8, 128> high8;
+  TASSIGN(low8, base);
+  TASSIGN(high8, base + 8 * rowBytes);
+  TADD(low8, low8, high8);
+  VectorBarrier();
 
-    TileUbDataND<float, 4, 128> low4;
-    TileUbDataND<float, 4, 128> high4;
-    TASSIGN(low4, base);
-    TASSIGN(high4, base + 4 * rowBytes);
-    TADD(low4, low4, high4);
-    VectorBarrier();
+  TileUbDataND<float, 4, 128> low4;
+  TileUbDataND<float, 4, 128> high4;
+  TASSIGN(low4, base);
+  TASSIGN(high4, base + 4 * rowBytes);
+  TADD(low4, low4, high4);
+  VectorBarrier();
 
-    TileUbDataND<float, 2, 128> low2;
-    TileUbDataND<float, 2, 128> high2;
-    TASSIGN(low2, base);
-    TASSIGN(high2, base + 2 * rowBytes);
-    TADD(low2, low2, high2);
-    VectorBarrier();
+  TileUbDataND<float, 2, 128> low2;
+  TileUbDataND<float, 2, 128> high2;
+  TASSIGN(low2, base);
+  TASSIGN(high2, base + 2 * rowBytes);
+  TADD(low2, low2, high2);
+  VectorBarrier();
 
-    TileUbDataND<float, 1, 128> low1;
-    TileUbDataND<float, 1, 128> high1;
-    TASSIGN(low1, base);
-    TASSIGN(high1, base + rowBytes);
-    TADD(low1, low1, high1);
-    VectorBarrier();
-    TMOV(dst, low1);
+  TileUbDataND<float, 1, 128> low1;
+  TileUbDataND<float, 1, 128> high1;
+  TASSIGN(low1, base);
+  TASSIGN(high1, base + rowBytes);
+  TADD(low1, low1, high1);
+  VectorBarrier();
+  TMOV(dst, low1);
 #else
-    ColSum128Impl<TileDst, TileSrc, TileTmp>(
-        dst.data(), src.data(), tmp.data());
+  ColSum128Impl<TileDst, TileSrc, TileTmp>(dst.data(), src.data(), tmp.data());
 #endif
 }
 
 template <typename TileDst, typename TileSrc, typename TileTmp>
-AICORE PTO_INLINE void RowSum128(TileDst &dst, TileSrc &src, TileTmp &tmp)
-{
-    const std::uintptr_t srcBase =
-        reinterpret_cast<std::uintptr_t>(src.data());
-    const std::uintptr_t dstBase =
-        reinterpret_cast<std::uintptr_t>(dst.data());
-    constexpr std::uintptr_t kHalfStateBytes =
-        64 * 128 * sizeof(float);
-    constexpr std::uintptr_t kHalfOutputBytes = 64 * sizeof(float);
+AICORE PTO_INLINE void RowSum128(TileDst& dst, TileSrc& src, TileTmp& tmp) {
+  const std::uintptr_t srcBase = reinterpret_cast<std::uintptr_t>(src.data());
+  const std::uintptr_t dstBase = reinterpret_cast<std::uintptr_t>(dst.data());
+  constexpr std::uintptr_t kHalfStateBytes = 64 * 128 * sizeof(float);
+  constexpr std::uintptr_t kHalfOutputBytes = 64 * sizeof(float);
 
-    TileUbDataND<float, 64, 128> srcLow;
-    TASSIGN(srcLow, srcBase);
-    TileUbDataDN<float, 64, 1> dstLow;
-    TASSIGN(dstLow, dstBase);
-    TROWSUM(dstLow, srcLow, tmp);
-    VectorBarrier();
+  TileUbDataND<float, 64, 128> srcLow;
+  TASSIGN(srcLow, srcBase);
+  TileUbDataDN<float, 64, 1> dstLow;
+  TASSIGN(dstLow, dstBase);
+  TROWSUM(dstLow, srcLow, tmp);
+  VectorBarrier();
 
-    TileUbDataND<float, 64, 128> srcHigh;
-    TASSIGN(srcHigh, srcBase + kHalfStateBytes);
-    TileUbDataDN<float, 64, 1> dstHigh;
-    TASSIGN(dstHigh, dstBase + kHalfOutputBytes);
-    TROWSUM(dstHigh, srcHigh, tmp);
-    VectorBarrier();
+  TileUbDataND<float, 64, 128> srcHigh;
+  TASSIGN(srcHigh, srcBase + kHalfStateBytes);
+  TileUbDataDN<float, 64, 1> dstHigh;
+  TASSIGN(dstHigh, dstBase + kHalfOutputBytes);
+  TROWSUM(dstHigh, srcHigh, tmp);
+  VectorBarrier();
 }
 
 template <bool FlaSsmStateLayout>
 AICORE PTO_INLINE void StateVectorProduct128(
-    TileUbDataND<float, 1, 128> &dst,
-    TileUbDataND<float, 128, 128> &state,
-    TileUbDataND<float, 1, 128> &vector,
-    TileUbDataND<float, 128, 128> &compute,
-    TileUbDataND<float, 32, 128> &reduceTmp)
-{
-    if constexpr (FlaSsmStateLayout) {
-        TileUbDataDN<float, 128, 1> vectorDn;
-        TASSIGN(vectorDn,
-                reinterpret_cast<std::uintptr_t>(vector.data()));
-        TROWEXPANDMUL(compute, state, vectorDn);
-        VectorBarrier();
-        ColSum128(dst, compute, reduceTmp);
-    } else {
-        TCOLEXPANDMUL(compute, state, vector);
-        VectorBarrier();
-        RowSum128(dst, compute, reduceTmp);
-    }
+    TileUbDataND<float, 1, 128>& dst,
+    TileUbDataND<float, 128, 128>& state,
+    TileUbDataND<float, 1, 128>& vector,
+    TileUbDataND<float, 128, 128>& compute,
+    TileUbDataND<float, 32, 128>& reduceTmp) {
+  if constexpr (FlaSsmStateLayout) {
+    TileUbDataDN<float, 128, 1> vectorDn;
+    TASSIGN(vectorDn, reinterpret_cast<std::uintptr_t>(vector.data()));
+    TROWEXPANDMUL(compute, state, vectorDn);
+    VectorBarrier();
+    ColSum128(dst, compute, reduceTmp);
+  } else {
+    TCOLEXPANDMUL(compute, state, vector);
+    VectorBarrier();
+    RowSum128(dst, compute, reduceTmp);
+  }
 }
 
 template <bool FlaSsmStateLayout>
 AICORE PTO_INLINE void StateRankOneUpdate128(
-    TileUbDataND<float, 128, 128> &state,
-    TileUbDataND<float, 1, 128> &key,
-    TileUbDataND<float, 1, 128> &delta,
-    TileUbDataND<float, 128, 128> &compute)
-{
-    if constexpr (FlaSsmStateLayout) {
-        TileUbDataDN<float, 128, 1> keyDn;
-        TASSIGN(keyDn, reinterpret_cast<std::uintptr_t>(key.data()));
+    TileUbDataND<float, 128, 128>& state,
+    TileUbDataND<float, 1, 128>& key,
+    TileUbDataND<float, 1, 128>& delta,
+    TileUbDataND<float, 128, 128>& compute) {
+  if constexpr (FlaSsmStateLayout) {
+    TileUbDataDN<float, 128, 1> keyDn;
+    TASSIGN(keyDn, reinterpret_cast<std::uintptr_t>(key.data()));
 #if defined(PTO_NPU_ARCH_A5)
-        TROWEXPAND(compute, keyDn);
-        VectorBarrier();
-        TCOLEXPANDMUL(compute, compute, delta);
-        VectorBarrier();
-        TADD(state, state, compute);
-#else
-        OuterProductAdd128(state, delta, keyDn);
-#endif
-    } else {
-        TileUbDataDN<float, 128, 1> deltaDn;
-        TASSIGN(deltaDn,
-                reinterpret_cast<std::uintptr_t>(delta.data()));
-#if defined(PTO_NPU_ARCH_A5)
-        TROWEXPAND(compute, deltaDn);
-        VectorBarrier();
-        TCOLEXPANDMUL(compute, compute, key);
-        VectorBarrier();
-        TADD(state, state, compute);
-#else
-        OuterProductAdd128(state, key, deltaDn);
-#endif
-    }
+    TROWEXPAND(compute, keyDn);
     VectorBarrier();
+    TCOLEXPANDMUL(compute, compute, delta);
+    VectorBarrier();
+    TADD(state, state, compute);
+#else
+    OuterProductAdd128(state, delta, keyDn);
+#endif
+  } else {
+    TileUbDataDN<float, 128, 1> deltaDn;
+    TASSIGN(deltaDn, reinterpret_cast<std::uintptr_t>(delta.data()));
+#if defined(PTO_NPU_ARCH_A5)
+    TROWEXPAND(compute, deltaDn);
+    VectorBarrier();
+    TCOLEXPANDMUL(compute, compute, key);
+    VectorBarrier();
+    TADD(state, state, compute);
+#else
+    OuterProductAdd128(state, key, deltaDn);
+#endif
+  }
+  VectorBarrier();
 }
 
 template <bool ApplyQScale>
 AICORE PTO_INLINE void NormalizeQk128(
-    TileUbDataND<float, 1, 128> &row,
-    TileUbDataND<float, 1, 128> &norm_sq,
-    TileUbDataND<float, 1, 8, 1, 1> &norm_val,
-    TileUbDataND<uint8_t, 128, 64> &tmp_ub,
-    TileUbDataND<float, 1, 8, 1, 1> &scalar_tmp)
-{
-    TMUL(norm_sq, row, row);
-    VectorBarrier();
-    TileUbDataDN<float, 8, 1, 1, 1> norm_val_dn;
-    TASSIGN(norm_val_dn,
-            reinterpret_cast<std::uintptr_t>(norm_val.data()));
-    TileUbDataND<float, 1, 64, 1, 64> reduce_tmp;
-    TASSIGN(reduce_tmp,
-            reinterpret_cast<std::uintptr_t>(tmp_ub.data()));
-    TROWSUM(norm_val_dn, norm_sq, reduce_tmp);
-    VectorBarrier();
-    TADDS(norm_val, norm_val, 1.000000e-06f);
-    VectorBarrier();
-    TSQRT(scalar_tmp, norm_val);
-    set_flag(PIPE_V, PIPE_S, EVENT_ID0);
-    wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
-    const float norm = scalar_tmp.GetValue(0);
-    // Contract: TileLang lowers q / sqrt(sum(q * q) + eps) as a direct
-    // vector division. On 910B, in-place TDIVS takes a reciprocal+vmuls
-    // shortcut, so use the dead square buffer as a non-alias destination to
-    // preserve vdiv rounding.
+    TileUbDataND<float, 1, 128>& row,
+    TileUbDataND<float, 1, 128>& norm_sq,
+    TileUbDataND<float, 1, 8, 1, 1>& norm_val,
+    TileUbDataND<uint8_t, 128, 64>& tmp_ub,
+    TileUbDataND<float, 1, 8, 1, 1>& scalar_tmp) {
+  TMUL(norm_sq, row, row);
+  VectorBarrier();
+  TileUbDataDN<float, 8, 1, 1, 1> norm_val_dn;
+  TASSIGN(norm_val_dn, reinterpret_cast<std::uintptr_t>(norm_val.data()));
+  TileUbDataND<float, 1, 64, 1, 64> reduce_tmp;
+  TASSIGN(reduce_tmp, reinterpret_cast<std::uintptr_t>(tmp_ub.data()));
+  TROWSUM(norm_val_dn, norm_sq, reduce_tmp);
+  VectorBarrier();
+  TADDS(norm_val, norm_val, 1.000000e-06f);
+  VectorBarrier();
+  TSQRT(scalar_tmp, norm_val);
+  set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+  wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+  const float norm = scalar_tmp.GetValue(0);
+  // Contract: TileLang lowers q / sqrt(sum(q * q) + eps) as a direct
+  // vector division. On 910B, in-place TDIVS takes a reciprocal+vmuls
+  // shortcut, so use the dead square buffer as a non-alias destination to
+  // preserve vdiv rounding.
 #if defined(PTO_NPU_ARCH_A5)
-    TDIVS(row, row, norm);
+  TDIVS(row, row, norm);
 #else
-    TDIVS(norm_sq, row, norm);
-    VectorBarrier();
-    TMOV(row, norm_sq);
+  TDIVS(norm_sq, row, norm);
+  VectorBarrier();
+  TMOV(row, norm_sq);
 #endif
-    if constexpr (ApplyQScale) {
-        VectorBarrier();
-        // Exact FP32 rounding of 1 / sqrt(128), matching TileLang's scale.
-        TMULS(row, row, 0.0883883461356163f);
-    }
+  if constexpr (ApplyQScale) {
+    VectorBarrier();
+    // Exact FP32 rounding of 1 / sqrt(128), matching TileLang's scale.
+    TMULS(row, row, 0.0883883461356163f);
+  }
 }
 
 constexpr uint16_t kSyncAivOnlyFlag = 14;
@@ -480,32 +509,28 @@ constexpr uint16_t kStatePublishAivFlag = 13;
 constexpr uint16_t kSyncModeShift = 4;
 constexpr uint16_t kSyncFlagShift = 8;
 
-AICORE PTO_INLINE uint16_t GetFftsMessage(uint16_t mode, uint16_t flag)
-{
-    return 0x1 + ((mode & 0x3) << kSyncModeShift) +
-           ((flag & 0xf) << kSyncFlagShift);
+AICORE PTO_INLINE uint16_t GetFftsMessage(uint16_t mode, uint16_t flag) {
+  return 0x1 + ((mode & 0x3) << kSyncModeShift) +
+         ((flag & 0xf) << kSyncFlagShift);
 }
 
-AICORE PTO_INLINE void SyncAllAiv()
-{
-    pipe_barrier(PIPE_ALL);
+AICORE PTO_INLINE void SyncAllAiv() {
+  pipe_barrier(PIPE_ALL);
 #if defined(PTO_NPU_ARCH_A5)
-    SYNCALL<pto::SyncCoreType::AIVOnly>();
+  SYNCALL<pto::SyncCoreType::AIVOnly>();
 #else
-    ffts_cross_core_sync(PIPE_MTE3, GetFftsMessage(0, kSyncAivOnlyFlag));
-    wait_flag_dev(kSyncAivOnlyFlag);
+  ffts_cross_core_sync(PIPE_MTE3, GetFftsMessage(0, kSyncAivOnlyFlag));
+  wait_flag_dev(kSyncAivOnlyFlag);
 #endif
 }
 
-AICORE PTO_INLINE void SyncAllAivStatePublish()
-{
-    pipe_barrier(PIPE_ALL);
+AICORE PTO_INLINE void SyncAllAivStatePublish() {
+  pipe_barrier(PIPE_ALL);
 #if defined(PTO_NPU_ARCH_A5)
-    SYNCALL<pto::SyncCoreType::AIVOnly>();
+  SYNCALL<pto::SyncCoreType::AIVOnly>();
 #else
-    ffts_cross_core_sync(
-        PIPE_MTE3, GetFftsMessage(0, kStatePublishAivFlag));
-    wait_flag_dev(kStatePublishAivFlag);
+  ffts_cross_core_sync(PIPE_MTE3, GetFftsMessage(0, kStatePublishAivFlag));
+  wait_flag_dev(kStatePublishAivFlag);
 #endif
 }
 
@@ -516,8 +541,7 @@ constexpr int32_t kSsmHeadElements = kHeadDim * kHeadDim;
 constexpr int32_t kMaxNumKHeads = 16;
 constexpr int32_t kMaxNumVHeads = 64;
 constexpr int32_t kMaxBatchSize = 32;
-constexpr int32_t kMaxConvDim =
-    (2 * kMaxNumKHeads + kMaxNumVHeads) * kHeadDim;
+constexpr int32_t kMaxConvDim = (2 * kMaxNumKHeads + kMaxNumVHeads) * kHeadDim;
 constexpr int32_t kMaxConvWeightElements = 4 * kMaxConvDim;
 constexpr int32_t kMaxConvStateElements =
     kCompiledNumCacheSlots * kConvStateLen * kMaxConvDim;
@@ -544,134 +568,175 @@ constexpr int32_t kConvSaveHalf2 = 5376;
 constexpr int32_t kConvVectorScratch = 155936;
 
 template <int32_t BufferBase, int32_t LoadEvent, int32_t ReuseEvent>
-AICORE PTO_INLINE void PrefetchConvBatch(
-    __gm__ bfloat16_t *qkv_handle,
-    __gm__ bfloat16_t *conv_state_handle,
-    int32_t batch_idx, int32_t state_idx, int32_t conv_dim,
-    int32_t conv_state_stride, int32_t channel_offset)
-{
-    wait_flag(PIPE_MTE3, PIPE_MTE2, ReuseEvent);
-    CopyConvHistoryGmToUb(
-        conv_state_handle + state_idx * conv_state_stride + channel_offset,
-        BufferBase + kConvHistHalf0, conv_dim);
-    CopyGmToUb<
-        bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-        kMaxBatchSize * kMaxConvDim, 1, 1, 128, pto::PadValue::Zero>(
-            qkv_handle + batch_idx * conv_dim + channel_offset,
-            BufferBase + kConvInputHalf, 0, 1, 128);
-    set_flag(PIPE_MTE2, PIPE_V, LoadEvent);
+AICORE PTO_INLINE void PrefetchConvBatch(__gm__ bfloat16_t* qkv_handle,
+                                         __gm__ bfloat16_t* conv_state_handle,
+                                         int32_t batch_idx,
+                                         int32_t state_idx,
+                                         int32_t conv_dim,
+                                         int32_t conv_state_stride,
+                                         int32_t channel_offset) {
+  wait_flag(PIPE_MTE3, PIPE_MTE2, ReuseEvent);
+  CopyConvHistoryGmToUb(
+      conv_state_handle + state_idx * conv_state_stride + channel_offset,
+      BufferBase + kConvHistHalf0,
+      conv_dim);
+  CopyGmToUb<bfloat16_t,
+             bfloat16_t,
+             1,
+             1,
+             1,
+             1,
+             128,
+             1,
+             1,
+             1,
+             kMaxBatchSize * kMaxConvDim,
+             1,
+             1,
+             128,
+             pto::PadValue::Zero>(
+      qkv_handle + batch_idx * conv_dim + channel_offset,
+      BufferBase + kConvInputHalf,
+      0,
+      1,
+      128);
+  set_flag(PIPE_MTE2, PIPE_V, LoadEvent);
 }
 
-template <int32_t BufferBase, int32_t LoadEvent, int32_t StoreEvent,
+template <int32_t BufferBase,
+          int32_t LoadEvent,
+          int32_t StoreEvent,
           int32_t ReuseEvent>
 AICORE PTO_INLINE void ComputeAndStoreConvBatch(
-    __gm__ bfloat16_t *conv_out_handle,
-    __gm__ bfloat16_t *conv_state_out_handle,
-    TileUbDataND<float, 1, 128, 1, 128> &w0,
-    TileUbDataND<float, 1, 128, 1, 128> &w1,
-    TileUbDataND<float, 1, 128, 1, 128> &w2,
-    TileUbDataND<float, 1, 128, 1, 128> &w3,
-    int32_t batch_idx, int32_t state_idx, int32_t conv_dim,
-    int32_t conv_state_stride, int32_t channel_offset)
-{
-    TileUbDataND<bfloat16_t, 1, 128, 1, 128> hist_half0;
-    TASSIGN(hist_half0, BufferBase + kConvHistHalf0);
-    TileUbDataND<bfloat16_t, 1, 128, 1, 128> hist_half1;
-    TASSIGN(hist_half1, BufferBase + kConvHistHalf1);
-    TileUbDataND<bfloat16_t, 1, 128, 1, 128> hist_half2;
-    TASSIGN(hist_half2, BufferBase + kConvHistHalf2);
-    TileUbDataND<bfloat16_t, 1, 128, 1, 128> x_half;
-    TASSIGN(x_half, BufferBase + kConvInputHalf);
-    TileUbDataND<float, 1, 128, 1, 128> hist0;
-    TASSIGN(hist0, BufferBase + kConvHist0);
-    TileUbDataND<float, 1, 128, 1, 128> hist1;
-    TASSIGN(hist1, BufferBase + kConvHist1);
-    TileUbDataND<float, 1, 128, 1, 128> hist2;
-    TASSIGN(hist2, BufferBase + kConvHist2);
-    TileUbDataND<float, 1, 128, 1, 128> x_fp32;
-    TASSIGN(x_fp32, BufferBase + kConvInput);
-    TileUbDataND<float, 1, 128, 1, 128> conv_acc;
-    TASSIGN(conv_acc, BufferBase + kConvAcc);
-    TileUbDataND<float, 1, 128, 1, 128> conv_tmp;
-    TASSIGN(conv_tmp, BufferBase + kConvTmp);
-    TileUbDataND<float, 1, 128, 1, 128> conv_y;
-    TASSIGN(conv_y, BufferBase + kConvOutput);
-    TileUbDataND<bfloat16_t, 1, 128, 1, 128> y_half;
-    TASSIGN(y_half, BufferBase + kConvOutputHalf);
-    TileUbDataND<bfloat16_t, 1, 128, 1, 128> save_half0;
-    TASSIGN(save_half0, BufferBase + kConvSaveHalf0);
-    TileUbDataND<bfloat16_t, 1, 128, 1, 128> save_half1;
-    TASSIGN(save_half1, BufferBase + kConvSaveHalf1);
-    TileUbDataND<bfloat16_t, 1, 128, 1, 128> save_half2;
-    TASSIGN(save_half2, BufferBase + kConvSaveHalf2);
+    __gm__ bfloat16_t* conv_out_handle,
+    __gm__ bfloat16_t* conv_state_out_handle,
+    TileUbDataND<float, 1, 128, 1, 128>& w0,
+    TileUbDataND<float, 1, 128, 1, 128>& w1,
+    TileUbDataND<float, 1, 128, 1, 128>& w2,
+    TileUbDataND<float, 1, 128, 1, 128>& w3,
+    int32_t batch_idx,
+    int32_t state_idx,
+    int32_t conv_dim,
+    int32_t conv_state_stride,
+    int32_t channel_offset) {
+  TileUbDataND<bfloat16_t, 1, 128, 1, 128> hist_half0;
+  TASSIGN(hist_half0, BufferBase + kConvHistHalf0);
+  TileUbDataND<bfloat16_t, 1, 128, 1, 128> hist_half1;
+  TASSIGN(hist_half1, BufferBase + kConvHistHalf1);
+  TileUbDataND<bfloat16_t, 1, 128, 1, 128> hist_half2;
+  TASSIGN(hist_half2, BufferBase + kConvHistHalf2);
+  TileUbDataND<bfloat16_t, 1, 128, 1, 128> x_half;
+  TASSIGN(x_half, BufferBase + kConvInputHalf);
+  TileUbDataND<float, 1, 128, 1, 128> hist0;
+  TASSIGN(hist0, BufferBase + kConvHist0);
+  TileUbDataND<float, 1, 128, 1, 128> hist1;
+  TASSIGN(hist1, BufferBase + kConvHist1);
+  TileUbDataND<float, 1, 128, 1, 128> hist2;
+  TASSIGN(hist2, BufferBase + kConvHist2);
+  TileUbDataND<float, 1, 128, 1, 128> x_fp32;
+  TASSIGN(x_fp32, BufferBase + kConvInput);
+  TileUbDataND<float, 1, 128, 1, 128> conv_acc;
+  TASSIGN(conv_acc, BufferBase + kConvAcc);
+  TileUbDataND<float, 1, 128, 1, 128> conv_tmp;
+  TASSIGN(conv_tmp, BufferBase + kConvTmp);
+  TileUbDataND<float, 1, 128, 1, 128> conv_y;
+  TASSIGN(conv_y, BufferBase + kConvOutput);
+  TileUbDataND<bfloat16_t, 1, 128, 1, 128> y_half;
+  TASSIGN(y_half, BufferBase + kConvOutputHalf);
+  TileUbDataND<bfloat16_t, 1, 128, 1, 128> save_half0;
+  TASSIGN(save_half0, BufferBase + kConvSaveHalf0);
+  TileUbDataND<bfloat16_t, 1, 128, 1, 128> save_half1;
+  TASSIGN(save_half1, BufferBase + kConvSaveHalf1);
+  TileUbDataND<bfloat16_t, 1, 128, 1, 128> save_half2;
+  TASSIGN(save_half2, BufferBase + kConvSaveHalf2);
 
-    wait_flag(PIPE_MTE2, PIPE_V, LoadEvent);
-    TCVT(hist0, hist_half0, RoundMode::CAST_NONE);
-    TCVT(hist1, hist_half1, RoundMode::CAST_NONE);
-    TCVT(hist2, hist_half2, RoundMode::CAST_NONE);
-    TCVT(x_fp32, x_half, RoundMode::CAST_NONE);
-    VectorBarrier();
-    TMUL(conv_acc, w0, hist0);
+  wait_flag(PIPE_MTE2, PIPE_V, LoadEvent);
+  TCVT(hist0, hist_half0, RoundMode::CAST_NONE);
+  TCVT(hist1, hist_half1, RoundMode::CAST_NONE);
+  TCVT(hist2, hist_half2, RoundMode::CAST_NONE);
+  TCVT(x_fp32, x_half, RoundMode::CAST_NONE);
+  VectorBarrier();
+  TMUL(conv_acc, w0, hist0);
 #if defined(PTO_NPU_ARCH_A5)
-    VectorBarrier();
-    MulAddDst<float, 1, 128>(conv_acc, hist1, w1, conv_tmp);
-    VectorBarrier();
-    MulAddDst<float, 1, 128>(conv_acc, hist2, w2, conv_tmp);
-    VectorBarrier();
+  VectorBarrier();
+  MulAddDst<float, 1, 128>(conv_acc, hist1, w1, conv_tmp);
+  VectorBarrier();
+  MulAddDst<float, 1, 128>(conv_acc, hist2, w2, conv_tmp);
+  VectorBarrier();
 #else
-    TMUL(conv_tmp, w1, hist1);
-    VectorBarrier();
-    TADD(conv_acc, conv_acc, conv_tmp);
-    VectorBarrier();
-    TMUL(conv_tmp, w2, hist2);
-    VectorBarrier();
-    TADD(conv_acc, conv_acc, conv_tmp);
-    VectorBarrier();
+  TMUL(conv_tmp, w1, hist1);
+  VectorBarrier();
+  TADD(conv_acc, conv_acc, conv_tmp);
+  VectorBarrier();
+  TMUL(conv_tmp, w2, hist2);
+  VectorBarrier();
+  TADD(conv_acc, conv_acc, conv_tmp);
+  VectorBarrier();
 #endif
-    TileUbDataND<float, 1, 128> muladd_tmp;
-    TASSIGN(muladd_tmp, kConvVectorScratch);
-    MulAddDst<float, 1, 128>(conv_acc, x_fp32, w3, muladd_tmp);
-    VectorBarrier();
-    TileUbDataND<float, 1, 128> silu_tmp;
-    TASSIGN(silu_tmp, kConvVectorScratch);
-    CausalConvSilu<float, 1, 128>(conv_y, conv_acc, silu_tmp);
-    VectorBarrier();
-    TCVT(y_half, conv_y, RoundMode::CAST_RINT);
-    TCVT(save_half0, hist1, RoundMode::CAST_RINT);
-    TCVT(save_half1, hist2, RoundMode::CAST_RINT);
-    TCVT(save_half2, x_fp32, RoundMode::CAST_RINT);
-    set_flag(PIPE_V, PIPE_MTE3, StoreEvent);
-    wait_flag(PIPE_V, PIPE_MTE3, StoreEvent);
-    CopyUbToGm<
-        bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-        kMaxBatchSize * kMaxConvDim, 1, 1, 128>(
-            conv_out_handle + batch_idx * conv_dim + channel_offset,
-            BufferBase + kConvOutputHalf, 0, 1, 128);
-    CopyConvHistoryUbToGm(
-        conv_state_out_handle + state_idx * conv_state_stride +
-            channel_offset,
-        BufferBase + kConvSaveHalf0, conv_dim);
-    set_flag(PIPE_MTE3, PIPE_MTE2, ReuseEvent);
+  TileUbDataND<float, 1, 128> muladd_tmp;
+  TASSIGN(muladd_tmp, kConvVectorScratch);
+  MulAddDst<float, 1, 128>(conv_acc, x_fp32, w3, muladd_tmp);
+  VectorBarrier();
+  TileUbDataND<float, 1, 128> silu_tmp;
+  TASSIGN(silu_tmp, kConvVectorScratch);
+  CausalConvSilu<float, 1, 128>(conv_y, conv_acc, silu_tmp);
+  VectorBarrier();
+  TCVT(y_half, conv_y, RoundMode::CAST_RINT);
+  TCVT(save_half0, hist1, RoundMode::CAST_RINT);
+  TCVT(save_half1, hist2, RoundMode::CAST_RINT);
+  TCVT(save_half2, x_fp32, RoundMode::CAST_RINT);
+  set_flag(PIPE_V, PIPE_MTE3, StoreEvent);
+  wait_flag(PIPE_V, PIPE_MTE3, StoreEvent);
+  CopyUbToGm<bfloat16_t,
+             bfloat16_t,
+             1,
+             1,
+             1,
+             1,
+             128,
+             1,
+             1,
+             1,
+             kMaxBatchSize * kMaxConvDim,
+             1,
+             1,
+             128>(conv_out_handle + batch_idx * conv_dim + channel_offset,
+                  BufferBase + kConvOutputHalf,
+                  0,
+                  1,
+                  128);
+  CopyConvHistoryUbToGm(
+      conv_state_out_handle + state_idx * conv_state_stride + channel_offset,
+      BufferBase + kConvSaveHalf0,
+      conv_dim);
+  set_flag(PIPE_MTE3, PIPE_MTE2, ReuseEvent);
 }
 
 // The generated PTO kernel body follows. The tile shape stays fixed while
 // model-dependent tensor strides and loop bounds come from host tiling data.
 
-template <bool IsBatchOne, bool FlaSsmStateLayout>
-AICORE PTO_INLINE void Run(
-    __gm__ bfloat16_t *qkv_handle, __gm__ bfloat16_t *z_handle,
-    __gm__ bfloat16_t *b_handle, __gm__ bfloat16_t *a_handle,
-    __gm__ bfloat16_t *conv_weight_handle,
-    __gm__ bfloat16_t *conv_state_handle, __gm__ float *a_log_handle,
-    __gm__ float *dt_bias_handle, __gm__ float *ssm_state_handle,
-    __gm__ int *read_state_indices_handle,
-    __gm__ int *write_state_indices_handle,
-    __gm__ bfloat16_t *norm_weight_handle,
-    __gm__ bfloat16_t *conv_out_handle,
-    __gm__ bfloat16_t *conv_state_out_handle,
-    __gm__ float *ssm_state_out_handle, __gm__ bfloat16_t *out_handle,
-    int32_t num_k_heads, int32_t num_v_heads, int32_t runtime_batch_size)
-{
+template <bool IsBatchOne,
+          bool FlaSsmStateLayout,
+          bool SplitStateIndices = false>
+AICORE PTO_INLINE void Run(__gm__ bfloat16_t* qkv_handle,
+                           __gm__ bfloat16_t* z_handle,
+                           __gm__ bfloat16_t* b_handle,
+                           __gm__ bfloat16_t* a_handle,
+                           __gm__ bfloat16_t* conv_weight_handle,
+                           __gm__ bfloat16_t* conv_state_handle,
+                           __gm__ float* a_log_handle,
+                           __gm__ float* dt_bias_handle,
+                           __gm__ float* ssm_state_handle,
+                           __gm__ int* read_state_indices_handle,
+                           __gm__ int* write_state_indices_handle,
+                           __gm__ bfloat16_t* norm_weight_handle,
+                           __gm__ bfloat16_t* conv_out_handle,
+                           __gm__ bfloat16_t* conv_state_out_handle,
+                           __gm__ float* ssm_state_out_handle,
+                           __gm__ bfloat16_t* out_handle,
+                           int32_t num_k_heads,
+                           int32_t num_v_heads,
+                           int32_t runtime_batch_size) {
   // Static UB layout. Regions with multiple names are intentionally reused
   // after the previous value's last consumer.
   constexpr int32_t kUbConvWeightHalf0 = 0;
@@ -740,9 +805,9 @@ AICORE PTO_INLINE void Run(
 #if defined(PTO_NPU_ARCH_A5)
   constexpr int32_t kUbGateInputCache = 174336;
 #endif
+  constexpr int32_t kStateIndexWidth = SplitStateIndices ? 2 : 1;
   const int32_t batch_size = IsBatchOne ? 1 : runtime_batch_size;
-  const int32_t conv_dim =
-      (2 * num_k_heads + num_v_heads) * kHeadDim;
+  const int32_t conv_dim = (2 * num_k_heads + num_v_heads) * kHeadDim;
   const int32_t conv_tile_count = conv_dim / kHeadDim;
   const int32_t conv_state_stride = kConvStateLen * conv_dim;
   const int32_t v_heads_per_k = num_v_heads / num_k_heads;
@@ -897,26 +962,82 @@ AICORE PTO_INLINE void Run(
       mega_gdn_decode_pto::CopyConvWeightsGmToUb(
           conv_weight_handle + channel_offset, kUbConvWeightHalf0, conv_dim);
     } else {
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          kMaxConvWeightElements, 1, 1, 128, pto::PadValue::Zero>(
-              conv_weight_handle + channel_offset, kUbConvWeightHalf0,
-              0, 1, 128);
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          kMaxConvWeightElements, 1, 1, 128, pto::PadValue::Zero>(
-              conv_weight_handle + channel_offset + conv_dim,
-              kUbConvWeightHalf1, 0, 1, 128);
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          kMaxConvWeightElements, 1, 1, 128, pto::PadValue::Zero>(
-              conv_weight_handle + channel_offset + 2 * conv_dim,
-              kUbConvWeightHalf2, 0, 1, 128);
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          kMaxConvWeightElements, 1, 1, 128, pto::PadValue::Zero>(
-              conv_weight_handle + channel_offset + 3 * conv_dim,
-              kUbConvWeightHalf3, 0, 1, 128);
+      mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                      bfloat16_t,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      128,
+                                      1,
+                                      1,
+                                      1,
+                                      kMaxConvWeightElements,
+                                      1,
+                                      1,
+                                      128,
+                                      pto::PadValue::Zero>(
+          conv_weight_handle + channel_offset, kUbConvWeightHalf0, 0, 1, 128);
+      mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                      bfloat16_t,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      128,
+                                      1,
+                                      1,
+                                      1,
+                                      kMaxConvWeightElements,
+                                      1,
+                                      1,
+                                      128,
+                                      pto::PadValue::Zero>(
+          conv_weight_handle + channel_offset + conv_dim,
+          kUbConvWeightHalf1,
+          0,
+          1,
+          128);
+      mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                      bfloat16_t,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      128,
+                                      1,
+                                      1,
+                                      1,
+                                      kMaxConvWeightElements,
+                                      1,
+                                      1,
+                                      128,
+                                      pto::PadValue::Zero>(
+          conv_weight_handle + channel_offset + 2 * conv_dim,
+          kUbConvWeightHalf2,
+          0,
+          1,
+          128);
+      mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                      bfloat16_t,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      128,
+                                      1,
+                                      1,
+                                      1,
+                                      kMaxConvWeightElements,
+                                      1,
+                                      1,
+                                      128,
+                                      pto::PadValue::Zero>(
+          conv_weight_handle + channel_offset + 3 * conv_dim,
+          kUbConvWeightHalf3,
+          0,
+          1,
+          128);
     }
     set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
     wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
@@ -925,19 +1046,23 @@ AICORE PTO_INLINE void Run(
     TCVT(w2, w_half2, RoundMode::CAST_NONE);
     TCVT(w3, w_half3, RoundMode::CAST_NONE);
 
-    if constexpr (!IsBatchOne) {
+    if constexpr (!IsBatchOne && !SplitStateIndices) {
       set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
       set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
 
       const int32_t buffer0_read_state_idx = *read_state_indices_handle;
       int32_t buffer0_write_state_idx = *write_state_indices_handle;
-      mega_gdn_decode_pto::PrefetchConvBatch<
-          kConvBuffer0, EVENT_ID2, EVENT_ID0>(
-              qkv_handle, conv_state_handle, 0, buffer0_read_state_idx,
-              conv_dim, conv_state_stride, channel_offset);
+      mega_gdn_decode_pto::PrefetchConvBatch<kConvBuffer0,
+                                             EVENT_ID2,
+                                             EVENT_ID0>(qkv_handle,
+                                                        conv_state_handle,
+                                                        0,
+                                                        buffer0_read_state_idx,
+                                                        conv_dim,
+                                                        conv_state_stride,
+                                                        channel_offset);
 
-      for (int32_t batch_pair = 0; batch_pair < batch_size;
-           batch_pair += 2) {
+      for (int32_t batch_pair = 0; batch_pair < batch_size; batch_pair += 2) {
         const int32_t buffer1_batch_idx = batch_pair + 1;
         int32_t buffer1_read_state_idx = 0;
         int32_t buffer1_write_state_idx = 0;
@@ -946,18 +1071,32 @@ AICORE PTO_INLINE void Run(
               *(read_state_indices_handle + buffer1_batch_idx);
           buffer1_write_state_idx =
               *(write_state_indices_handle + buffer1_batch_idx);
-          mega_gdn_decode_pto::PrefetchConvBatch<
-              kConvBuffer1, EVENT_ID3, EVENT_ID1>(
-                  qkv_handle, conv_state_handle, buffer1_batch_idx,
-                  buffer1_read_state_idx, conv_dim, conv_state_stride,
+          mega_gdn_decode_pto::
+              PrefetchConvBatch<kConvBuffer1, EVENT_ID3, EVENT_ID1>(
+                  qkv_handle,
+                  conv_state_handle,
+                  buffer1_batch_idx,
+                  buffer1_read_state_idx,
+                  conv_dim,
+                  conv_state_stride,
                   channel_offset);
         }
 
-        mega_gdn_decode_pto::ComputeAndStoreConvBatch<
-            kConvBuffer0, EVENT_ID2, EVENT_ID4, EVENT_ID0>(
-                conv_out_handle, conv_state_out_handle, w0, w1, w2, w3,
-                batch_pair, buffer0_write_state_idx, conv_dim,
-                conv_state_stride, channel_offset);
+        mega_gdn_decode_pto::ComputeAndStoreConvBatch<kConvBuffer0,
+                                                      EVENT_ID2,
+                                                      EVENT_ID4,
+                                                      EVENT_ID0>(
+            conv_out_handle,
+            conv_state_out_handle,
+            w0,
+            w1,
+            w2,
+            w3,
+            batch_pair,
+            buffer0_write_state_idx,
+            conv_dim,
+            conv_state_stride,
+            channel_offset);
 
         const int32_t next_buffer0_batch_idx = batch_pair + 2;
         int32_t next_buffer0_read_state_idx = 0;
@@ -967,121 +1106,220 @@ AICORE PTO_INLINE void Run(
               *(read_state_indices_handle + next_buffer0_batch_idx);
           next_buffer0_write_state_idx =
               *(write_state_indices_handle + next_buffer0_batch_idx);
-          mega_gdn_decode_pto::PrefetchConvBatch<
-              kConvBuffer0, EVENT_ID2, EVENT_ID0>(
-                  qkv_handle, conv_state_handle, next_buffer0_batch_idx,
-                  next_buffer0_read_state_idx, conv_dim, conv_state_stride,
+          mega_gdn_decode_pto::
+              PrefetchConvBatch<kConvBuffer0, EVENT_ID2, EVENT_ID0>(
+                  qkv_handle,
+                  conv_state_handle,
+                  next_buffer0_batch_idx,
+                  next_buffer0_read_state_idx,
+                  conv_dim,
+                  conv_state_stride,
                   channel_offset);
         }
 
         if (buffer1_batch_idx < batch_size) {
-          mega_gdn_decode_pto::ComputeAndStoreConvBatch<
-              kConvBuffer1, EVENT_ID3, EVENT_ID5, EVENT_ID1>(
-                  conv_out_handle, conv_state_out_handle, w0, w1, w2, w3,
-                  buffer1_batch_idx, buffer1_write_state_idx, conv_dim,
-                  conv_state_stride, channel_offset);
+          mega_gdn_decode_pto::ComputeAndStoreConvBatch<kConvBuffer1,
+                                                        EVENT_ID3,
+                                                        EVENT_ID5,
+                                                        EVENT_ID1>(
+              conv_out_handle,
+              conv_state_out_handle,
+              w0,
+              w1,
+              w2,
+              w3,
+              buffer1_batch_idx,
+              buffer1_write_state_idx,
+              conv_dim,
+              conv_state_stride,
+              channel_offset);
         }
         buffer0_write_state_idx = next_buffer0_write_state_idx;
       }
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
     } else {
-    for (int32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-      if constexpr (!IsBatchOne) {
-        pipe_barrier(PIPE_ALL);
+      for (int32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+        if constexpr (!IsBatchOne) {
+          pipe_barrier(PIPE_ALL);
 #if !defined(PTO_NPU_ARCH_A5)
-        pipe_barrier(PIPE_ALL);
+          pipe_barrier(PIPE_ALL);
 #endif
-      }
-      const int32_t read_state_idx = IsBatchOne
-          ? batch_one_read_state_idx
-          : *(read_state_indices_handle + batch_idx);
-      const int32_t write_state_idx = IsBatchOne
-          ? batch_one_write_state_idx
-          : *(write_state_indices_handle + batch_idx);
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          kMaxConvStateElements, 1, 1, 128, pto::PadValue::Zero>(
-              conv_state_handle + read_state_idx * conv_state_stride +
-                  channel_offset,
-              kUbConvHistoryHalf0, 0, 1, 128);
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          kMaxConvStateElements, 1, 1, 128, pto::PadValue::Zero>(
-              conv_state_handle + read_state_idx * conv_state_stride +
-                  channel_offset + conv_dim,
-              kUbConvHistoryHalf1, 0, 1, 128);
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          kMaxConvStateElements, 1, 1, 128, pto::PadValue::Zero>(
-              conv_state_handle + read_state_idx * conv_state_stride +
-                  channel_offset + 2 * conv_dim,
-              kUbConvHistoryHalf2, 0, 1, 128);
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          kMaxBatchSize * kMaxConvDim, 1, 1, 128, pto::PadValue::Zero>(
-              qkv_handle + batch_idx * conv_dim + channel_offset,
-              kUbConvInputHalf, 0, 1, 128);
-      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
-      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
-      TCVT(hist0, hist_half0, RoundMode::CAST_NONE);
-      TCVT(hist1, hist_half1, RoundMode::CAST_NONE);
-      TCVT(hist2, hist_half2, RoundMode::CAST_NONE);
-      TCVT(x_fp32, x_half, RoundMode::CAST_NONE);
-      VectorBarrier();
-      TMUL(conv_acc, w0, hist0);
+        }
+        const int32_t read_state_idx =
+            IsBatchOne
+                ? batch_one_read_state_idx
+                : *(read_state_indices_handle + batch_idx * kStateIndexWidth);
+        const int32_t write_state_idx =
+            IsBatchOne
+                ? batch_one_write_state_idx
+                : *(write_state_indices_handle + batch_idx * kStateIndexWidth);
+        if constexpr (SplitStateIndices) {
+          if (read_state_idx < 0 || write_state_idx < 0) {
+            continue;
+          }
+        }
+        mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                        bfloat16_t,
+                                        1,
+                                        1,
+                                        1,
+                                        1,
+                                        128,
+                                        1,
+                                        1,
+                                        1,
+                                        kMaxConvStateElements,
+                                        1,
+                                        1,
+                                        128,
+                                        pto::PadValue::Zero>(
+            conv_state_handle +
+                static_cast<int64_t>(read_state_idx) * conv_state_stride +
+                channel_offset,
+            kUbConvHistoryHalf0,
+            0,
+            1,
+            128);
+        mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                        bfloat16_t,
+                                        1,
+                                        1,
+                                        1,
+                                        1,
+                                        128,
+                                        1,
+                                        1,
+                                        1,
+                                        kMaxConvStateElements,
+                                        1,
+                                        1,
+                                        128,
+                                        pto::PadValue::Zero>(
+            conv_state_handle +
+                static_cast<int64_t>(read_state_idx) * conv_state_stride +
+                channel_offset + conv_dim,
+            kUbConvHistoryHalf1,
+            0,
+            1,
+            128);
+        mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                        bfloat16_t,
+                                        1,
+                                        1,
+                                        1,
+                                        1,
+                                        128,
+                                        1,
+                                        1,
+                                        1,
+                                        kMaxConvStateElements,
+                                        1,
+                                        1,
+                                        128,
+                                        pto::PadValue::Zero>(
+            conv_state_handle +
+                static_cast<int64_t>(read_state_idx) * conv_state_stride +
+                channel_offset + 2 * conv_dim,
+            kUbConvHistoryHalf2,
+            0,
+            1,
+            128);
+        mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                        bfloat16_t,
+                                        1,
+                                        1,
+                                        1,
+                                        1,
+                                        128,
+                                        1,
+                                        1,
+                                        1,
+                                        kMaxBatchSize * kMaxConvDim,
+                                        1,
+                                        1,
+                                        128,
+                                        pto::PadValue::Zero>(
+            qkv_handle + batch_idx * conv_dim + channel_offset,
+            kUbConvInputHalf,
+            0,
+            1,
+            128);
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
+        TCVT(hist0, hist_half0, RoundMode::CAST_NONE);
+        TCVT(hist1, hist_half1, RoundMode::CAST_NONE);
+        TCVT(hist2, hist_half2, RoundMode::CAST_NONE);
+        TCVT(x_fp32, x_half, RoundMode::CAST_NONE);
+        VectorBarrier();
+        TMUL(conv_acc, w0, hist0);
 #if defined(PTO_NPU_ARCH_A5)
-      VectorBarrier();
-      mega_gdn_decode_pto::MulAddDst<float, 1, 128>(
-          conv_acc, hist1, w1, conv_tmp);
-      VectorBarrier();
-      mega_gdn_decode_pto::MulAddDst<float, 1, 128>(
-          conv_acc, hist2, w2, conv_tmp);
-      VectorBarrier();
+        VectorBarrier();
+        mega_gdn_decode_pto::MulAddDst<float, 1, 128>(
+            conv_acc, hist1, w1, conv_tmp);
+        VectorBarrier();
+        mega_gdn_decode_pto::MulAddDst<float, 1, 128>(
+            conv_acc, hist2, w2, conv_tmp);
+        VectorBarrier();
 #else
-      TMUL(conv_tmp, w1, hist1);
-      VectorBarrier();
-      TADD(conv_acc, conv_acc, conv_tmp);
-      VectorBarrier();
-      TMUL(conv_tmp, w2, hist2);
-      VectorBarrier();
-      TADD(conv_acc, conv_acc, conv_tmp);
-      VectorBarrier();
+        TMUL(conv_tmp, w1, hist1);
+        VectorBarrier();
+        TADD(conv_acc, conv_acc, conv_tmp);
+        VectorBarrier();
+        TMUL(conv_tmp, w2, hist2);
+        VectorBarrier();
+        TADD(conv_acc, conv_acc, conv_tmp);
+        VectorBarrier();
 #endif
-      mega_gdn_decode_pto::TileUbDataND<float, 1, 128>
-          conv_acc_temp_0_muladddst_tmp;
-      TASSIGN(conv_acc_temp_0_muladddst_tmp, kUbVectorScratch);
-      mega_gdn_decode_pto::MulAddDst<float, 1, 128>(
-          conv_acc, x_fp32, w3, conv_acc_temp_0_muladddst_tmp);
-      VectorBarrier();
-      mega_gdn_decode_pto::TileUbDataND<float, 1, 128>
-          conv_y_temp_0_silu_tmp;
-      TASSIGN(conv_y_temp_0_silu_tmp, kUbVectorScratch);
-      mega_gdn_decode_pto::CausalConvSilu<float, 1, 128>(
-          conv_y, conv_acc, conv_y_temp_0_silu_tmp);
-      VectorBarrier();
-      TCVT(y_half, conv_y, RoundMode::CAST_RINT);
-      TCVT(save_half0, hist1, RoundMode::CAST_RINT);
-      TCVT(save_half1, hist2, RoundMode::CAST_RINT);
-      TCVT(save_half2, x_fp32, RoundMode::CAST_RINT);
-      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
-      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
-      mega_gdn_decode_pto::CopyUbToGm<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          kMaxBatchSize * kMaxConvDim, 1, 1, 128>(
-              conv_out_handle + batch_idx * conv_dim + channel_offset,
-              kUbConvOutputHalf, 0, 1, 128);
-      mega_gdn_decode_pto::CopyConvHistoryUbToGm(
-          conv_state_out_handle + write_state_idx * conv_state_stride +
-              channel_offset,
-          kUbConvSaveHalf0, conv_dim);
-      if constexpr (!IsBatchOne) {
-        pipe_barrier(PIPE_ALL);
+        mega_gdn_decode_pto::TileUbDataND<float, 1, 128>
+            conv_acc_temp_0_muladddst_tmp;
+        TASSIGN(conv_acc_temp_0_muladddst_tmp, kUbVectorScratch);
+        mega_gdn_decode_pto::MulAddDst<float, 1, 128>(
+            conv_acc, x_fp32, w3, conv_acc_temp_0_muladddst_tmp);
+        VectorBarrier();
+        mega_gdn_decode_pto::TileUbDataND<float, 1, 128> conv_y_temp_0_silu_tmp;
+        TASSIGN(conv_y_temp_0_silu_tmp, kUbVectorScratch);
+        mega_gdn_decode_pto::CausalConvSilu<float, 1, 128>(
+            conv_y, conv_acc, conv_y_temp_0_silu_tmp);
+        VectorBarrier();
+        TCVT(y_half, conv_y, RoundMode::CAST_RINT);
+        TCVT(save_half0, hist1, RoundMode::CAST_RINT);
+        TCVT(save_half1, hist2, RoundMode::CAST_RINT);
+        TCVT(save_half2, x_fp32, RoundMode::CAST_RINT);
+        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
+        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
+        mega_gdn_decode_pto::CopyUbToGm<bfloat16_t,
+                                        bfloat16_t,
+                                        1,
+                                        1,
+                                        1,
+                                        1,
+                                        128,
+                                        1,
+                                        1,
+                                        1,
+                                        kMaxBatchSize * kMaxConvDim,
+                                        1,
+                                        1,
+                                        128>(
+            conv_out_handle + batch_idx * conv_dim + channel_offset,
+            kUbConvOutputHalf,
+            0,
+            1,
+            128);
+        mega_gdn_decode_pto::CopyConvHistoryUbToGm(
+            conv_state_out_handle +
+                static_cast<int64_t>(write_state_idx) * conv_state_stride +
+                channel_offset,
+            kUbConvSaveHalf0,
+            conv_dim);
+        if constexpr (!IsBatchOne) {
+          pipe_barrier(PIPE_ALL);
 #if !defined(PTO_NPU_ARCH_A5)
-        pipe_barrier(PIPE_ALL);
+          pipe_barrier(PIPE_ALL);
 #endif
+        }
       }
-    }
     }
     if constexpr (IsBatchOne) {
       if (conv_tile + vector_core_count < conv_tile_count) {
@@ -1101,9 +1339,7 @@ AICORE PTO_INLINE void Run(
   const int32_t extra_head_cores = total_ssm_heads % vector_core_count;
   const int32_t contiguous_head_start =
       vector_core_idx * heads_per_core +
-      (vector_core_idx < extra_head_cores
-           ? vector_core_idx
-           : extra_head_cores);
+      (vector_core_idx < extra_head_cores ? vector_core_idx : extra_head_cores);
   const int32_t contiguous_head_count =
       heads_per_core + (vector_core_idx < extra_head_cores ? 1 : 0);
   const int32_t first_head_index =
@@ -1113,42 +1349,90 @@ AICORE PTO_INLINE void Run(
                : total_ssm_heads;
   const int32_t head_index_step = reuse_qk ? 1 : vector_core_count;
   int32_t cached_qk_group = -1;
-  const bool cache_head_scalars =
-      reuse_qk && contiguous_head_count > 0;
+  const bool cache_head_scalars = reuse_qk && contiguous_head_count > 0;
 
   // Phase 3: precompute per-head recurrent scalars for the reusable-QK path.
   if (cache_head_scalars) {
-    const int32_t head_phase =
-        contiguous_head_start % num_v_heads;
-    mega_gdn_decode_pto::CopyGmToUb<
-        bfloat16_t, bfloat16_t, 1, 1, 1, 1, 1,
-        kMaxBatchSize * kMaxNumVHeads, 1, 1, 1, 1,
-        1, 64, pto::PadValue::Null>(
-            a_handle + contiguous_head_start, kUbACacheHalfOrScratch, 0, 1,
-            contiguous_head_count);
-    mega_gdn_decode_pto::CopyGmToUb<
-        bfloat16_t, bfloat16_t, 1, 1, 1, 1, 1,
-        kMaxBatchSize * kMaxNumVHeads, 1, 1, 1, 1,
-        1, 64, pto::PadValue::Null>(
-            b_handle + contiguous_head_start, kUbBCacheHalf, 0, 1,
-            contiguous_head_count);
-    mega_gdn_decode_pto::CopyGmToUb<
-        float, float, 1, 1, 1, 1, 1,
-        kMaxNumVHeads, 1, 1, 1, 1,
-        1, 64, pto::PadValue::Null>(
-            a_log_handle, kUbALogCache, 0, 1, num_v_heads);
-    mega_gdn_decode_pto::CopyGmToUb<
-        float, float, 1, 1, 1, 1, 1,
-        kMaxNumVHeads, 1, 1, 1, 1,
-        1, 64, pto::PadValue::Null>(
-            dt_bias_handle, kUbDtBiasCache, 0, 1, num_v_heads);
-    mega_gdn_decode_pto::TileUbDataND<
-        int32_t, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
-        gather_indices(1, contiguous_head_count);
+    const int32_t head_phase = contiguous_head_start % num_v_heads;
+    mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                    bfloat16_t,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    kMaxBatchSize * kMaxNumVHeads,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    64,
+                                    pto::PadValue::Null>(
+        a_handle + contiguous_head_start,
+        kUbACacheHalfOrScratch,
+        0,
+        1,
+        contiguous_head_count);
+    mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                    bfloat16_t,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    kMaxBatchSize * kMaxNumVHeads,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    64,
+                                    pto::PadValue::Null>(
+        b_handle + contiguous_head_start,
+        kUbBCacheHalf,
+        0,
+        1,
+        contiguous_head_count);
+    mega_gdn_decode_pto::CopyGmToUb<float,
+                                    float,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    kMaxNumVHeads,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    64,
+                                    pto::PadValue::Null>(
+        a_log_handle, kUbALogCache, 0, 1, num_v_heads);
+    mega_gdn_decode_pto::CopyGmToUb<float,
+                                    float,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    kMaxNumVHeads,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    64,
+                                    pto::PadValue::Null>(
+        dt_bias_handle, kUbDtBiasCache, 0, 1, num_v_heads);
+    mega_gdn_decode_pto::
+        TileUbDataND<int32_t, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
+            gather_indices(1, contiguous_head_count);
     TASSIGN(gather_indices, kUbQOrGatherIndices);
-    mega_gdn_decode_pto::TileUbDataND<
-        int32_t, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
-        gather_work(1, contiguous_head_count);
+    mega_gdn_decode_pto::
+        TileUbDataND<int32_t, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
+            gather_work(1, contiguous_head_count);
     TASSIGN(gather_work, kUbGatherWork);
     for (int32_t i = 0; i < contiguous_head_count; ++i) {
       int32_t source_head = head_phase + i;
@@ -1161,33 +1445,28 @@ AICORE PTO_INLINE void Run(
     wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID6);
     set_flag(PIPE_S, PIPE_V, EVENT_ID7);
     wait_flag(PIPE_S, PIPE_V, EVENT_ID7);
-    mega_gdn_decode_pto::TileUbDataND<
-        bfloat16_t, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
-        a_cache_half_valid(1, contiguous_head_count);
+    mega_gdn_decode_pto::
+        TileUbDataND<bfloat16_t, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
+            a_cache_half_valid(1, contiguous_head_count);
     TASSIGN(a_cache_half_valid, kUbACacheHalfOrScratch);
-    mega_gdn_decode_pto::TileUbDataND<
-        bfloat16_t, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
-        b_cache_half_valid(1, contiguous_head_count);
+    mega_gdn_decode_pto::
+        TileUbDataND<bfloat16_t, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
+            b_cache_half_valid(1, contiguous_head_count);
     TASSIGN(b_cache_half_valid, kUbBCacheHalf);
-    mega_gdn_decode_pto::TileUbDataND<
-        float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
+    mega_gdn_decode_pto::TileUbDataND<float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
         a_cache_valid(1, contiguous_head_count);
     TASSIGN(a_cache_valid, kUbACache);
-    mega_gdn_decode_pto::TileUbDataND<
-        float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
+    mega_gdn_decode_pto::TileUbDataND<float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
         b_cache_valid(1, contiguous_head_count);
     TASSIGN(b_cache_valid, kUbBCache);
-    mega_gdn_decode_pto::TileUbDataND<
-        float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
+    mega_gdn_decode_pto::TileUbDataND<float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
         a_log_cache_valid(1, contiguous_head_count);
     TASSIGN(a_log_cache_valid, kUbALogCache);
-    mega_gdn_decode_pto::TileUbDataND<
-        float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
+    mega_gdn_decode_pto::TileUbDataND<float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
         dt_bias_cache_valid(1, contiguous_head_count);
     TASSIGN(dt_bias_cache_valid, kUbDtBiasCache);
 #if defined(PTO_NPU_ARCH_A5)
-    mega_gdn_decode_pto::TileUbDataND<
-        float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
+    mega_gdn_decode_pto::TileUbDataND<float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
         gate_input_cache(1, contiguous_head_count);
     TASSIGN(gate_input_cache, kUbGateInputCache);
 #endif
@@ -1195,8 +1474,7 @@ AICORE PTO_INLINE void Run(
     TCVT(b_cache_valid, b_cache_half_valid, RoundMode::CAST_NONE);
     VectorBarrier();
     // The converted BF16 cache is dead here, so reuse it as vector scratch.
-    mega_gdn_decode_pto::TileUbDataND<
-        float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
+    mega_gdn_decode_pto::TileUbDataND<float, 1, 64, pto::DYNAMIC, pto::DYNAMIC>
         gate_tmp(1, contiguous_head_count);
     TASSIGN(gate_tmp, kUbACacheHalfOrScratch);
     TGATHER(gate_tmp, a_log_cache, gather_indices, gather_work);
@@ -1261,8 +1539,8 @@ AICORE PTO_INLINE void Run(
   }
 
   // Phase 4: recurrent GDN update, RMSNorm, gate, and final output.
-  for (int32_t head_index = first_head_index;
-       head_index < head_index_end;
+  bool norm_weight_loaded = false;
+  for (int32_t head_index = first_head_index; head_index < head_index_end;
        head_index += head_index_step) {
     if constexpr (!IsBatchOne) {
       pipe_barrier(PIPE_ALL);
@@ -1270,44 +1548,126 @@ AICORE PTO_INLINE void Run(
       pipe_barrier(PIPE_ALL);
 #endif
     }
-    const int32_t batch_idx =
-        IsBatchOne ? 0 : head_index / num_v_heads;
-    const int32_t head_idx =
-        IsBatchOne ? head_index : head_index % num_v_heads;
+    const int32_t batch_idx = IsBatchOne ? 0 : head_index / num_v_heads;
+    const int32_t head_idx = IsBatchOne ? head_index : head_index % num_v_heads;
     const int32_t qk_head_idx = head_idx / v_heads_per_k;
     const int32_t qk_group = batch_idx * num_k_heads + qk_head_idx;
     const bool load_qk = !reuse_qk || qk_group != cached_qk_group;
     const bool load_norm_weight =
-        !reuse_qk || head_index == first_head_index;
-    const int32_t read_state_idx = IsBatchOne
-        ? batch_one_read_state_idx
-        : *(read_state_indices_handle + batch_idx);
-    const int32_t write_state_idx = IsBatchOne
-        ? batch_one_write_state_idx
-        : *(write_state_indices_handle + batch_idx);
+        !reuse_qk || (SplitStateIndices ? !norm_weight_loaded
+                                        : head_index == first_head_index);
+    const int32_t read_state_idx =
+        *(read_state_indices_handle + batch_idx * kStateIndexWidth +
+          kStateIndexWidth - 1);
+    const int32_t write_state_idx =
+        *(write_state_indices_handle + batch_idx * kStateIndexWidth +
+          kStateIndexWidth - 1);
+    if constexpr (SplitStateIndices) {
+      if (read_state_idx < 0 || write_state_idx < 0) {
+        TEXPANDS(final_half, static_cast<bfloat16_t>(0));
+        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID5);
+        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID5);
+        mega_gdn_decode_pto::CopyUbToGm<bfloat16_t,
+                                        bfloat16_t,
+                                        1,
+                                        1,
+                                        1,
+                                        1,
+                                        128,
+                                        1,
+                                        1,
+                                        1,
+                                        kMaxBatchSize * kMaxNumVHeads *
+                                            kHeadDim,
+                                        1,
+                                        1,
+                                        128>(
+            out_handle + batch_idx * v_width + head_idx * kHeadDim,
+            kUbFinalHalf,
+            0,
+            1,
+            128);
+        pipe_barrier(PIPE_ALL);
+        continue;
+      }
+    }
+    norm_weight_loaded = true;
     if (load_qk) {
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          kMaxBatchSize * kMaxConvDim, 1, 1, 128, pto::PadValue::Zero>(
-              conv_out_handle + batch_idx * conv_dim +
-                  qk_head_idx * kHeadDim,
-              kUbQHalf, 0, 1, 128);
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          kMaxBatchSize * kMaxConvDim, 1, 1, 128, pto::PadValue::Zero>(
-              conv_out_handle + batch_idx * conv_dim +
-                  num_k_heads * kHeadDim + qk_head_idx * kHeadDim,
-              kUbKHalf, 0, 1, 128);
+      mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                      bfloat16_t,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      128,
+                                      1,
+                                      1,
+                                      1,
+                                      kMaxBatchSize * kMaxConvDim,
+                                      1,
+                                      1,
+                                      128,
+                                      pto::PadValue::Zero>(
+          conv_out_handle + batch_idx * conv_dim + qk_head_idx * kHeadDim,
+          kUbQHalf,
+          0,
+          1,
+          128);
+      mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                      bfloat16_t,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      128,
+                                      1,
+                                      1,
+                                      1,
+                                      kMaxBatchSize * kMaxConvDim,
+                                      1,
+                                      1,
+                                      128,
+                                      pto::PadValue::Zero>(
+          conv_out_handle + batch_idx * conv_dim + num_k_heads * kHeadDim +
+              qk_head_idx * kHeadDim,
+          kUbKHalf,
+          0,
+          1,
+          128);
     }
     if (!cache_head_scalars) {
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 1, 1, 1, 1,
-          kMaxBatchSize * kMaxNumVHeads, 1, 1, 16, pto::PadValue::Null>(
-              a_handle + head_index, kUbAHalf, 0, 1, 1);
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 1, 1, 1, 1,
-          kMaxBatchSize * kMaxNumVHeads, 1, 1, 16, pto::PadValue::Null>(
-              b_handle + head_index, kUbBHalf, 0, 1, 1);
+      mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                      bfloat16_t,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      kMaxBatchSize * kMaxNumVHeads,
+                                      1,
+                                      1,
+                                      16,
+                                      pto::PadValue::Null>(
+          a_handle + head_index, kUbAHalf, 0, 1, 1);
+      mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                      bfloat16_t,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      kMaxBatchSize * kMaxNumVHeads,
+                                      1,
+                                      1,
+                                      16,
+                                      pto::PadValue::Null>(
+          b_handle + head_index, kUbBHalf, 0, 1, 1);
     }
     if (load_qk || !cache_head_scalars) {
       set_flag(PIPE_MTE2, PIPE_V, EVENT_ID6);
@@ -1340,17 +1700,28 @@ AICORE PTO_INLINE void Run(
     float decay;
     float beta_gate;
     if (cache_head_scalars) {
-      const int32_t local_head_index =
-          head_index - contiguous_head_start;
+      const int32_t local_head_index = head_index - contiguous_head_start;
       decay = a_cache.GetValue(local_head_index);
       beta_gate = b_cache.GetValue(local_head_index);
     } else {
       set_flag(PIPE_V, PIPE_MTE2, EVENT_ID7);
       wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID7);
-      mega_gdn_decode_pto::CopyGmToUb<
-          float, float, 1, 1, 1, 1, 1, 1, 1, 1,
-          kMaxNumVHeads, 1, 1, 8, pto::PadValue::Null>(
-              a_log_handle + head_idx, kUbScalarTmp, 0, 1, 1);
+      mega_gdn_decode_pto::CopyGmToUb<float,
+                                      float,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      kMaxNumVHeads,
+                                      1,
+                                      1,
+                                      8,
+                                      pto::PadValue::Null>(
+          a_log_handle + head_idx, kUbScalarTmp, 0, 1, 1);
       set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
       mega_gdn_decode_pto::TileUbDataND<float, 1, 8, 1, 1> scalar_tmp_temp_2;
@@ -1358,10 +1729,22 @@ AICORE PTO_INLINE void Run(
       mega_gdn_decode_pto::TileUbDataND<float, 1, 8, 1, 1> exp_a_buf_temp_0;
       TASSIGN(exp_a_buf_temp_0, kUbExpA + 0 * 4);
       TEXP(exp_a_buf_temp_0, scalar_tmp_temp_2);
-      mega_gdn_decode_pto::CopyGmToUb<
-          float, float, 1, 1, 1, 1, 1, 1, 1, 1,
-          kMaxNumVHeads, 1, 1, 8, pto::PadValue::Null>(
-              dt_bias_handle + head_idx, kUbNormValue, 0, 1, 1);
+      mega_gdn_decode_pto::CopyGmToUb<float,
+                                      float,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      kMaxNumVHeads,
+                                      1,
+                                      1,
+                                      8,
+                                      pto::PadValue::Null>(
+          dt_bias_handle + head_idx, kUbNormValue, 0, 1, 1);
       set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
       VectorBarrier();
@@ -1443,19 +1826,49 @@ AICORE PTO_INLINE void Run(
       wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
       beta_gate = scalar_work.GetValue(0);
     }
-    mega_gdn_decode_pto::CopyGmToUb<
-        bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-        kMaxBatchSize * kMaxConvDim, 1, 1, 128, pto::PadValue::Zero>(
-            conv_out_handle + batch_idx * conv_dim +
-                2 * num_k_heads * kHeadDim + head_idx * kHeadDim,
-            kUbVHalf, 0, 1, 128);
-    mega_gdn_decode_pto::CopyGmToUb<
-        float, float, 1, 1, 1, 128, 128, kMaxSsmStateElements,
-        kMaxNumVHeads * kSsmHeadElements, kSsmHeadElements,
-        128, 1, 128, 128, pto::PadValue::Zero>(
-            ssm_state_handle + read_state_idx * ssm_state_stride +
-                head_idx * kSsmHeadElements,
-            kUbState, 0, 128, 128);
+    mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                    bfloat16_t,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    128,
+                                    1,
+                                    1,
+                                    1,
+                                    kMaxBatchSize * kMaxConvDim,
+                                    1,
+                                    1,
+                                    128,
+                                    pto::PadValue::Zero>(
+        conv_out_handle + batch_idx * conv_dim + 2 * num_k_heads * kHeadDim +
+            head_idx * kHeadDim,
+        kUbVHalf,
+        0,
+        1,
+        128);
+    mega_gdn_decode_pto::CopyGmToUb<float,
+                                    float,
+                                    1,
+                                    1,
+                                    1,
+                                    128,
+                                    128,
+                                    kMaxSsmStateElements,
+                                    kMaxNumVHeads * kSsmHeadElements,
+                                    kSsmHeadElements,
+                                    128,
+                                    1,
+                                    128,
+                                    128,
+                                    pto::PadValue::Zero>(
+        ssm_state_handle +
+            static_cast<int64_t>(read_state_idx) * ssm_state_stride +
+            head_idx * kSsmHeadElements,
+        kUbState,
+        0,
+        128,
+        128);
     set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
     wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
     TCVT(v_fp32, v_half, RoundMode::CAST_NONE);
@@ -1476,24 +1889,64 @@ AICORE PTO_INLINE void Run(
     TMOV(norm_half, out_half);
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
-    mega_gdn_decode_pto::CopyUbToGm<
-        float, float, 1, 1, 1, 128, 128, kMaxSsmStateElements,
-        kMaxNumVHeads * kSsmHeadElements, kSsmHeadElements,
-        128, 1, 128, 128>(
-            ssm_state_out_handle + write_state_idx * ssm_state_stride +
-                head_idx * kSsmHeadElements,
-            kUbState, 0, 128, 128);
-    mega_gdn_decode_pto::CopyGmToUb<
-        bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-        kMaxBatchSize * kMaxNumVHeads * kHeadDim, 1, 1, 128,
-        pto::PadValue::Zero>(
-            z_handle + batch_idx * v_width + head_idx * kHeadDim,
-            kUbZHalf, 0, 1, 128);
+    mega_gdn_decode_pto::CopyUbToGm<float,
+                                    float,
+                                    1,
+                                    1,
+                                    1,
+                                    128,
+                                    128,
+                                    kMaxSsmStateElements,
+                                    kMaxNumVHeads * kSsmHeadElements,
+                                    kSsmHeadElements,
+                                    128,
+                                    1,
+                                    128,
+                                    128>(
+        ssm_state_out_handle +
+            static_cast<int64_t>(write_state_idx) * ssm_state_stride +
+            head_idx * kSsmHeadElements,
+        kUbState,
+        0,
+        128,
+        128);
+    mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                    bfloat16_t,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    128,
+                                    1,
+                                    1,
+                                    1,
+                                    kMaxBatchSize * kMaxNumVHeads * kHeadDim,
+                                    1,
+                                    1,
+                                    128,
+                                    pto::PadValue::Zero>(
+        z_handle + batch_idx * v_width + head_idx * kHeadDim,
+        kUbZHalf,
+        0,
+        1,
+        128);
     if (load_norm_weight) {
-      mega_gdn_decode_pto::CopyGmToUb<
-          bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-          128, 1, 1, 128, pto::PadValue::Zero>(
-              norm_weight_handle, kUbNormWeightHalf, 0, 1, 128);
+      mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                      bfloat16_t,
+                                      1,
+                                      1,
+                                      1,
+                                      1,
+                                      128,
+                                      1,
+                                      1,
+                                      1,
+                                      128,
+                                      1,
+                                      1,
+                                      128,
+                                      pto::PadValue::Zero>(
+          norm_weight_handle, kUbNormWeightHalf, 0, 1, 128);
     }
     VectorBarrier();
     TCVT(norm_fp32, norm_half, RoundMode::CAST_NONE);
@@ -1573,11 +2026,25 @@ AICORE PTO_INLINE void Run(
 #endif
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID5);
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID5);
-    mega_gdn_decode_pto::CopyUbToGm<
-        bfloat16_t, bfloat16_t, 1, 1, 1, 1, 128, 1, 1, 1,
-        kMaxBatchSize * kMaxNumVHeads * kHeadDim, 1, 1, 128>(
-            out_handle + batch_idx * v_width + head_idx * kHeadDim,
-            kUbFinalHalf, 0, 1, 128);
+    mega_gdn_decode_pto::CopyUbToGm<bfloat16_t,
+                                    bfloat16_t,
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    128,
+                                    1,
+                                    1,
+                                    1,
+                                    kMaxBatchSize * kMaxNumVHeads * kHeadDim,
+                                    1,
+                                    1,
+                                    128>(
+        out_handle + batch_idx * v_width + head_idx * kHeadDim,
+        kUbFinalHalf,
+        0,
+        1,
+        128);
     pipe_barrier(PIPE_ALL);
 #if !defined(PTO_NPU_ARCH_A5)
     if constexpr (!IsBatchOne) {
@@ -1594,3 +2061,5 @@ AICORE PTO_INLINE void Run(
 }  // namespace mega_gdn_decode_pto
 
 #endif
+
+#endif  // XLLM_OPS_MEGA_GDN_DECODE_PTO_KERNEL_H_
