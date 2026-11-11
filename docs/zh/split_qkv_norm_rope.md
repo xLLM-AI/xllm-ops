@@ -41,13 +41,43 @@ SPDX-License-Identifier: Apache-2.0 -->
 ## 符号与形状
 
 ```text
-B, S      = batch / sequence
-D         = head_dim，固定 128
-Nq, Nk, Nv= q / k / v 头数，v1 约束 Nv == Nk，Nq % Nk == 0，Nq+Nk <= 64
-stride    = qkv 行跨度（元素），>= (Nq+Nk+Nv)*D，尾部 tail 列被忽略
-kv_interleaved = 行内 KV 布局：false 为 [Q | K... | V... | tail]，true 为 [Q | K0 V0 K1 V1 ... | tail]
-ropeStride= cos/sin 行跨度（元素），取值 [64, 128]；只用前 64 维
+B, S      = batch / sequence，均要求 > 0
+D         = head_dim，固定 128；RoPE 按 64-lane 半区处理，half = D/2 = 64
+Nq, Nk, Nv= q / k / v 头数；Nv 没有独立属性，恒等于 Nk
+            Nq > 0、Nk > 0、Nq % Nk == 0（GQA 组必须整除）
+            Nq + Nk <= 64（sumsq workspace 上限 kMaxHeads）
+            headTotal = Nq + Nk + Nv = Nq + 2*Nk
+stride    = qkv 行跨度（元素），>= headTotal * D；尾部 tail 列（如 gate）只搬入不参与计算
+kv_interleaved = 行内 KV 布局开关：
+            false -> [Q | K0..K(Nk-1) | V0..V(Nk-1) | tail]（块状）
+            true  -> [Q | K0 V0 | K1 V1 | ... | tail]（逐 kv head 交错）
+            两种布局都要求 Q 区在前，gate 等附加列放在最后
+ropeStride= cos/sin 行跨度（元素），取值 [64, 128]；只读前 D/2 = 64 维
+            仅支持 NeoX 半分化 RoPE（前 64 维与后 64 维配对）
+dtype     = bf16 / fp16；五个输入与三个输出必须同 dtype
+rank      = qkv / cos / sin 均为 3 维
+UB        = 单次占用 <= 253952 B；tokenTile 由 host 按预算从 8/4/2/1 选择
+workspace = 0，调用方不需要申请
 ```
+
+各项约束与校验情况：
+
+| 项 | 约束 | 违反时 |
+|---|---|---|
+| `D` | 固定 128 | 不支持其他头宽；host 未校验，会按 128 读 |
+| `Nv` | `Nv ≡ Nk` | 无 `num_v_heads` 属性，按 `Nk` 处理 |
+| `Nq` / `Nk` | 均 `> 0`，且 `Nq % Nk == 0` | `ACLNN_ERR_PARAM_INVALID` |
+| `Nq + Nk` | `<= 64` | `ACLNN_ERR_PARAM_INVALID` |
+| `stride` | `>= (Nq + 2*Nk) * 128` | `ACLNN_ERR_PARAM_INVALID` |
+| `ropeStride` | `∈ [64, 128]` | `ACLNN_ERR_PARAM_INVALID` |
+| `rank` | 3 维 | `GRAPH_FAILED` |
+| `dtype` | bf16 / fp16，且输入输出一致 | 参数错误 |
+| `UB` | `<= 253952 B` | `GRAPH_FAILED` |
+| `q_gamma` / `k_gamma` | 形状 `[128]` | **未校验**，越界读或脏值 |
+| `sin` | 形状与 `cos` 一致 | **未校验**，越界读 |
+| `cos` / `sin` 的 `B,S` | 与 `qkv` 一致 | **未校验**，按 `b*S+s` 索引会错位 |
+| `B` / `S` | `> 0` | **未校验**，`S = 0` 时 BNSD 路径除零 |
+| `epsilon` | 任意 float | **未校验**，无范围限制 |
 
 | 张量 | 形状 | dtype |
 | --- | --- | --- |
@@ -83,7 +113,7 @@ aclnnStatus aclnnSplitQkvNormRope(
     aclrtStream stream);
 ```
 
-工程约定（踩过的坑，接入时注意）：
+工程约定（接入时注意）：
 
 - **tilingKey 必须是 0**：kernel 只有一个入口（无 `TILING_KEY_IS` 分支），
   框架生成的 `kernelList` 入口名是 `<op>_0`，`SetTilingKey` 与之不符会报
@@ -94,22 +124,34 @@ aclnnStatus aclnnSplitQkvNormRope(
   `build/binary/<soc>/src/<op>/op_kernel/` 并打 `.done` 标记，该拷贝只做一次；
   只删那一层会导致 kernel 二进制不再产出。
 
-| 属性 | 类型 | 默认 | 说明 |
-| --- | --- | --- | --- |
-| `num_q_heads` | Int | 必填 | `Nq` |
-| `num_kv_heads` | Int | 必填 | `Nk`（`Nv = Nk`） |
-| `epsilon` | Float | 1e-6 | RMSNorm eps |
-| `gqa_expand` | Bool | false | k/v 是否扩张到 `Nq` 头 |
-| `layout_bnsd` | Bool | false | 输出布局 `[B,H,S,D]` / `[B,S,H*D]` |
-| `kv_interleaved` | Bool | false | 输入行内 KV 是否按 head 交错 `[K_i,V_i]`（JoyOV2 `to_qkv` 的打包方式） |
+| 属性 | 类型 | 默认 | 取值约束 | 说明 |
+| --- | --- | --- | --- | --- |
+| `num_q_heads` | Int | 必填 | `> 0`；`Nq % num_kv_heads == 0`；`Nq + num_kv_heads <= 64` | `Nq` |
+| `num_kv_heads` | Int | 必填 | `> 0`；`Nv` 恒等于它 | `Nk`（`Nv = Nk`） |
+| `epsilon` | Float | 1e-6 | 无范围校验 | RMSNorm eps |
+| `gqa_expand` | Bool | false | 仅在 `Nq % Nk == 0` 时有意义；`true` 时 k/v 输出 `Nq` 头 | k/v 是否扩张到 `Nq` 头 |
+| `layout_bnsd` | Bool | false | 只影响输出布局 | 输出 `[B,H,S,D]` / `[B,S,H*D]` |
+| `kv_interleaved` | Bool | false | 要求 `Nv == Nk`（当前恒成立）；数据必须与所选布局一致 | 输入行内 KV 是否按 head 交错 `[K_i,V_i]`（JoyOV2 `to_qkv` 的打包方式） |
 
-约束（host 侧校验，失败返回 `ACLNN_ERR_PARAM_INVALID`）：
+> 头数上限 `Nq + Nk <= 64` 来自 `sumsq` workspace 的容量（`kMaxHeads`）；
+> 更大的头数即使放开该常量，也会被 UB 预算拒绝。`tokenTile` 不在属性里暴露，
+> 由 host 按 UB 自动选择，见 “Tiling” 一节。
 
-- `D == 128`，`stride >= (Nq+2*Nk)*D`，`ropeStride ∈ [64,128]`；
-- `Nq > 0`、`Nk > 0`、`Nq % Nk == 0`、`Nq+Nk <= 64`；
-- 输入输出 dtype 一致，`q_gamma`/`k_gamma` 长度为 `D`；
+约束（host 侧校验，失败返回 `ACLNN_ERR_PARAM_INVALID`；完整清单见 “符号与形状”）：
+
+- `stride >= (Nq+2*Nk)*D`、`ropeStride ∈ [64,128]`、`Nq % Nk == 0`、`Nq+Nk <= 64`；
+- 输入输出 dtype 一致且为 bf16/fp16，`qkv`/`cos` 必须 3 维；
 - UB 需求 `<= 253952 B`；`tokenTile` 由 host 按 UB 预算从 `8/4/2/1` 自动选择
   （主场景 6/2 取 8，共 88,576 B）。
+
+当前已知限制（尚未泛化）：
+
+- `Nv` 不能独立于 `Nk`（无 `num_v_heads` 属性），MLA 类非对称 KV 暂不支持；
+- RoPE 固定作用于整个 `head_dim`，且只有 NeoX 半分化一种形式（无部分 rope / 交错 rope）；
+- `head_dim` 固定 128，其他头宽需要重写 VF 的 64-lane 分区；
+- dtype 只支持 2 字节（bf16/fp16），fp32 未支持；
+- 头数上限 `Nq+Nk <= 64`，更大头数受 `sumsq` workspace 与 UB 双重约束；
+- `kv_interleaved` 仅在 `Nv == Nk` 时有定义，两者互斥规则待 `Nv` 泛化时显式校验。
 
 ## 算法
 
@@ -191,8 +233,9 @@ tilingKey 只区分 dtype（`0 = bf16`、`1 = fp16`）。
 - **三级流水**：`inQkv_/inCos_/inSin_/outTile_` 全部深度 2，
   循环体为「预取 tile k+1 → 计算 tile k → 写出 tile k-1」，
   使 `gqa_expand`（3 倍 k/v 写出）的 mte3 与计算重叠。
-- **单一路径**：任意 `Nq+Nk <= 16` 走同一份 VF，无兜底分支；无 fp32 中间缓冲，
-  UB 只占 `inQkv ×2 + cos/sin ×2 + gamma ×2 + outTile ×2 + sumsq`（主场景 44544 B）。
+- **单一路径**：任意 `Nq+Nk <= 64` 走同一份 VF，无兜底分支；无 fp32 中间缓冲，
+  UB 只占 `inQkv ×2 + cos/sin ×2 + gamma ×2 + outTile ×2 + sumsq`
+  （主场景 tile=8 共 88,576 B，`tokenTile` 按预算自动下调）。
 - **布局与 GQA 均为运行期参数**：同一份二进制支持 BSND/BNSD、`gqa_expand` 0/1。
 
 ## 精度
