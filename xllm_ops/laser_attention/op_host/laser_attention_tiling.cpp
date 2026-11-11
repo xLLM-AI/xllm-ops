@@ -236,6 +236,11 @@ static ge::graphStatus LaserAttentionTilingFunc(gert::TilingContext* context)
     } else {
         context->SetBlockDim(aicNum);
     }
+    const auto inputData = context->GetInputTensor(0);
+    if (inputData == nullptr) {
+      return ge::GRAPH_FAILED;
+    }
+    auto dtype = inputData->GetDataType();
     auto workspaces = context->GetWorkspaceSizes(1);
     if (workspaces == nullptr) {
         return ge::GRAPH_FAILED;
@@ -250,19 +255,19 @@ static ge::graphStatus LaserAttentionTilingFunc(gert::TilingContext* context)
 
     auto groupNum = coreGrouNum * coreNumPerGroup;
     auto rowSumSize = batchSize * headNum * seqSize * sizeof(float);
-    workspaces[0] = groupNum * 128 * 128 * 32 * 2 * 4 +    // 128、32、2、4 is offset
-                    groupNum * 256 * 128 * 8 * 2 * 4 * 2 +    // 256、128、8、2、4 is offset
+    const size_t blocksPerCore = dtype == ge::DT_BF16 ? 8 : 64;
+    const size_t scoreBytes = dtype == ge::DT_BF16
+                                  ? sizeof(float) + sizeof(uint16_t)
+                                  : sizeof(uint16_t);
+    const size_t scoreWorkspace =
+        groupNum * blocksPerCore * 128 * 128 * 2 * scoreBytes;
+    workspaces[0] = scoreWorkspace + groupNum * 256 * 128 * 8 * 2 * 4 * 2 +
                     rowSumSize + workspaceSize;
 
     tiling.tilingData.SaveToBuffer(context->GetRawTilingData()->GetData(),
         context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.tilingData.GetDataSize());
 
-    const auto inputData = context->GetInputTensor(0);
-    if (inputData == nullptr) {
-        return ge::GRAPH_FAILED;
-    }
-    auto dtype = inputData->GetDataType();
     if (dtype == ge::DT_BF16) {
         context->SetTilingKey(1);
     } else {

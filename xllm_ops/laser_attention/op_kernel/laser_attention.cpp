@@ -60,16 +60,108 @@ extern "C" __global__ __aicore__ void laser_attention(
     __gm__ uint8_t * __restrict__ score_gm =
         (__gm__ uint8_t *__restrict__)(gm_rowsum_diag + 256 * 128 * 2 * MAX_SWITCH_TIME* aicNum);
 
+    // Keep scores and probabilities separate: QK is FP32; PV keeps the input
+    // dtype.
+    const int64_t scoreElements =
+        int64_t(aicNum) * (TILING_KEY_IS(1) ? 8 : 64) * 128 * 128 * 2;
+    __gm__ uint8_t* probability_gm =
+        TILING_KEY_IS(1) ? score_gm + scoreElements * sizeof(float) : score_gm;
+
 #ifdef __DAV_C220_CUBE__
-    CUBE_FORWARD_ONLINE::CubeForward<half, false, half> op;
-    op.Init(q_gm, k_gm, v_gm, score_gm, gm_attention_out, gm_rowsum_diag, gm_rowmax_diag, softmax_log_max_sum,
-        y, f, b, n, s1, s2, d, g, qkTriangle, sparseMode, windowLen);
-    op.Run();
+    if (TILING_KEY_IS(1)) {
+      CUBE_FORWARD_ONLINE::CubeForward<bfloat16_t, true, float> op;
+      op.Init(q_gm,
+              k_gm,
+              v_gm,
+              score_gm,
+              probability_gm,
+              gm_attention_out,
+              gm_rowsum_diag,
+              gm_rowmax_diag,
+              softmax_log_max_sum,
+              y,
+              f,
+              b,
+              n,
+              s1,
+              s2,
+              d,
+              g,
+              qkTriangle,
+              sparseMode,
+              windowLen);
+      op.Run();
+    } else if (TILING_KEY_IS(0)) {
+      CUBE_FORWARD_ONLINE::CubeForward<half, false, half> op;
+      op.Init(q_gm,
+              k_gm,
+              v_gm,
+              score_gm,
+              probability_gm,
+              gm_attention_out,
+              gm_rowsum_diag,
+              gm_rowmax_diag,
+              softmax_log_max_sum,
+              y,
+              f,
+              b,
+              n,
+              s1,
+              s2,
+              d,
+              g,
+              qkTriangle,
+              sparseMode,
+              windowLen);
+      op.Run();
+    }
 #elif __DAV_C220_VEC__
-    VectorForward<half, false, half> op;
-    op.Init(q_gm, k_gm, v_gm, atten_mask_gm, score_gm, gm_attention_out, softmax_log_max_sum, gm_rowsum_diag,
-        gm_rowmax_diag, s1, s2, n, b, y, qkTriangle, windowLen / BASE_BLOCK_SIDE_LEN, maskSeqLength, scale, windowLen);
-    op.SetHighPrecision(true);
-    op.Run();
+    if (TILING_KEY_IS(1)) {
+      VectorForward<bfloat16_t, true, float> op;
+      op.Init(q_gm,
+              k_gm,
+              v_gm,
+              atten_mask_gm,
+              score_gm,
+              probability_gm,
+              gm_attention_out,
+              softmax_log_max_sum,
+              gm_rowsum_diag,
+              gm_rowmax_diag,
+              s1,
+              s2,
+              n,
+              b,
+              y,
+              qkTriangle,
+              windowLen / BASE_BLOCK_SIDE_LEN,
+              maskSeqLength,
+              scale,
+              windowLen);
+      op.Run();
+    } else if (TILING_KEY_IS(0)) {
+      VectorForward<half, false, half> op;
+      op.Init(q_gm,
+              k_gm,
+              v_gm,
+              atten_mask_gm,
+              score_gm,
+              probability_gm,
+              gm_attention_out,
+              softmax_log_max_sum,
+              gm_rowsum_diag,
+              gm_rowmax_diag,
+              s1,
+              s2,
+              n,
+              b,
+              y,
+              qkTriangle,
+              windowLen / BASE_BLOCK_SIDE_LEN,
+              maskSeqLength,
+              scale,
+              windowLen);
+      op.Run();
+    }
 #endif
 }
