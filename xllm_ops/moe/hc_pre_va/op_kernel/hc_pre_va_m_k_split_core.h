@@ -371,6 +371,52 @@ class HcPreVaMembaseKSplitCorePart2 {
     GetLocalTensors();
   }
 
+  // Match the four-stream Sinkhorn reduction order used by HcPre's
+  // compact layout. WholeReduceSum uses a different addition tree.
+  __aicore__ inline void ReduceSinkhornRows(const LocalTensor<float>& output,
+                                            const LocalTensor<float>& input,
+                                            int64_t rowCount) {
+    if (tilingData->hcMult != 4) {
+      LastDimReduceSumPerf(output, input, rowCount, tilingData->hcMult);
+      return;
+    }
+    uint64_t selected = 0;
+    GatherMask(output,
+               input,
+               maskPatternLocal,
+               true,
+               rowCount * tilingData->hcMultAlign,
+               {1, 1, 8, 0},
+               selected);
+    PipeBarrier<PIPE_V>();
+    for (int64_t column = 1; column < 4; ++column) {
+      GatherMask(hcBrcbLocal1,
+                 input,
+                 maskPatternLocal[column * MASK_PATTERN_REPEAT_SIZE],
+                 true,
+                 rowCount * tilingData->hcMultAlign,
+                 {1, 1, 8, 0},
+                 selected);
+      PipeBarrier<PIPE_V>();
+      Add(output, output, hcBrcbLocal1, rowCount);
+      PipeBarrier<PIPE_V>();
+    }
+  }
+
+  __aicore__ inline void SoftmaxSinkhornRows(const LocalTensor<float>& data,
+                                             int64_t rowCount) {
+    LastDimReduceMaxPerf(reduceLocal, data, rowCount, tilingData->hcMult);
+    SubABLastDimBrcInline<float, true>(
+        data, data, reduceLocal, hcBrcbLocal1, rowCount, tilingData->hcMult);
+    Exp(data, data, rowCount * tilingData->hcMultAlign);
+    PipeBarrier<PIPE_V>();
+    ReduceSinkhornRows(reduceLocal, data, rowCount);
+    DivABLastDimBrcInline<float, true>(
+        data, data, reduceLocal, hcBrcbLocal1, rowCount, tilingData->hcMult);
+    Adds(data, data, tilingData->hcEps, rowCount * tilingData->hcMultAlign);
+    PipeBarrier<PIPE_V>();
+  }
+
   __aicore__ inline void Process() {
     if ASCEND_IS_AIV {
       int64_t stage1UsedCoreNum =
@@ -419,6 +465,7 @@ class HcPreVaMembaseKSplitCorePart2 {
         int64_t curRowFactor = (rowOuterIdx == rowOuterLoop - 1)
                                    ? tailRowFactor
                                    : tilingData->stage2RowFactor;
+        SetGatherMaskPattern(maskPatternLocal);
         squareSumOutLocal = squareSumQue.AllocTensor<float>();
         // todo
         CopyIn(workspaceGm[workspaceSize1 + workspaceSize2 +
@@ -639,13 +686,25 @@ class HcPreVaMembaseKSplitCorePart2 {
             hcBase2Local,
             curRowFactor,
             tilingData->hcMult * tilingData->hcMultAlign);
-        SoftmaxFP32Perf(mixes02ReduceLocal,
-                        mixes02ReduceLocal,
-                        reduceLocal,
-                        hcBrcbLocal1,
-                        curRowFactor * tilingData->hcMult,
-                        tilingData->hcMult,
-                        tilingData->hcEps);
+        const int64_t sinkhornRows = curRowFactor * tilingData->hcMult;
+        if (tilingData->hcMult == 4) {
+          const event_t vectorEvent =
+              static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+          SetFlag<HardEvent::V_S>(vectorEvent);
+          WaitFlag<HardEvent::V_S>(vectorEvent);
+          for (int64_t column = 0; column < 4; ++column) {
+            for (int64_t word = 0; word < MASK_PATTERN_REPEAT_SIZE; ++word) {
+              maskPatternLocal.SetValue(
+                  column * MASK_PATTERN_REPEAT_SIZE + word,
+                  0x01010101u << column);
+            }
+          }
+          const event_t indexEvent =
+              static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+          SetFlag<HardEvent::S_V>(indexEvent);
+          WaitFlag<HardEvent::S_V>(indexEvent);
+        }
+        SoftmaxSinkhornRows(mixes02ReduceLocal, sinkhornRows);
         ReduceSumARAPerf(reduceLocal,
                          mixes02ReduceLocal,
                          curRowFactor,
@@ -664,10 +723,7 @@ class HcPreVaMembaseKSplitCorePart2 {
                         tilingData->hcMult,
                         tilingData->hcMult);
         for (int64_t iter = 0; iter < tilingData->iterTimes - 1; iter++) {
-          LastDimReduceSumPerf(reduceLocal,
-                               combFragLocal,
-                               curRowFactor * tilingData->hcMult,
-                               tilingData->hcMult);
+          ReduceSinkhornRows(reduceLocal, combFragLocal, sinkhornRows);
           Adds(reduceLocal,
                reduceLocal,
                tilingData->hcEps,

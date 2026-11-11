@@ -607,3 +607,43 @@ def test_hc_pre_va_pre_output_buffer_reuse(shape: tuple[int, ...]) -> None:
             for value, reference in zip(actual, baseline):
                 assert torch.equal(value, reference)
         baseline = actual
+
+
+@pytest.mark.parametrize(
+    "tokens,hidden_size", [(1, 128), (3, 128), (129, 128), (3, 4096)]
+)
+@torch.inference_mode()
+def test_hc_pre_va_sinkhorn_preserves_sequential_row_sums(
+    tokens: int, hidden_size: int
+) -> None:
+    """Check the FP32 addition order before BF16 residual recombination."""
+    torch.manual_seed(27)
+    hidden = torch.randn(tokens, HC_MULT, hidden_size).bfloat16().npu()
+    fn = torch.zeros(MIX_HC, HC_MULT * hidden_size, device=hidden.device)
+    scale = torch.zeros(3, device=hidden.device)
+    # No projection/RMS rounding enters the matrix under test.
+    base = (torch.randn(MIX_HC) * 2).npu()
+    _, _, actual, _ = custom_ops.hc_pre_va_npu(
+        hidden,
+        fn,
+        scale,
+        base,
+        None,
+        HC_MULT,
+        HC_SINKHORN_ITERS,
+        NORM_EPS,
+        HC_EPS,
+    )
+
+    def _sum_four(value: torch.Tensor, dim: int) -> torch.Tensor:
+        first, second, third, fourth = value.unbind(dim)
+        return (((first + second) + third) + fourth).unsqueeze(dim)
+
+    logits = base[2 * HC_MULT :].view(1, HC_MULT, HC_MULT)
+    expected = (logits - logits.amax(-1, keepdim=True)).exp()
+    expected = expected / _sum_four(expected, -1) + HC_EPS
+    expected = expected / (_sum_four(expected, -2) + HC_EPS)
+    for _ in range(HC_SINKHORN_ITERS - 1):
+        expected = expected / (_sum_four(expected, -1) + HC_EPS)
+        expected = expected / (_sum_four(expected, -2) + HC_EPS)
+    assert torch.equal(actual.cpu(), expected.expand_as(actual).cpu())
