@@ -318,10 +318,11 @@ class HcPreVaMembaseKSplitCorePart2 {
                          RoundUp<T>(tilingData->dFactor) * sizeof(float));
     pipe->InitBuffer(
         rsqrtBuf, RoundUp<float>(tilingData->stage2RowFactor) * sizeof(float));
-    pipe->InitBuffer(
-        maskPatternBuf,
-        RoundUp<uint32_t>(MASK_PATTERN_BASE_SIZE * MASK_PATTERN_REPEAT_SIZE) *
-            sizeof(uint32_t));
+    pipe->InitBuffer(maskPatternBuf,
+                     RoundUp<uint32_t>((tilingData->stage2RowFactor +
+                                        MASK_PATTERN_DIM_SIZE - 1) *
+                                       MASK_PATTERN_REPEAT_SIZE) *
+                         sizeof(uint32_t));
     pipe->InitBuffer(
         preMixBuf,
         tilingData->stage2RowFactor * tilingData->hcMultAlign * sizeof(float));
@@ -342,7 +343,9 @@ class HcPreVaMembaseKSplitCorePart2 {
     rsqrtLocal = rsqrtBuf.Get<float>();
     maskPatternLocal = maskPatternBuf.Get<uint32_t>();
     preMixLocal = preMixBuf.Get<float>();
-    SetGatherMaskPattern(maskPatternLocal);
+    SetGatherMaskPattern(
+        maskPatternLocal,
+        tilingData->stage2RowFactor + MASK_PATTERN_DIM_SIZE - 1);
   }
 
   __aicore__ inline void Init(GM_ADDR x,
@@ -372,34 +375,41 @@ class HcPreVaMembaseKSplitCorePart2 {
   }
 
   // Match the four-stream Sinkhorn reduction order used by HcPre's
-  // compact layout. WholeReduceSum uses a different addition tree.
+  // compact layout above 32 tokens. The small-token path uses
+  // WholeReduceSum and its pairwise addition tree.
   __aicore__ inline void ReduceSinkhornRows(const LocalTensor<float>& output,
                                             const LocalTensor<float>& input,
                                             int64_t rowCount) {
-    if (tilingData->hcMult != 4) {
+    if (tilingData->hcMult != 4 || tilingData->bs <= 32) {
       LastDimReduceSumPerf(output, input, rowCount, tilingData->hcMult);
       return;
     }
-    uint64_t selected = 0;
-    GatherMask(output,
-               input,
-               maskPatternLocal,
-               true,
-               rowCount * tilingData->hcMultAlign,
-               {1, 1, 8, 0},
-               selected);
-    PipeBarrier<PIPE_V>();
-    for (int64_t column = 1; column < 4; ++column) {
-      GatherMask(hcBrcbLocal1,
-                 input,
-                 maskPatternLocal[column * MASK_PATTERN_REPEAT_SIZE],
+    // One eight-word mask covers 256 source elements (32 padded rows).
+    // Longer counter masks would read the next column's different pattern.
+    for (int64_t first = 0; first < rowCount; first += 32) {
+      const int64_t remaining = rowCount - first;
+      const int64_t rows = remaining < 32 ? remaining : 32;
+      uint64_t selected = 0;
+      GatherMask(output[first],
+                 input[first * tilingData->hcMultAlign],
+                 maskPatternLocal,
                  true,
-                 rowCount * tilingData->hcMultAlign,
+                 rows * tilingData->hcMultAlign,
                  {1, 1, 8, 0},
                  selected);
       PipeBarrier<PIPE_V>();
-      Add(output, output, hcBrcbLocal1, rowCount);
-      PipeBarrier<PIPE_V>();
+      for (int64_t column = 1; column < 4; ++column) {
+        GatherMask(hcBrcbLocal1,
+                   input[first * tilingData->hcMultAlign],
+                   maskPatternLocal[column * MASK_PATTERN_REPEAT_SIZE],
+                   true,
+                   rows * tilingData->hcMultAlign,
+                   {1, 1, 8, 0},
+                   selected);
+        PipeBarrier<PIPE_V>();
+        Add(output[first], output[first], hcBrcbLocal1, rows);
+        PipeBarrier<PIPE_V>();
+      }
     }
   }
 
@@ -465,7 +475,9 @@ class HcPreVaMembaseKSplitCorePart2 {
         int64_t curRowFactor = (rowOuterIdx == rowOuterLoop - 1)
                                    ? tailRowFactor
                                    : tilingData->stage2RowFactor;
-        SetGatherMaskPattern(maskPatternLocal);
+        SetGatherMaskPattern(
+            maskPatternLocal,
+            tilingData->stage2RowFactor + MASK_PATTERN_DIM_SIZE - 1);
         squareSumOutLocal = squareSumQue.AllocTensor<float>();
         // todo
         CopyIn(workspaceGm[workspaceSize1 + workspaceSize2 +
@@ -487,11 +499,11 @@ class HcPreVaMembaseKSplitCorePart2 {
                          curRowFactor * SQUARE_SUM_SIZE);
         int64_t curBsIdxForAll = stage2BlockIdx * tilingData->rowOfFormerBlock +
                                  rowOuterIdx * tilingData->stage2RowFactor;
-        GatherMaskByDiagonal(
-            rsqrtLocal,
-            squareReduceLocal,
-            maskPatternLocal[(curBsIdxForAll % SQUARE_SUM_SIZE) * 8],
-            curRowFactor);
+        GatherMaskByDiagonal(rsqrtLocal,
+                             squareReduceLocal,
+                             maskPatternLocal,
+                             curRowFactor,
+                             curBsIdxForAll % SQUARE_SUM_SIZE);
         float coeff = 1.0f / static_cast<float>(tilingData->k);
         Muls(rsqrtLocal, rsqrtLocal, coeff, curRowFactor);
         PipeBarrier<PIPE_V>();

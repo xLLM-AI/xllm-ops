@@ -665,6 +665,17 @@ MoeGMMSwigluSplitWorkSpaceCompute<mmType, sync, CHANNELDTYPE>::Swiglu(
       _inMMLocal[loopIdx * gmmSwiglu->tokenLen +
                  gmmSwiglu->tokenLen / SWIGLU_REDUCE_FACTOR];
   LocalTensor<float> src1Local = _inMMLocal[loopIdx * gmmSwiglu->tokenLen];
+  // Clamp the linear branch symmetrically and the gate above its limit.
+  const float clamp_limit = gmmBaseParams->clamp_limit;
+  if (clamp_limit > 0.0F) {
+    const uint32_t elements = gmmSwiglu->tokenLen / SWIGLU_REDUCE_FACTOR;
+    Mins(src0Local, src0Local, clamp_limit, elements);
+    PipeBarrier<PIPE_V>();
+    Maxs(src0Local, src0Local, -clamp_limit, elements);
+    PipeBarrier<PIPE_V>();
+    Mins(src1Local, src1Local, clamp_limit, elements);
+    PipeBarrier<PIPE_V>();
+  }
   SwiGLU<float, false>(workspaceLocal,
                        src0Local,
                        src1Local,
