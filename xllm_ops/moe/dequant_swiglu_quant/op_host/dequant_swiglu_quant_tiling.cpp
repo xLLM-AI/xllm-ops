@@ -533,6 +533,21 @@ ge::graphStatus DequantSwigluQuantDskTiling::CheckStaticQuantShape(
                   "greater than or equal to 1"),
               return ge::GRAPH_FAILED);
   colLen = quantShape.GetDim(quantShape.GetDimNum() - 1);
+  if (!hasGroupIndex_) {
+    const bool valid_rank =
+        quantShape.GetDimNum() == 1 ||
+        (quantShape.GetDimNum() == DIM_SIZE_2 && quantShape.GetDim(0) == 1);
+    OP_CHECK_IF(!valid_rank || (colLen != 1 && colLen != outDimy_),
+                OP_LOGE_FOR_INVALID_SHAPE(
+                    context_->GetNodeName(),
+                    paramName,
+                    Ops::Base::ToString(quantShape).c_str(),
+                    ("[1], [" + std::to_string(outDimy_) + "], [1, 1] or [1, " +
+                     std::to_string(outDimy_) + "]")
+                        .c_str()),
+                return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+  }
   if (quantShape.GetDimNum() == 1) {
     OP_CHECK_IF(
         colLen != groupNum_,

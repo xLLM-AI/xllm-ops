@@ -407,7 +407,12 @@ def test_hc_pre_va_identical_rows_match_single_token(
 
     # Cover one-row calls, multi-row tiles, full tiles and partial final tiles.
     # Small widths permit multi-row stage-2 tiles; 5120 covers the checkpoint.
-    for tokens in (1, 3, 33, 65, 127, 128, 129, 4097):
+    token_counts = (1, 3, 33, 65, 127, 128, 129, 4097)
+    if hidden_size == 128 and iterations == HC_SINKHORN_ITERS:
+        # Stage 2 permits at most 63 rows/tile. This exceeds even 96 cores
+        # times that limit, forcing repeated gather-mask resets on each core.
+        token_counts += (65537,)
+    for tokens in token_counts:
         actual = custom_ops.hc_pre_va_npu(
             hidden.repeat(tokens, 1, 1),
             fn,
