@@ -12,8 +12,8 @@
 #ifndef __VECTORFORWARD_H__
 #define __VECTORFORWARD_H__
 
-#include "matmul_const.h"
 #include "AddressMappingVectorForwardOnline.h"
+#include "matmul_const.h"
 
 #ifdef __DAV_C220_VEC__
 #define ROUND_UP_8(x) (((x) + 7) / 8 * 8)
@@ -24,27 +24,27 @@ constexpr size_t MASK_HALF_BASE = 64;
 template <typename INPUT_T, bool IF_BF16, typename WORKSPACE_T> class VectorForward {
 public:
     __aicore__ inline VectorForward() {};
-    __aicore__ inline void Init(
-        __gm__ uint8_t * __restrict__ a_cube1,  // Q
-        __gm__ uint8_t * __restrict__ b_cube1,  // K
-        __gm__ uint8_t * __restrict__ b_cube2,  // V
-        __gm__ uint8_t * __restrict__ mask_gm,
-        __gm__ uint8_t * __restrict__ score_gm,
-        __gm__ float * __restrict__ c_cube2,
-        __gm__ float * __restrict__ log_sum_gm,
-        __gm__ float * __restrict__ diag_rowsum_gm,
-        __gm__ float * __restrict__ d_rowmax_gm,
-        int32_t qSeqLength,
-        int32_t kSeqLength,
-        int32_t H,
-        int32_t B,
-        int32_t Y,
-        int32_t qk,
-        int32_t windows_block_num,
-        int32_t maskSeqLength,
-        float scale,
-        int32_t windowLen
-        // INPUT_T scale
+    __aicore__ inline void Init(__gm__ uint8_t* __restrict__ a_cube1,  // Q
+                                __gm__ uint8_t* __restrict__ b_cube1,  // K
+                                __gm__ uint8_t* __restrict__ b_cube2,  // V
+                                __gm__ uint8_t* __restrict__ mask_gm,
+                                __gm__ uint8_t* __restrict__ score_gm,
+                                __gm__ uint8_t* __restrict__ probability_gm,
+                                __gm__ float* __restrict__ c_cube2,
+                                __gm__ float* __restrict__ log_sum_gm,
+                                __gm__ float* __restrict__ diag_rowsum_gm,
+                                __gm__ float* __restrict__ d_rowmax_gm,
+                                int32_t qSeqLength,
+                                int32_t kSeqLength,
+                                int32_t H,
+                                int32_t B,
+                                int32_t Y,
+                                int32_t qk,
+                                int32_t windows_block_num,
+                                int32_t maskSeqLength,
+                                float scale,
+                                int32_t windowLen
+                                // INPUT_T scale
     );
     __aicore__ __inline__ void __set_mask(int32_t len)
     {
@@ -268,6 +268,8 @@ private:
     __gm__ INPUT_T* __restrict__ gm_b_cube2;
     __gm__ INPUT_T* __restrict__ attn_mask_gm;
     __gm__ WORKSPACE_T* __restrict__ attn_score_gm;
+    __gm__ INPUT_T* __restrict__ attn_probability_gm;
+    __aicore__ inline void RunBfloat16();
     __gm__ float* __restrict__ gm_c_cube2;
     __gm__ float* __restrict__ log_sum_max_gm;
 
@@ -296,7 +298,7 @@ private:
     float SCALE;
     // INPUT_T SCALE;
     INPUT_T FP16_SMALL_NUM = 5.9604644775390625e-8;
-    int32_t block_per_core = 64;
+    int32_t block_per_core = IF_BF16 ? 8 : 64;
     int32_t ky = 2;
     int32_t SIZE_FP32 = 4;
     int32_t SIZE_FP16 = 2;
@@ -317,6 +319,7 @@ template <typename INPUT_T, bool IF_BF16, typename WORKSPACE_T> __aicore__ inlin
     __gm__ uint8_t * __restrict__ b_cube2,
     __gm__ uint8_t * __restrict__ mask_gm,
     __gm__ uint8_t * __restrict__ score_gm,
+    __gm__ uint8_t * __restrict__ probability_gm,
     __gm__ float * __restrict__ c_cube2,
     __gm__ float * __restrict__ log_sum_gm,
     __gm__ float * __restrict__ d_rowsum_gm,
@@ -340,6 +343,7 @@ template <typename INPUT_T, bool IF_BF16, typename WORKSPACE_T> __aicore__ inlin
     gm_b_cube2 = (__gm__ INPUT_T *__restrict__)b_cube2;
     attn_mask_gm = (__gm__ INPUT_T *__restrict__)mask_gm;
     attn_score_gm = (__gm__ WORKSPACE_T *__restrict__)score_gm;
+    attn_probability_gm = (__gm__ INPUT_T*)probability_gm;
     gm_c_cube2 = c_cube2;
     log_sum_max_gm = log_sum_gm;
 
@@ -373,20 +377,415 @@ template <typename INPUT_T, bool IF_BF16, typename WORKSPACE_T> __aicore__ inlin
     address.start();
 }
 
-template <typename INPUT_T, bool IF_BF16, typename WORKSPACE_T> __aicore__ inline void VectorForward<INPUT_T,
-    IF_BF16, WORKSPACE_T>
-::Run()
-{
+template <typename INPUT_T, bool IF_BF16, typename WORKSPACE_T>
+__aicore__ inline void
+VectorForward<INPUT_T, IF_BF16, WORKSPACE_T>::RunBfloat16() {
+  set_atomic_none();
+  set_mask_norm();
+  __set_mask(64);
+  // 512-key blocks and FP32 vector updates match the dense BF16 arithmetic.
+  // Keep the running output in UB; only the final normalized result reaches GM.
+  // UB buffers occupy 192 KiB; pending row metadata is double-buffered.
+  constexpr int32_t rows = 32;
+  constexpr int32_t columns = 512;
+  // A finite sentinel can exceed valid BF16 logits and poison online softmax.
+  constexpr int32_t kNegativeInfinity = static_cast<int32_t>(0xff800000u);
+  auto scores = reinterpret_cast<__ubuf__ float*>(512);
+  auto reduced = reinterpret_cast<__ubuf__ float*>(68 * 1024);
+  auto temporary = reinterpret_cast<__ubuf__ float*>(78 * 1024);
+  auto maxima = reinterpret_cast<__ubuf__ float*>(80 * 1024);
+  auto sums = reinterpret_cast<__ubuf__ float*>(81 * 1024);
+  auto factors = reinterpret_cast<__ubuf__ float*>(82 * 1024);
+  auto broadcast = reinterpret_cast<__ubuf__ float*>(83 * 1024);
+  auto previous_max = reinterpret_cast<__ubuf__ float*>(85 * 1024);
+  auto previous_sum = reinterpret_cast<__ubuf__ float*>(86 * 1024);
+  auto probabilities = reinterpret_cast<__ubuf__ bfloat16_t*>(96 * 1024);
+  auto accumulated_output = reinterpret_cast<__ubuf__ float*>(128 * 1024);
+  auto pending_scales = reinterpret_cast<__ubuf__ float*>(88 * 1024);
+  auto pending_sums = reinterpret_cast<__ubuf__ float*>(90 * 1024);
+  set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
+  for (int32_t round = 0; round <= address.get_total_round(); ++round) {
+    Address::FORWARD_SECTION_INFO section;
+    if (round < address.get_total_round()) {
+      wait_flag_dev(AIC2AIVFLAGID);
+      address.get_section_info(round, section);
+      if (!address.is_running(round)) {
+        section.sectionNum = 0;
+      }
+      for (int32_t index = 0; index < section.sectionNum; ++index) {
+        const int32_t blocks = section.sectionBlockNums[index];
+        const int32_t count = blocks * 128;
+        const bool first = section.isHeadSection[index];
+        const bool last = section.isTailSection[index];
+        for (int32_t row = 0; row < section.processLineNum; row += rows) {
+          const int32_t state_offset = (index % 2) * 64 + row;
+          const int64_t offset =
+              section.attentionScoreOffset + section.sectionBlockOffset[index] +
+              get_subblockid() * 64 * (count - 128) + row * count;
+          if (count < columns) {
+            for (int32_t half = 0; half < 2; ++half) {
+              vector_dup(
+                  reinterpret_cast<__ubuf__ int32_t*>(scores + half * 8192),
+                  kNegativeInfinity,
+                  128,
+                  1,
+                  1,
+                  8,
+                  1);
+            }
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+          }
+          set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+          wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+          // BF16 scores use contiguous rows within each 512-key section.
+          copy_gm_to_ubuf(scores,
+                          attn_score_gm + offset,
+                          0,
+                          rows,
+                          count / 8,
+                          0,
+                          (columns - count) / 8);
+          set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+          wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+          for (int32_t half = 0; half < 2; ++half) {
+            vmuls(scores + half * 8192,
+                  scores + half * 8192,
+                  SCALE,
+                  128,
+                  1,
+                  1,
+                  8,
+                  8);
+          }
+          pipe_barrier(PIPE_V);
+          if (last && windowLen != 0) {
+            const int32_t repeats = windowLen / 64;
+            const int32_t remainder = windowLen % 64;
+            const int32_t start = count - repeats * 64;
+            for (int32_t col = start; col < count; col += 64) {
+              vector_dup(reinterpret_cast<__ubuf__ int32_t*>(scores + col),
+                         kNegativeInfinity,
+                         rows,
+                         1,
+                         1,
+                         columns / 8,
+                         1);
+            }
+            if (remainder != 0) {
+              set_vector_mask(0, ((uint64_t)-1) << (64 - remainder));
+              vector_dup(
+                  reinterpret_cast<__ubuf__ int32_t*>(scores + start - 64),
+                  kNegativeInfinity,
+                  rows,
+                  1,
+                  1,
+                  columns / 8,
+                  1);
+              __set_mask(64);
+            }
+            pipe_barrier(PIPE_V);
+          }
+          for (int32_t half = 0; half < 2; ++half) {
+            vcgmax(reduced + half * 1024, scores + half * 8192, 128, 1, 1, 8);
+          }
+          pipe_barrier(PIPE_V);
+          vcgmax(temporary, reduced, rows, 1, 1, 8);
+          pipe_barrier(PIPE_V);
+          vcgmax(maxima, temporary, rows / 8, 1, 1, 8);
+          pipe_barrier(PIPE_V);
+          __set_mask(rows);
+          if (!first) {
+            vmax(maxima,
+                 maxima,
+                 previous_max + state_offset,
+                 1,
+                 1,
+                 1,
+                 1,
+                 8,
+                 8,
+                 8);
+            pipe_barrier(PIPE_V);
+            vsub(factors,
+                 previous_max + state_offset,
+                 maxima,
+                 1,
+                 1,
+                 1,
+                 1,
+                 8,
+                 8,
+                 8);
+            pipe_barrier(PIPE_V);
+            vexp(factors, factors, 1, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+          }
+          vadds(previous_max + state_offset, maxima, 0.0f, 1, 1, 1, 8, 8);
+          pipe_barrier(PIPE_V);
+          set_vector_mask((uint64_t)-1, (uint64_t)-1);
+          vbrcb((__ubuf__ uint32_t*)broadcast,
+                (__ubuf__ uint32_t*)maxima,
+                1,
+                8,
+                rows / 8);
+          pipe_barrier(PIPE_V);
+          __set_mask(64);
+          for (int32_t col = 0; col < columns; col += 64) {
+            vsub(scores + col,
+                 scores + col,
+                 broadcast,
+                 rows,
+                 1,
+                 1,
+                 0,
+                 columns / 8,
+                 columns / 8,
+                 1);
+          }
+          pipe_barrier(PIPE_V);
+          for (int32_t half = 0; half < 2; ++half) {
+            vexp(scores + half * 8192, scores + half * 8192, 128, 1, 1, 8, 8);
+          }
+          pipe_barrier(PIPE_V);
+          const int32_t live_columns = count - (last ? windowLen : 0);
+          if (live_columns == columns) {
+            for (int32_t half = 0; half < 2; ++half) {
+              vcgadd(reduced + half * 1024, scores + half * 8192, 128, 1, 1, 8);
+            }
+            pipe_barrier(PIPE_V);
+            vcgadd(temporary, reduced, rows, 1, 1, 8);
+            pipe_barrier(PIPE_V);
+            vcgadd(sums, temporary, rows / 8, 1, 1, 8);
+            pipe_barrier(PIPE_V);
+          } else {
+            // Preserve the reference's tail reduction order: sum each
+            // 64-key group before adding the groups in sequence.
+            vector_dup(sums, 0.0f, 1, 1, 1, 8, 1);
+            pipe_barrier(PIPE_V);
+            for (int32_t col = 0; col < live_columns; col += 64) {
+              int32_t width = live_columns - col;
+              if (width > 64) {
+                width = 64;
+              }
+              __set_mask(width);
+              vcgadd(reduced, scores + col, rows, 1, 1, columns / 8);
+              pipe_barrier(PIPE_V);
+              const uint64_t block_mask =
+                  ((uint64_t)1 << ((width + 7) / 8)) - 1;
+              const uint64_t repeated_mask = block_mask * 0x0101010101010101;
+              set_vector_mask(0, repeated_mask);
+              vcgadd(temporary, reduced, rows / 8, 1, 1, 8);
+              pipe_barrier(PIPE_V);
+              __set_mask(rows);
+              vadd(sums, sums, temporary, 1, 1, 1, 1, 8, 8, 8);
+              pipe_barrier(PIPE_V);
+            }
+            __set_mask(64);
+          }
+          wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
+          for (int32_t half = 0; half < 2; ++half) {
+            vconv_f322bf16r(probabilities + half * 8192,
+                            scores + half * 8192,
+                            128,
+                            1,
+                            1,
+                            4,
+                            8);
+          }
+          set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+          wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+          copy_ubuf_to_gm(attn_probability_gm + offset,
+                          probabilities,
+                          0,
+                          rows,
+                          count / 16,
+                          (columns - count) / 16,
+                          0);
+          __set_mask(rows);
+          if (!first) {
+            vmul(temporary,
+                 previous_sum + state_offset,
+                 factors,
+                 1,
+                 1,
+                 1,
+                 1,
+                 8,
+                 8,
+                 8);
+            pipe_barrier(PIPE_V);
+            vadd(sums, sums, temporary, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            vadds(pending_scales + (round % 2) * 128 + index * 64 + row,
+                  factors,
+                  0.0f,
+                  1,
+                  1,
+                  1,
+                  8,
+                  8);
+          }
+          vadds(previous_sum + state_offset, sums, 0.0f, 1, 1, 1, 8, 8);
+          pipe_barrier(PIPE_V);
+          if (last) {
+            vadds(pending_sums + (round % 2) * 128 + index * 64 + row,
+                  sums,
+                  0.0f,
+                  1,
+                  1,
+                  1,
+                  8,
+                  8);
+          }
+          set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
+          __set_mask(64);
+        }
+      }
+      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      // PV writes one FP32 partial result per section. Update O with vector
+      // operations instead of multiplying by dense previous_output matrices.
+      ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | (AIV2AICFLAGID << 8));
+    }
+    if (round == 0) {
+      continue;
+    }
+    wait_flag_dev(CUBE_PV_READY_FLAG);
+    address.get_section_info(round - 1, section);
+    if (!address.is_running(round - 1)) {
+      section.sectionNum = 0;
+    }
+    for (int32_t index = 0; index < section.sectionNum; ++index) {
+      const bool first = section.isHeadSection[index];
+      const bool last = section.isTailSection[index];
+      constexpr int32_t output_rows = 64;
+      for (int32_t row = 0; row < section.processLineNum; row += output_rows) {
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        auto out = gm_c_cube2 + (section.rowmaxOffset[index] + row) * 128;
+        auto previous_output =
+            accumulated_output + ((index % 2) * 64 + row) * 128;
+        copy_gm_to_ubuf(scores,
+                        diag_rowmax_gm + section.diagOffset[index] + row * 128,
+                        0,
+                        1,
+                        output_rows * 128 / 8,
+                        0,
+                        0);
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        if (!first) {
+          set_vector_mask((uint64_t)-1, (uint64_t)-1);
+          vbrcb((__ubuf__ uint32_t*)broadcast,
+                (__ubuf__ uint32_t*)(pending_scales + ((round - 1) % 2) * 128 +
+                                     index * 64 + row),
+                1,
+                8,
+                output_rows / 8);
+          pipe_barrier(PIPE_V);
+          __set_mask(64);
+          vmul(previous_output,
+               previous_output,
+               broadcast,
+               output_rows,
+               1,
+               1,
+               0,
+               16,
+               16,
+               1);
+          vmul(previous_output + 64,
+               previous_output + 64,
+               broadcast,
+               output_rows,
+               1,
+               1,
+               0,
+               16,
+               16,
+               1);
+          pipe_barrier(PIPE_V);
+          vadd(previous_output,
+               scores,
+               previous_output,
+               output_rows * 2,
+               1,
+               1,
+               1,
+               8,
+               8,
+               8);
+          pipe_barrier(PIPE_V);
+        }
+        if (first) {
+          vadds(previous_output, scores, 0.0f, output_rows * 2, 1, 1, 8, 8);
+          pipe_barrier(PIPE_V);
+        }
+        if (last) {
+          set_vector_mask((uint64_t)-1, (uint64_t)-1);
+          vbrcb((__ubuf__ uint32_t*)broadcast,
+                (__ubuf__ uint32_t*)(pending_sums + ((round - 1) % 2) * 128 +
+                                     index * 64 + row),
+                1,
+                8,
+                output_rows / 8);
+          pipe_barrier(PIPE_V);
+          __set_mask(64);
+          vdiv(previous_output,
+               previous_output,
+               broadcast,
+               output_rows,
+               1,
+               1,
+               0,
+               16,
+               16,
+               1);
+          vdiv(previous_output + 64,
+               previous_output + 64,
+               broadcast,
+               output_rows,
+               1,
+               1,
+               0,
+               16,
+               16,
+               1);
+          pipe_barrier(PIPE_V);
+          set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+          wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+          copy_ubuf_to_gm(
+              out, previous_output, 0, 1, output_rows * 128 / 8, 0, 0);
+          set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+          wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        }
+      }
+    }
+    ffts_cross_core_sync(PIPE_MTE3,
+                         1 | (2 << 4) | (VECTOR_OUTPUT_READY_FLAG << 8));
+  }
+  wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
+  set_vector_mask((uint64_t)-1, (uint64_t)-1);
+}
+template <typename INPUT_T, bool IF_BF16, typename WORKSPACE_T>
+__aicore__ inline void VectorForward<INPUT_T, IF_BF16, WORKSPACE_T>::Run() {
+  if constexpr (IF_BF16) {
+    RunBfloat16();
+  } else {
     set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-    bool unirow_mode = false;       // ture: 三角阵，一行统一计算 (还未支持末尾tri mask)；false：一行分两个section计算
+    bool unirow_mode = false;  // ture: 三角阵，一行统一计算 (还未支持末尾tri
+                               // mask)；false：一行分两个section计算
 
     UB_FOR_NORMALIZE ub_norm;
-    allocate_ubuf_for_norm(&ub_norm); //  归一化在EXP计算完成之后，这里重新分配UB地址，不会影响rowmax计算
-    UB_FOR_SHORT_LEN_ATTN_SCORE ub_short_seq_attn;                        // attention score （取代UB_FOR_EXP）
-    int32_t tri_matrix_offset[2] = {0};                   // 三角块的offset
+    allocate_ubuf_for_norm(
+        &ub_norm);  //  归一化在EXP计算完成之后，这里重新分配UB地址，不会影响rowmax计算
+    UB_FOR_SHORT_LEN_ATTN_SCORE
+        ub_short_seq_attn;               // attention score （取代UB_FOR_EXP）
+    int32_t tri_matrix_offset[2] = {0};  // 三角块的offset
 
     // 大循环
     for (int times_sync_cube = 0; times_sync_cube < address.get_total_round(); times_sync_cube++) {
@@ -480,8 +879,8 @@ template <typename INPUT_T, bool IF_BF16, typename WORKSPACE_T> __aicore__ inlin
         uint64_t config4 = 1 | (mode4 << 4) | (AIV2AICFLAGID << 8);
         ffts_cross_core_sync(PIPE_MTE3, config4);
     }
+  }
 }
-
 
 template <typename INPUT_T, bool IF_BF16, typename WORKSPACE_T> __aicore__ __inline__ void VectorForward<INPUT_T,
     IF_BF16, WORKSPACE_T>

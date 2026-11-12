@@ -16,6 +16,8 @@ constexpr int AICFLAGID = 0;
 constexpr int AIVFLAGID = 1;
 constexpr int AIC2AIVFLAGID = 2;
 constexpr int AIV2AICFLAGID = 3;
+constexpr int CUBE_PV_READY_FLAG = 4;
+constexpr int VECTOR_OUTPUT_READY_FLAG = 5;
 
 using T_OUTPUT = float;
 constexpr int32_t L0AB_PINGPONG_BUFFER_LEN = 16384;     // 32 KB

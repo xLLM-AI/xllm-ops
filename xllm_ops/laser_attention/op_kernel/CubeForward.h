@@ -38,12 +38,26 @@ template <typename TYPE, bool IF_BF16, typename WORKSPACE_TYPE>
 class CubeForward {
 public:
     __aicore__ inline CubeForward(){};
-    __aicore__ inline void Init(__gm__ uint8_t *__restrict__ gm_Q, __gm__ uint8_t *__restrict__ gm_K,
-        __gm__ uint8_t *__restrict__ gm_V, __gm__ uint8_t *__restrict__ gm_S, __gm__ float *__restrict__ gm_O,
-        __gm__ float *__restrict__ gm_rowsum_diag, __gm__ float *__restrict__ gm_rowmax_diag,
-        __gm__ float *__restrict__ gm_rowsum, int32_t Y, int32_t F, int32_t B,
-        int32_t N, int32_t S1, int32_t S2, int32_t D, int32_t nG, int32_t qk_triangle, int32_t sparseMode,
-        int32_t window_length);
+    __aicore__ inline void Init(__gm__ uint8_t* __restrict__ gm_Q,
+                                __gm__ uint8_t* __restrict__ gm_K,
+                                __gm__ uint8_t* __restrict__ gm_V,
+                                __gm__ uint8_t* __restrict__ gm_S,
+                                __gm__ uint8_t* __restrict__ gm_P,
+                                __gm__ float* __restrict__ gm_O,
+                                __gm__ float* __restrict__ gm_rowsum_diag,
+                                __gm__ float* __restrict__ gm_rowmax_diag,
+                                __gm__ float* __restrict__ gm_rowsum,
+                                int32_t Y,
+                                int32_t F,
+                                int32_t B,
+                                int32_t N,
+                                int32_t S1,
+                                int32_t S2,
+                                int32_t D,
+                                int32_t nG,
+                                int32_t qk_triangle,
+                                int32_t sparseMode,
+                                int32_t window_length);
     __aicore__ inline void Run();
     __aicore__ inline void PresetFlag();
     __aicore__ inline void ClearFlag();
@@ -54,8 +68,13 @@ private:
     __aicore__ __inline__ void cube1_matmul_op(
         const Address::PhyAddrForwardCube1Online<T_LEFT, T_RIGHT, T_OUTPUT> *src, int64_t src_len);
 
-    __aicore__ __inline__ void cube1_base_matmul(__cbuf__ TYPE *l1_a, __cbuf__ TYPE *l1_b, __gm__ TYPE *gm_out,
-        int32_t ky, int32_t out_put_matrix_line_strid, bool upper_right_flag);
+    __aicore__ __inline__ void cube1_base_matmul(
+        __cbuf__ TYPE* l1_a,
+        __cbuf__ TYPE* l1_b,
+        __gm__ WORKSPACE_TYPE* gm_out,
+        int32_t ky,
+        int32_t out_put_matrix_line_strid,
+        bool upper_right_flag);
 
     __aicore__ __inline__ void matmul_fp32(Addr_Matmul_Fp32 addr, int32_t ping_flag, bool copy_out, int32_t ky_idx);
 
@@ -71,7 +90,8 @@ private:
     __gm__ TYPE *__restrict__  gm_Q; // gm_a_cube1;
     __gm__ TYPE *__restrict__  gm_K; // gm_b_cube1;
     __gm__ TYPE *__restrict__  gm_V; // gm_b_cube2;
-    __gm__ TYPE *__restrict__ gm_S ; // gm_c_cube1;
+    __gm__ TYPE* __restrict__ gm_P;
+    __gm__ WORKSPACE_TYPE* __restrict__ gm_S;  // gm_c_cube1;
     __gm__ float *__restrict__ gm_O;
     __gm__ TYPE *__restrict__ gm_ones;
 
@@ -197,15 +217,18 @@ __aicore__ __inline__ void  CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::cube2_ma
         auto curr_rowmax = rowmax_diag + ((roundId % 2)* MAX_SWITCH_TIME+idx)*BASE_BLOCK_SIZE*Ky;
         auto curr_rowsum = rowsum_diag + ((roundId % 2)* MAX_SWITCH_TIME+idx)*BASE_BLOCK_SIZE*Ky;
 
-        if (!src[idx].onStartSection) {
+        if constexpr (!IF_BF16) {
+          if (!src[idx].onStartSection) {
             diag_matmul(result_gm, curr_rowmax, 2, false);
+          }
         }
 
         // 外循环按x方向遍历
         for (int32_t i = 0; i < Kx; i++) {
             bool l1_skip_flag = (upper_right && i == Kx - 1);
             bool last_k = (i >= Kx - 1);
-            int l0_c_init_flag =   (i == 0 &&  src[idx].onStartSection) ? 1 : 0;
+            int l0_c_init_flag =
+                (i == 0 && (IF_BF16 || src[idx].onStartSection)) ? 1 : 0;
             // pingpong设置
             auto l1_a_buf = ping_pong_flag_l1_a_ ? l1_a_pong_ : l1_a_ping_;
             auto l1_b_buf = ping_pong_flag_l1_b_ ? l1_b_pong_ : l1_b_ping_;
@@ -215,31 +238,40 @@ __aicore__ __inline__ void  CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::cube2_ma
             wait_flag(PIPE_MTE1, PIPE_MTE2, ping_pong_flag_l1_a_ + 2);
 
             if (!l1_skip_flag) {
-                copy_gm_to_cbuf_multi_nd2nz_b16(l1_a_buf,
-                    (__gm__ TYPE *)(left_start_addr + i * l1_m * l1_k),
-                    0,                                     // sid
-                    vcore_num_per_head,                    // ndNum
-                    l1_m / vcore_num_per_head,             // nValue   实际拷贝的行数
-                    l1_k,                                  // dValue   实际拷贝的列数
-                    128 / vcore_num_per_head * 128 * 2,    // srcNdMatrixStride, unused
-                    l1_k,                                  // srcDValue 大矩阵的列数
-                    l1_m,                                  // dstNzC0Stride 目标行数
-                    1,                                     // dstNzNStride  目标行之间间隔（1为连续）
-                    128 * BLOCK_SIZE / vcore_num_per_head  // dstNzMatrixStride, unused
-                );
+              copy_gm_to_cbuf_multi_nd2nz_b16(
+                  l1_a_buf,
+                  (__gm__ TYPE*)(left_start_addr +
+                                 i * (IF_BF16 ? l1_k : l1_m * l1_k)),
+                  0,                          // sid
+                  vcore_num_per_head,         // ndNum
+                  l1_m / vcore_num_per_head,  // nValue   实际拷贝的行数
+                  l1_k,                       // dValue   实际拷贝的列数
+                  128 / vcore_num_per_head * 128 *
+                      2,                         // srcNdMatrixStride, unused
+                  (IF_BF16 ? Kx * l1_k : l1_k),  // srcDValue 大矩阵的列数
+                  l1_m,                          // dstNzC0Stride 目标行数
+                  1,  // dstNzNStride  目标行之间间隔（1为连续）
+                  128 * BLOCK_SIZE /
+                      vcore_num_per_head  // dstNzMatrixStride, unused
+              );
             }
 
-            copy_gm_to_cbuf_multi_nd2nz_b16(l1_a_buf + SIZE_128 * SIZE_128,
-                (__gm__ TYPE *)(left_start_addr + i * l1_k * l1_m + line_stride),
-                0,                                     // sid
-                vcore_num_per_head,                    // ndNum
-                l1_m / vcore_num_per_head,             // nValue   实际拷贝的行数
-                l1_k,                                  // dValue   实际拷贝的列数
-                128 / vcore_num_per_head * 128 * 2,    // srcNdMatrixStride, 拷贝两块之间间隔
-                l1_k,                                  // srcDValue 大矩阵的列数
-                l1_m,                                  // dstNzC0Stride 目标行数
-                1,                                     // dstNzNStride  目标行之间间隔（1为连续）
-                128 * BLOCK_SIZE / vcore_num_per_head  // dstNzMatrixStride, unused
+            copy_gm_to_cbuf_multi_nd2nz_b16(
+                l1_a_buf + SIZE_128 * SIZE_128,
+                (__gm__ TYPE*)(left_start_addr +
+                               i * (IF_BF16 ? l1_k : l1_k * l1_m) +
+                               line_stride),
+                0,                          // sid
+                vcore_num_per_head,         // ndNum
+                l1_m / vcore_num_per_head,  // nValue   实际拷贝的行数
+                l1_k,                       // dValue   实际拷贝的列数
+                128 / vcore_num_per_head * 128 *
+                    2,  // srcNdMatrixStride, 拷贝两块之间间隔
+                (IF_BF16 ? Kx * l1_k : l1_k),  // srcDValue 大矩阵的列数
+                l1_m,                          // dstNzC0Stride 目标行数
+                1,  // dstNzNStride  目标行之间间隔（1为连续）
+                128 * BLOCK_SIZE /
+                    vcore_num_per_head  // dstNzMatrixStride, unused
             );
 
             // 右矩阵搬运搬运一块
@@ -319,7 +351,9 @@ __aicore__ __inline__ void  CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::cube2_ma
 
                     if (last_k) {
                         // 无法判断那个核先算完，只能将GM初始为0，全部做atomic add
-                        copy_matrix_cc_to_gm(result_gm + j * SIZE_128 * n_ + n_offset,
+                        copy_matrix_cc_to_gm(
+                            (IF_BF16 ? curr_rowmax : result_gm) +
+                                j * SIZE_128 * n_ + n_offset,
                             l0_c_buf,
                             0,        // sid
                             n0_,      // NSize  结果矩阵的列
@@ -349,10 +383,12 @@ __aicore__ __inline__ void  CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::cube2_ma
             ping_pong_flag_l1_a_ = 1 - ping_pong_flag_l1_a_;
             ping_pong_flag_l1_b_ = 1 - ping_pong_flag_l1_b_;
         }
-        if (src[idx].onEndSection) {
+        if constexpr (!IF_BF16) {
+          if (src[idx].onEndSection) {
             diag_matmul(src[idx].out, curr_rowsum, src[idx].ky, true);
+          }
         }
-        last_idx = src_len-1;
+        last_idx = src_len - 1;
     }
 }
 
@@ -558,7 +594,7 @@ __aicore__ __inline__ void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::cube1_mat
 
                 set_flag(PIPE_MTE1, PIPE_MTE2, ping_pong_flag_l1_b_);
                 ping_pong_flag_l1_b_ = 1 - ping_pong_flag_l1_b_;
-                gm_c += SIZE_128 * SIZE_128;
+                gm_c += IF_BF16 ? SIZE_128 : SIZE_128 * SIZE_128;
                 // gm_b +=
             }
 
@@ -571,7 +607,7 @@ __aicore__ __inline__ void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::cube1_mat
 template <typename TYPE, bool IF_BF16, typename WORKSPACE_TYPE>
 __aicore__ __inline__ void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::cube1_base_matmul(
     __cbuf__ TYPE *l1_a, __cbuf__ TYPE *l1_b,
-    __gm__ TYPE *gm_out, int32_t ky, int32_t out_put_matrix_line_strid, bool upper_right_flag)
+    __gm__ WORKSPACE_TYPE *gm_out, int32_t ky, int32_t out_put_matrix_line_strid, bool upper_right_flag)
 {
     auto l1_n_size_ = 128;
     auto l1_m_size_ = ky * 128;
@@ -579,7 +615,7 @@ __aicore__ __inline__ void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::cube1_bas
     auto n0_ = 128;
     auto m0_ = 128;
 
-    auto n_ = 128;
+    auto n_ = IF_BF16 ? out_put_matrix_line_strid / 128 : 128;
 
     for (int n_offset = 0; n_offset < l1_n_size_; n_offset += SIZE_128) {
         // Load b to L0
@@ -664,7 +700,7 @@ __aicore__ __inline__ void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::cube1_bas
                     n_,       // dstStride_dst_D  结果大矩阵的列
                     m0_,      // srcStride
                     3,        // UnitFlagMode
-                    F322F16,  // QuantPRE  F322F16
+                    IF_BF16 ? NoQuant : F322F16,  // BF16 scores retain FP32.
                     0,        // ReLUPRE
                     false,    // channelSplit
                     true      // NZ2ND_EN
@@ -678,7 +714,6 @@ __aicore__ __inline__ void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::cube1_bas
         ping_pong_flag_l0_b_ = 1 - ping_pong_flag_l0_b_;
     }
 }
-
 
 template <typename TYPE, bool IF_BF16, typename WORKSPACE_TYPE>
 __aicore__ inline void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::Run() {
@@ -709,10 +744,15 @@ __aicore__ inline void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::Run() {
             }
 
             if (address.is_running(roundId)) {
-                Address::PhyAddrForwardCube2Online<WORKSPACE_TYPE, TYPE, float> src[16];
-                int64_t src_len = 0;
-                address.addrMapping_cube2(gm_S, gm_V, gm_O, src, src_len, roundId);
-                cube2_matmul_op(src, src_len, 1, roundId);
+              Address::PhyAddrForwardCube2Online<TYPE, TYPE, float> src[16];
+              int64_t src_len = 0;
+              address.addrMapping_cube2(
+                  gm_P, gm_V, gm_O, src, src_len, roundId);
+              cube2_matmul_op(src, src_len, 1, roundId);
+            }
+            if constexpr (IF_BF16) {
+              ffts_cross_core_sync(PIPE_FIX,
+                                   1 | (2 << 4) | (CUBE_PV_READY_FLAG << 8));
             }
         }
     } else {
@@ -744,12 +784,23 @@ __aicore__ inline void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::Run() {
                 ffts_cross_core_sync(PIPE_FIX, sync_config);
             }
 
+            if constexpr (IF_BF16) {
+              // Reuse a PV slot only after the vector consumed it two rounds
+              // ago.
+              if (roundId > 3) {
+                wait_flag_dev(VECTOR_OUTPUT_READY_FLAG);
+              }
+            }
             if (address.is_running(roundId - 2)) {
-
-                Address::PhyAddrForwardCube2Online<WORKSPACE_TYPE, TYPE, float> src[16];
-                int64_t src_len = 0;
-                address.addrMapping_cube2(gm_S, gm_V, gm_O, src, src_len, roundId - 2);
-                cube2_matmul_op(src, src_len, 1, roundId - 2);
+              Address::PhyAddrForwardCube2Online<TYPE, TYPE, float> src[16];
+              int64_t src_len = 0;
+              address.addrMapping_cube2(
+                  gm_P, gm_V, gm_O, src, src_len, roundId - 2);
+              cube2_matmul_op(src, src_len, 1, roundId - 2);
+            }
+            if constexpr (IF_BF16) {
+              ffts_cross_core_sync(PIPE_FIX,
+                                   1 | (2 << 4) | (CUBE_PV_READY_FLAG << 8));
             }
 
             if (address.is_running(roundId)) {
@@ -771,23 +822,39 @@ __aicore__ inline void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::Run() {
                 }
             }
 
+            if constexpr (IF_BF16) {
+              if (roundId + Z > 3) {
+                wait_flag_dev(VECTOR_OUTPUT_READY_FLAG);
+              }
+            }
             if (address.is_running(roundId + Z - 2)) {
-                Address::PhyAddrForwardCube2Online<WORKSPACE_TYPE, TYPE, float> src[16];
-                int64_t src_len = 0;
-                address.addrMapping_cube2(gm_S, gm_V, gm_O, src, src_len, roundId + Z - 2);
-                cube2_matmul_op(src, src_len, 1, roundId + Z - 2);
+              Address::PhyAddrForwardCube2Online<TYPE, TYPE, float> src[16];
+              int64_t src_len = 0;
+              address.addrMapping_cube2(
+                  gm_P, gm_V, gm_O, src, src_len, roundId + Z - 2);
+              cube2_matmul_op(src, src_len, 1, roundId + Z - 2);
+            }
+            if constexpr (IF_BF16) {
+              ffts_cross_core_sync(PIPE_FIX,
+                                   1 | (2 << 4) | (CUBE_PV_READY_FLAG << 8));
             }
         }
     }
 
+    if constexpr (IF_BF16) {
+      wait_flag_dev(VECTOR_OUTPUT_READY_FLAG);
+      if (Z > 1) {
+        wait_flag_dev(VECTOR_OUTPUT_READY_FLAG);
+      }
+    }
     ClearFlag();
 }
-
 
 template <typename TYPE, bool IF_BF16, typename WORKSPACE_TYPE>
 __aicore__ inline void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::Init(__gm__ uint8_t *__restrict__ gm_Q,
         __gm__ uint8_t *__restrict__ gm_K,
-        __gm__ uint8_t *__restrict__ gm_V, __gm__ uint8_t *__restrict__ gm_S, __gm__ float *__restrict__ gm_O,
+        __gm__ uint8_t *__restrict__ gm_V, __gm__ uint8_t *__restrict__ gm_S,
+        __gm__ uint8_t *__restrict__ gm_P, __gm__ float *__restrict__ gm_O,
         __gm__ float *__restrict__ gm_rowsum_diag, __gm__ float *__restrict__ gm_rowmax_diag,
         __gm__ float *__restrict__ gm_rowsum, int32_t Y, int32_t F, int32_t B,
         int32_t N, int32_t S1, int32_t S2, int32_t D, int32_t nG, int32_t qk_triangle, int32_t sparseMode,
@@ -796,7 +863,8 @@ __aicore__ inline void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::Init(__gm__ u
     this->gm_Q = (__gm__ TYPE *__restrict__)gm_Q;
     this->gm_K = (__gm__ TYPE *__restrict__)gm_K;
     this->gm_V = (__gm__ TYPE *__restrict__)gm_V;
-    this->gm_S = (__gm__ TYPE *__restrict__)gm_S;
+    this->gm_S = (__gm__ WORKSPACE_TYPE *__restrict__)gm_S;
+    this->gm_P = (__gm__ TYPE *__restrict__)gm_P;
     this->gm_O = gm_O;
 
     this->Y = Y;
@@ -864,7 +932,7 @@ __aicore__ inline void CubeForward<TYPE, IF_BF16, WORKSPACE_TYPE>::Init(__gm__ u
     address.init(this->B, this->N, this->S1, this->S2, 128,  this->G, this->qk_triangle,
         this->sparseMode, this->window_length);
     // 设置寻址模块核组信息
-    address.set_tiling(this->Y * this->F, cur_core_index, 64, 2);      // A3
+    address.set_tiling(this->Y * this->F, cur_core_index, IF_BF16 ? 8 : 64, 2);      // A3
 }
 
 template <typename TYPE, bool IF_BF16, typename WORKSPACE_TYPE>
