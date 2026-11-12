@@ -100,3 +100,7 @@ ENV/
 /third_party/json/
 /third_party/makeself/
 /third_party/pkg/
+
+# CANN simulator build artifacts (large tarballs)
+custom/**/cannsim*/*.tar.gz
+*.tar.gz
