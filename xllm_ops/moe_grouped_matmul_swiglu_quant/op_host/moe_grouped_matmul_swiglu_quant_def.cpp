@@ -50,6 +50,7 @@ class MoeGroupedMatmulSwigluQuant : public OpDef {
         .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
     this->Attr("clamp_limit").AttrType(OPTIONAL).Float(0.0F);
+    this->Attr("use_split_arithmetic").AttrType(OPTIONAL).Bool(false);
     OpAICoreConfig aicore_config;
     aicore_config.DynamicCompileStaticFlag(true)
         .DynamicFormatFlag(true)

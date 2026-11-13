@@ -21,6 +21,7 @@ const std::tuple<aclTensor*, aclTensor*> MoeGroupedMatmulSwigluQuant(
     const aclTensor* perTokenScale,
     const aclTensor* groupList,
     double clamp_limit,
+    bool use_split_arithmetic,
     aclOpExecutor* executor);
 }
 

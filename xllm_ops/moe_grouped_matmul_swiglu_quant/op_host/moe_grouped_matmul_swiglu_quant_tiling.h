@@ -32,6 +32,7 @@ TILING_DATA_FIELD_DEF(uint32_t, workSpaceOffset1);
 TILING_DATA_FIELD_DEF(uint32_t, workSpaceOffset2);
 TILING_DATA_FIELD_DEF(uint32_t, quantGroupNum);
 TILING_DATA_FIELD_DEF(float, clamp_limit);
+TILING_DATA_FIELD_DEF(uint32_t, use_split_arithmetic);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(MoeGMMSwigluBaseParamsOp, MoeGMMSwigluBaseParams)
 

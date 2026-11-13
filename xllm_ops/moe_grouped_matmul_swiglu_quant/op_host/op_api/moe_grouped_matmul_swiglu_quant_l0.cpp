@@ -27,6 +27,7 @@ const std::tuple<aclTensor*, aclTensor*> MoeGroupedMatmulSwigluQuant(
     const aclTensor* perTokenScale,
     const aclTensor* groupList,
     double clamp_limit,
+    bool use_split_arithmetic,
     aclOpExecutor* executor) {
   L0_DFX(MoeGroupedMatmulSwigluQuant,
          x,
@@ -62,7 +63,7 @@ const std::tuple<aclTensor*, aclTensor*> MoeGroupedMatmulSwigluQuant(
       MoeGroupedMatmulSwigluQuant,
       OP_INPUT(x, weight, perChannelScale, perTokenScale, groupList),
       OP_OUTPUT(out, scaleOut),
-      OP_ATTR(static_cast<float>(clamp_limit)));
+      OP_ATTR(static_cast<float>(clamp_limit), use_split_arithmetic));
   if (ret != ACLNN_SUCCESS) {
     OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
     return std::tuple(nullptr, nullptr);

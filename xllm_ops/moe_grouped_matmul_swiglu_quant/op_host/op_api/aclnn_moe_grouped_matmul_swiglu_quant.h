@@ -52,6 +52,26 @@ aclnnMoeGroupedMatmulSwigluQuantV2(void* workspace,
                                    aclOpExecutor* executor,
                                    aclrtStream stream);
 
+__attribute__((visibility("default"))) aclnnStatus
+aclnnMoeGroupedMatmulSwigluQuantV3GetWorkspaceSize(
+    const aclTensor* x,
+    const aclTensor* weight,
+    const aclTensor* weight_scale,
+    const aclTensor* x_scale,
+    const aclTensor* group_list,
+    double clamp_limit,
+    bool use_split_arithmetic,
+    aclTensor* output,
+    aclTensor* output_scale,
+    uint64_t* workspace_size,
+    aclOpExecutor** executor);
+
+__attribute__((visibility("default"))) aclnnStatus
+aclnnMoeGroupedMatmulSwigluQuantV3(void* workspace,
+                                   uint64_t workspace_size,
+                                   aclOpExecutor* executor,
+                                   aclrtStream stream);
+
 #ifdef __cplusplus
 }
 #endif

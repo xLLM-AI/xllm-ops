@@ -513,20 +513,24 @@ MoeGMMSwigluCompute<mmType, sync, CHANNELDTYPE>::customDataCopyIn(
   mmOutQueue.EnQue(_inMMLocal_1);
   LocalTensor<float> _inMMLocal_2 = mmOutQueue.DeQue<float>();
 
-  SetFlag<HardEvent::S_V>(EVENT_ID0);
-  for (uint32_t i = 0; i < vecConfig.innerLoopNum; i++) {
-    WaitFlag<HardEvent::S_V>(EVENT_ID0);
-    float scale = perTokenScaleGM.GetValue(vecConfig.curIdx);
+  if (gmmBaseParams->use_split_arithmetic) {
+    vecConfig.curIdx += vecConfig.innerLoopNum;
+  } else {
     SetFlag<HardEvent::S_V>(EVENT_ID0);
+    for (uint32_t i = 0; i < vecConfig.innerLoopNum; i++) {
+      WaitFlag<HardEvent::S_V>(EVENT_ID0);
+      float scale = perTokenScaleGM.GetValue(vecConfig.curIdx);
+      SetFlag<HardEvent::S_V>(EVENT_ID0);
+      WaitFlag<HardEvent::S_V>(EVENT_ID0);
+      Muls(_inMMLocal_2[i * gmmSwiglu->tokenLen],
+           _inMMLocal_2[i * gmmSwiglu->tokenLen],
+           scale,
+           gmmSwiglu->tokenLen);
+      SetFlag<HardEvent::S_V>(EVENT_ID0);
+      vecConfig.curIdx++;
+    }
     WaitFlag<HardEvent::S_V>(EVENT_ID0);
-    Muls(_inMMLocal_2[i * gmmSwiglu->tokenLen],
-         _inMMLocal_2[i * gmmSwiglu->tokenLen],
-         scale,
-         gmmSwiglu->tokenLen);
-    SetFlag<HardEvent::S_V>(EVENT_ID0);
-    vecConfig.curIdx++;
   }
-  WaitFlag<HardEvent::S_V>(EVENT_ID0);
   vecConfig.curOffset = vecConfig.curIdx * gmmSwiglu->tokenLen;
   mmOutQueue.EnQue(_inMMLocal_2);
 }
@@ -610,6 +614,19 @@ __aicore__ inline void MoeGMMSwigluCompute<mmType, sync, CHANNELDTYPE>::Dequant(
       mmLocal[loopIdx * gmmSwiglu->tokenLen],
       perChannelLocal,
       gmmSwiglu->tokenLen);
+  if (gmmBaseParams->use_split_arithmetic) {
+    PipeBarrier<PIPE_V>();
+    const float scale = perTokenScaleGM.GetValue(
+        vecConfig.curIdx - vecConfig.innerLoopNum + loopIdx);
+    const int32_t scale_event =
+        static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+    SetFlag<HardEvent::S_V>(scale_event);
+    WaitFlag<HardEvent::S_V>(scale_event);
+    Muls(mmLocal[loopIdx * gmmSwiglu->tokenLen],
+         mmLocal[loopIdx * gmmSwiglu->tokenLen],
+         scale,
+         gmmSwiglu->tokenLen);
+  }
   vecConfig.nextUpadteInterVal--;
   mmOutQueue.EnQue(mmLocal);
   perChannelScaleInQueue.EnQue(perChannelLocal);
@@ -681,15 +698,29 @@ __aicore__ inline void MoeGMMSwigluCompute<mmType, sync, CHANNELDTYPE>::Quant(
       static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
   SetFlag<HardEvent::V_S>(eventIdVToS);
   WaitFlag<HardEvent::V_S>(eventIdVToS);
-  float quantScale = reduceResLocal.GetValue(0) / QUANT_SCALE_INT8;
+  float quantScale =
+      gmmBaseParams->use_split_arithmetic
+          ? reduceResLocal.GetValue(0) * (1.0F / QUANT_SCALE_INT8)
+          : reduceResLocal.GetValue(0) / QUANT_SCALE_INT8;
   LocalTensor<float> quantScaleLocal = quantScaleOutQueue.DeQue<float>();
   quantScaleLocal.SetValue(loopIdx, quantScale);
-  quantScale = 1 / quantScale;
   int32_t eventIdSToV =
       static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
   SetFlag<HardEvent::S_V>(eventIdSToV);
   WaitFlag<HardEvent::S_V>(eventIdSToV);
-  Muls(_inMMLocal[preOffset], _inMMLocal[preOffset], quantScale, halfTokenLen);
+  if (gmmBaseParams->use_split_arithmetic) {
+    Duplicate(workLocal, quantScale, halfTokenLen);
+    PipeBarrier<PIPE_V>();
+    Div(_inMMLocal[preOffset], _inMMLocal[preOffset], workLocal, halfTokenLen);
+  } else {
+    quantScale = 1 / quantScale;
+    const int32_t reciprocal_event =
+        static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+    SetFlag<HardEvent::S_V>(reciprocal_event);
+    WaitFlag<HardEvent::S_V>(reciprocal_event);
+    Muls(
+        _inMMLocal[preOffset], _inMMLocal[preOffset], quantScale, halfTokenLen);
+  }
   PipeBarrier<PIPE_V>();
   LocalTensor<int8_t> quantLocal = quantOutQueue.DeQue<int8_t>();
   int32_t dstTempOffset = static_cast<int32_t>(preOffset / BISECT);
@@ -702,7 +733,8 @@ __aicore__ inline void MoeGMMSwigluCompute<mmType, sync, CHANNELDTYPE>::Quant(
                          castSpace,
                          dstTempOffset,
                          srcTempOffset,
-                         tempCount);
+                         tempCount,
+                         gmmBaseParams->use_split_arithmetic);
   mmOutQueue.EnQue(_inMMLocal);
   quantOutQueue.EnQue(quantLocal);
 }

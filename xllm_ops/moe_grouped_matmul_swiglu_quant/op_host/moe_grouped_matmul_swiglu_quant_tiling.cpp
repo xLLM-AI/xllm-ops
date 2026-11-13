@@ -139,6 +139,9 @@ graphStatus TilingMoeGMMSwigluQuant(gert::TilingContext* context) {
   const float* clamp_limit = context->GetAttrs()->GetFloat(0);
   tilingData.gmmSwigluBaseParams.set_clamp_limit(
       clamp_limit == nullptr ? 0.0F : *clamp_limit);
+  const bool* use_split_arithmetic = context->GetAttrs()->GetBool(1);
+  tilingData.gmmSwigluBaseParams.set_use_split_arithmetic(
+      use_split_arithmetic != nullptr && *use_split_arithmetic);
   int64_t row = 0;
   row = CalMaxRowInUb(context, compileInfoPtr->ubSize_, n);
 

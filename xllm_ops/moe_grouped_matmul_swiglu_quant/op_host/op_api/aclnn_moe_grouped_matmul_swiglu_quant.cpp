@@ -294,6 +294,7 @@ static aclnnStatus aclnnMoeGroupedMatmulSwigluQuantGetWorkspaceSizeCommon(
     const aclTensor* xScale,
     const aclTensor* groupList,
     double clamp_limit,
+    bool use_split_arithmetic,
     aclTensor* output,
     aclTensor* outputScale,
     uint64_t* workspaceSize,
@@ -334,6 +335,7 @@ static aclnnStatus aclnnMoeGroupedMatmulSwigluQuantGetWorkspaceSizeCommon(
                                                  xScale,
                                                  groupList,
                                                  clamp_limit,
+                                                 use_split_arithmetic,
                                                  uniqueExecutor.get());
   CHECK_RET(ret_0 != std::tuple(nullptr, nullptr), ACLNN_ERR_INNER_NULLPTR);
   auto out0 = std::get<OUTPUT_IDX_0>(ret_0);
@@ -368,6 +370,7 @@ aclnnStatus aclnnMoeGroupedMatmulSwigluQuantGetWorkspaceSize(
                                                                 xScale,
                                                                 groupList,
                                                                 0.0,
+                                                                false,
                                                                 output,
                                                                 outputScale,
                                                                 workspaceSize,
@@ -396,10 +399,50 @@ aclnnStatus aclnnMoeGroupedMatmulSwigluQuantV2GetWorkspaceSize(
                                                                 x_scale,
                                                                 group_list,
                                                                 clamp_limit,
+                                                                false,
                                                                 output,
                                                                 output_scale,
                                                                 workspace_size,
                                                                 executor);
+}
+
+aclnnStatus aclnnMoeGroupedMatmulSwigluQuantV3GetWorkspaceSize(
+    const aclTensor* x,
+    const aclTensor* weight,
+    const aclTensor* weight_scale,
+    const aclTensor* x_scale,
+    const aclTensor* group_list,
+    double clamp_limit,
+    bool use_split_arithmetic,
+    aclTensor* output,
+    aclTensor* output_scale,
+    uint64_t* workspace_size,
+    aclOpExecutor** executor) {
+  OP_CHECK_COMM_INPUT(workspace_size, executor);
+  CHECK_RET(
+      std::isfinite(clamp_limit) && clamp_limit >= 0.0 &&
+          clamp_limit <= static_cast<double>(std::numeric_limits<float>::max()),
+      ACLNN_ERR_PARAM_INVALID);
+  return aclnnMoeGroupedMatmulSwigluQuantGetWorkspaceSizeCommon(
+      x,
+      weight,
+      weight_scale,
+      x_scale,
+      group_list,
+      clamp_limit,
+      use_split_arithmetic,
+      output,
+      output_scale,
+      workspace_size,
+      executor);
+}
+
+aclnnStatus aclnnMoeGroupedMatmulSwigluQuantV3(void* workspace,
+                                               uint64_t workspace_size,
+                                               aclOpExecutor* executor,
+                                               aclrtStream stream) {
+  return aclnnMoeGroupedMatmulSwigluQuantV2(
+      workspace, workspace_size, executor, stream);
 }
 
 aclnnStatus aclnnMoeGroupedMatmulSwigluQuant(void* workspace,
