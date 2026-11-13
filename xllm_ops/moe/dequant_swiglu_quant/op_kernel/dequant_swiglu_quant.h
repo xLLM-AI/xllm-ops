@@ -871,17 +871,16 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::DynamicQuant(
   for (uint32_t i = 0; i < proDimsx; ++i) {
     ComputeReduceMax(tmpUbF32Gate[i * tl_->UbFactorDimy], tl_->UbFactorDimy);
   }
-  // Calc quant: proDimsx * 64 -> proDimsx
-  // repeatTimes:proDimsx, dstRepStride:1(dtype), srcBlkStride:1,
-  // srcRepStride:tl_->UbFactorDimy / 64 * 8
-  WholeReduceMax(tmpUbF32Gate,
-                 tmpUbF32Gate,
-                 MASK_NUM_T32,
-                 proDimsx,
-                 1,
-                 1,
-                 tl_->UbFactorDimy / MASK_NUM_T32 * MASK_BLK_STRIDE,
-                 ReduceOrder::ORDER_ONLY_VALUE);
+  // Use the actual row stride and keep the reduction within narrow rows.
+  WholeReduceMax(
+      tmpUbF32Gate,
+      tmpUbF32Gate,
+      tl_->UbFactorDimy < MASK_NUM_T32 ? tl_->UbFactorDimy : MASK_NUM_T32,
+      proDimsx,
+      1,
+      1,
+      tl_->UbFactorDimy / BLOCK_ELEM,
+      ReduceOrder::ORDER_ONLY_VALUE);
   PipeBarrier<PIPE_V>();
   // Calc quant: scaleOut / 127.0
   Muls(scaleOut, tmpUbF32Gate, DYNAMIC_QUANT_FACTOR, proDimsx);
