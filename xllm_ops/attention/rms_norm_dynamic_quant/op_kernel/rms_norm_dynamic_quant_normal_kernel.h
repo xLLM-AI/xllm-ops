@@ -142,6 +142,7 @@ private:
         LocalTensor<T> xInputLocal = inRowsQue.template DeQue<T>();
         LocalTensor<float> yLocalFp32 = yBufFp32.Get<float>();
         Cast(xLocalFp32, xInputLocal, RoundMode::CAST_NONE, elementCount);
+        PipeBarrier<PIPE_V>();
 
         Mul(yLocalFp32, xLocalFp32, xLocalFp32, elementCount); // yLocalFp32 <- x ** 2
         PipeBarrier<PIPE_V>();
