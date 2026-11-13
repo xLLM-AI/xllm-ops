@@ -388,9 +388,31 @@ def test_hc_pre_va_identical_rows_match_single_token(
             hidden, fn, scale, base, mix, HC_MULT, iterations, NORM_EPS, HC_EPS
         )
     )
+
+    def _comb_reference(tokens: int) -> torch.Tensor:
+        def _sum_four(value: torch.Tensor, dim: int) -> torch.Tensor:
+            first, second, third, fourth = value.unbind(dim)
+            if dim == -1 and tokens <= 32:
+                return ((first + second) + (third + fourth)).unsqueeze(dim)
+            return (((first + second) + third) + fourth).unsqueeze(dim)
+
+        logits = base[2 * HC_MULT :].view(1, HC_MULT, HC_MULT)
+        expected = (logits - logits.amax(-1, keepdim=True)).exp()
+        expected = expected / _sum_four(expected, -1) + HC_EPS
+        expected = expected / (_sum_four(expected, -2) + HC_EPS)
+        for _ in range(iterations - 1):
+            expected = expected / (_sum_four(expected, -1) + HC_EPS)
+            expected = expected / (_sum_four(expected, -2) + HC_EPS)
+        return expected.cpu()
+
     # Cover one-row calls, multi-row tiles, full tiles and partial final tiles.
     # Small widths permit multi-row stage-2 tiles; 5120 covers the checkpoint.
-    for tokens in (1, 3, 33, 65, 127, 128, 129, 4097):
+    token_counts = (1, 3, 33, 65, 127, 128, 129, 4097)
+    if hidden_size == 128 and iterations == HC_SINKHORN_ITERS:
+        # Stage 2 permits at most 63 rows/tile. This exceeds even 96 cores
+        # times that limit, forcing repeated gather-mask resets on each core.
+        token_counts += (65537,)
+    for tokens in token_counts:
         actual = custom_ops.hc_pre_va_npu(
             hidden.repeat(tokens, 1, 1),
             fn,
@@ -403,6 +425,8 @@ def test_hc_pre_va_identical_rows_match_single_token(
             HC_EPS,
         )
         for name, value, reference in zip(("y", "post", "comb", "pre"), actual, single):
+            if name == "comb":
+                reference = _comb_reference(tokens)
             assert torch.equal(value.cpu(), reference.expand_as(value)), (
                 f"{name} changes with row position or partition: "
                 f"tokens={tokens}, hidden={hidden_size}, iterations={iterations}"
@@ -607,3 +631,45 @@ def test_hc_pre_va_pre_output_buffer_reuse(shape: tuple[int, ...]) -> None:
             for value, reference in zip(actual, baseline):
                 assert torch.equal(value, reference)
         baseline = actual
+
+
+@pytest.mark.parametrize(
+    "tokens,hidden_size", [(1, 128), (3, 128), (32, 128), (33, 128), (129, 128), (3, 4096)]
+)
+@torch.inference_mode()
+def test_hc_pre_va_sinkhorn_preserves_reference_row_sums(
+    tokens: int, hidden_size: int
+) -> None:
+    """Check the FP32 addition order before BF16 residual recombination."""
+    torch.manual_seed(27)
+    hidden = torch.randn(tokens, HC_MULT, hidden_size).bfloat16().npu()
+    fn = torch.zeros(MIX_HC, HC_MULT * hidden_size, device=hidden.device)
+    scale = torch.zeros(3, device=hidden.device)
+    # No projection/RMS rounding enters the matrix under test.
+    base = (torch.randn(MIX_HC) * 2).npu()
+    _, _, actual, _ = custom_ops.hc_pre_va_npu(
+        hidden,
+        fn,
+        scale,
+        base,
+        None,
+        HC_MULT,
+        HC_SINKHORN_ITERS,
+        NORM_EPS,
+        HC_EPS,
+    )
+
+    def _sum_four(value: torch.Tensor, dim: int) -> torch.Tensor:
+        first, second, third, fourth = value.unbind(dim)
+        if dim == -1 and tokens <= 32:
+            return ((first + second) + (third + fourth)).unsqueeze(dim)
+        return (((first + second) + third) + fourth).unsqueeze(dim)
+
+    logits = base[2 * HC_MULT :].view(1, HC_MULT, HC_MULT)
+    expected = (logits - logits.amax(-1, keepdim=True)).exp()
+    expected = expected / _sum_four(expected, -1) + HC_EPS
+    expected = expected / (_sum_four(expected, -2) + HC_EPS)
+    for _ in range(HC_SINKHORN_ITERS - 1):
+        expected = expected / (_sum_four(expected, -1) + HC_EPS)
+        expected = expected / (_sum_four(expected, -2) + HC_EPS)
+    assert torch.equal(actual.cpu(), expected.expand_as(actual).cpu())

@@ -246,7 +246,7 @@ ge::graphStatus HcPreVaTiling::CalcMKSplitCoreMembasePart2Tiling() {
   int64_t rowBrcb0Size = RoundUp(rowOnceLoop, 8) * BLOCK_SIZE;
   int64_t hcBrcb1Size = RoundUp(rowOnceLoop * hcMultAlign_, 8) * BLOCK_SIZE;
   int64_t reduceBufSize = rowOnceLoop * hcMultAlign_ * sizeof(float);
-  int64_t maskPatternSize = BLOCK_SIZE * 16;
+  int64_t maskPatternSize = BLOCK_SIZE * (rowOnceLoop + 15);
   int64_t squareReduceSize = rowOnceLoop * 16 * sizeof(float);
   int64_t preMixSize = rowOnceLoop * hcMultAlign_ * sizeof(float);
 
@@ -329,6 +329,7 @@ ge::graphStatus HcPreVaTiling::CalcMKSplitCoreMembasePart2Tiling() {
       rowBrcb0Size = RoundUp(rowFactor_, 8) * BLOCK_SIZE;
       hcBrcb1Size = RoundUp(rowFactor_ * hcMultAlign_, 8) * BLOCK_SIZE;
       reduceBufSize = rowFactor_ * hcMultAlign_ * sizeof(float);
+      maskPatternSize = BLOCK_SIZE * (rowFactor_ + 15);
       squareReduceSize = rowFactor_ * 16 * sizeof(float);
       preMixSize = rowFactor_ * hcMultAlign_ * sizeof(float);
       totalSize = mix0OriginSize + mix1OriginSize + mix2OriginSize + mix0Size +
