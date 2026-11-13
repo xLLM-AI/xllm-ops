@@ -15,21 +15,36 @@ if (BUILD_OPEN_PROJECT)
     )
 endif()
 
-# CrossAttention kernel uses the AtlasA2 catlass FA building blocks (Arch::AtlasA2,
-# MmadAtlasA2FAIQK/PV ...). Those blocks live behind CATLASS_ARCH == 2201, so the
-# define is required for every target, including ascend950.
-set(CA_CATLASS_ARCH_DEF "-DCATLASS_ARCH=2201")
+# Ascend950 (arch35 / DAV_3510) builds need the 3510 catlass constants
+# (BYTE_PER_BLK_FP=64, MX_*); the AtlasA2 path keeps 2201.
+string(TOLOWER "${ASCEND_COMPUTE_UNIT}" _CA_UNIT_LOWER)
+if(_CA_UNIT_LOWER MATCHES "ascend950")
+    set(CA_CATLASS_ARCH_DEF "-DCATLASS_ARCH=3510")
+    set(CA_ARCH35_COMPILE_OPTIONS "-DENABLE_CV_COMM_VIA_SSBUF=true")
+else()
+    set(CA_CATLASS_ARCH_DEF "-DCATLASS_ARCH=2201")
+    set(CA_ARCH35_COMPILE_OPTIONS "")
+endif()
 
 add_ops_compile_options(
     OP_NAME CrossAttention
     OPTIONS --cce-auto-sync=on
             -Wno-deprecated-declarations
             -Werror
+            -Wno-error
+            -g
             ${CA_CATLASS_ARCH_DEF}
+            ${CA_ARCH35_COMPILE_OPTIONS}
             -I${CANN_3RD_LIB_PATH}/catlass/include
+            -I${CMAKE_CURRENT_LIST_DIR}/../third_party/catlass/include
             -I${CMAKE_CURRENT_LIST_DIR}/../../../
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
     add_modules_sources(OPTYPE cross_attention ACLNNTYPE aclnn)
+    # Native CV scheme: the Ascend950 (arch35) host tiling source lives in
+    # op_host/arch35 and is not covered by the add_modules_sources GLOB.
+    target_sources(${OPHOST_NAME}_tiling_obj PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/arch35/cross_attention_tiling_arch35.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/arch35/cross_attention_tiling.cpp)
 endif()

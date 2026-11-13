@@ -25,6 +25,10 @@ limitations under the License.
 
 namespace optiling {
 
+// Ascend950 (arch35 / DAV_3510) tiling, defined in
+// arch35/cross_attention_tiling_arch35.cpp (native CV scheme)
+ge::graphStatus TilingCrossAttentionAscend950(gert::TilingContext* tiling_context);
+
 enum InputIndex {
     QUERY = 0,
     KEY,
@@ -186,6 +190,13 @@ ge::graphStatus TilingCrossAttentionFunc::RunTiling()
 
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
+  // runtime SoC routing: Ascend950 goes to the arch35 native CV tiling,
+  // everything else keeps the A2 catlass path unchanged
+  auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+  if (ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950) {
+    return TilingCrossAttentionAscend950(context);
+  }
+
   TilingCrossAttentionFunc tilingObject(context);
   auto ret = tilingObject.RunTiling();
 

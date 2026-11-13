@@ -13,17 +13,36 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "kernel_operator.h"
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#include "arch35/cross_attention_fusion_helper.h"
+#else
 #include "cross_attention_catlass_helper.h"
 #include "lib/matmul_intf.h"
+#endif
 
 using namespace AscendC;
 
 extern "C" __global__ __aicore__ void cross_attention(GM_ADDR query, GM_ADDR key, GM_ADDR value,
                         GM_ADDR block_table, GM_ADDR actual_kv_lens, GM_ADDR attn_out, GM_ADDR workspace, GM_ADDR tiling) {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+    if (TILING_KEY_IS(3510)) {
+        KERNEL_TASK_TYPE(3510, KERNEL_TYPE_MIX_AIC_1_2);
+        AscendC::InitSocState();
+        const auto* tilingDataPtr = reinterpret_cast<const __gm__ Xllm::CrossAttentionTilingData*>(tiling);
+        GM_ADDR userWorkspace = AscendC::GetUserWorkspace(workspace);
+        if ASCEND_IS_AIC {
+            CallCrossAttentionArch35Aic<DTYPE_QUERY, DTYPE_BLOCK_TABLE, DTYPE_ACTUAL_KV_LENS>(
+                query, key, value, block_table, actual_kv_lens, userWorkspace, tilingDataPtr);
+        }
+        if ASCEND_IS_AIV {
+            CallCrossAttentionArch35<DTYPE_QUERY, DTYPE_BLOCK_TABLE, DTYPE_ACTUAL_KV_LENS>(
+                query, key, value, block_table, actual_kv_lens, attn_out, userWorkspace, tilingDataPtr);
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+#else
     GET_TILING_DATA(tiling_data, tiling);
-    // AscendC::printf("call cross_attention kernel test\n");
     GM_ADDR s = workspace;
     GM_ADDR p = workspace + tiling_data.mm1OutSize;
     GM_ADDR oTemp = p + tiling_data.pOutSize;
@@ -31,5 +50,5 @@ extern "C" __global__ __aicore__ void cross_attention(GM_ADDR query, GM_ADDR key
                                  s, p, oTemp, attn_out, tiling};
 
     CallCrossAttention<DTYPE_QUERY, DTYPE_BLOCK_TABLE, DTYPE_ACTUAL_KV_LENS>(params, &tiling_data);
-
+#endif
 }
