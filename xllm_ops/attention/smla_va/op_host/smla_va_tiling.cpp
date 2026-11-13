@@ -294,7 +294,8 @@ static std::string SMLADataTypeToSerialString(ge::DataType type) {
   }
 }
 
-// --------------------------SMLAInfoParser member function definitions--------------------
+// --------------------------SMLAInfoParser member function
+// definitions--------------------
 ge::graphStatus SMLAInfoParser::CheckRequiredInOutExistence() const {
   OP_CHECK_IF(opParamInfo_.q.shape == nullptr,
               OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
@@ -754,8 +755,8 @@ std::vector<uint64_t> SMLAInfoParser::GetKvstride(
 }
 
 // Validate contiguity by computing the expected strides from the shape.
-// For PA_BBND, only axis 0 may be non-contiguous; all other axes must be contiguous.
-// For other layouts, every axis must be contiguous.
+// For PA_BBND, only axis 0 may be non-contiguous; all other axes must be
+// contiguous. For other layouts, every axis must be contiguous.
 ge::graphStatus SMLAInfoParser::CheckContiguous() const {
   bool oriKeyNonContiguous = false;
   bool cmpKeyNonContiguous = false;
@@ -866,7 +867,8 @@ ge::graphStatus SMLAInfoParser::GetActualSeqLenQSize(uint32_t& size) {
 
 ge::graphStatus SMLAInfoParser::GetBatchSize() {
   // Get the B dimension. For non-TND layouts, use the query batch dimension.
-  // For TND, cu_seqlens_q is required and its length determines the B dimension.
+  // For TND, cu_seqlens_q is required and its length determines the B
+  // dimension.
   if (qLayout_ == SMLALayout::TND) {
     return GetActualSeqLenQSize(bSize_);
   } else {  // BSND
@@ -2037,7 +2039,7 @@ ge::graphStatus SMLATilingCheck::CheckSingleParaTopkLength() const {
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
   }
-  // SWA bounded replay (vLLM #56227): in band mode the caller uses this same
+  // SWA bounded replay (va #56227): in band mode the caller uses this same
   // tensor for what the window's scalar width cannot express -- how many ori
   // KV entries each query token may see -- so it stands alone there. Outside
   // band mode it stays tied to the index list it was written for.
@@ -2628,24 +2630,24 @@ void SmlaVaTiling::CalcUbBmm(const SMLATilingInfo* tilingInfo) {
   if (cubeMSize > maxMSize) {
     cubeMSize = maxMSize;
   }
-  mmResUbSize_ =
-      sInnerSizeAlign_ *
-      Align(cubeMSize,
-            16U);  // The kernel writes with 16-element alignment; tiling uses the same alignment.
+  mmResUbSize_ = sInnerSizeAlign_ *
+                 Align(cubeMSize,
+                       16U);  // The kernel writes with 16-element alignment;
+                              // tiling uses the same alignment.
   bmm2ResUbSize_ =
-      headDimAlign_ *
-      Align(cubeMSize,
-            16U);  // The kernel writes with 16-element alignment; tiling uses the same alignment.
+      headDimAlign_ * Align(cubeMSize,
+                            16U);  // The kernel writes with 16-element
+                                   // alignment; tiling uses the same alignment.
 }
 
 void SmlaVaTiling::SplitBalanced(SMLATilingInfo* tilingInfo) {
   sInnerSizeAlign_ = Align(sInnerSize_, BYTE_BLOCK);
   if (tilingInfo->npuArch == NpuArch::DAV_2201) {
-    mBaseSize_ =
-        tilingInfo->perfMode == SMLATemplateMode::CSA_TEMPLATE_MODE
-            ? tilingInfo->gSize
-            : (256 / tilingInfo->gSize) *
-                  tilingInfo->gSize;  // 256 is the base compute block size on DAV_2201.
+    mBaseSize_ = tilingInfo->perfMode == SMLATemplateMode::CSA_TEMPLATE_MODE
+                     ? tilingInfo->gSize
+                     : (256 / tilingInfo->gSize) *
+                           tilingInfo->gSize;  // 256 is the base compute block
+                                               // size on DAV_2201.
     // DSpark ori_sparse_indices are per query token; keep one S1 row per M
     // block.
     if (tilingInfo->hasOriSparseIndices &&
@@ -2662,7 +2664,8 @@ void SmlaVaTiling::SplitBalanced(SMLATilingInfo* tilingInfo) {
   tilingData_.baseParams.set_bmm2ResUbSize(bmm2ResUbSize_);
 }
 
-// --------------------------SmlaVaTiling member function definitions----------------------
+// --------------------------SmlaVaTiling member function
+// definitions----------------------
 ge::graphStatus SmlaVaTiling::DoOpTiling(SMLATilingInfo* tilingInfo) {
   auto ascendcPlatform =
       platform_ascendc::PlatformAscendC(tilingInfo->platformInfo);
@@ -2693,9 +2696,11 @@ ge::graphStatus SmlaVaTiling::DoOpTiling(SMLATilingInfo* tilingInfo) {
   if (tilingInfo->perfMode == SMLATemplateMode::CSA_TEMPLATE_MODE ||
       (tilingInfo->perfMode == SMLATemplateMode::SWA_TEMPLATE_MODE &&
        tilingInfo->hasOriSparseIndices)) {
-    constexpr uint32_t MERGE_CACHE_GM_BUF_NUM = 3;  // Number of merge-cache buffers.
+    constexpr uint32_t MERGE_CACHE_GM_BUF_NUM =
+        3;  // Number of merge-cache buffers.
     workspaceSize += MERGE_CACHE_GM_BUF_NUM * 512 * 512 * 2 *
-                     aicNum;  // Each buffer is 512 x 512 bytes; 2 indicates double buffering.
+                     aicNum;  // Each buffer is 512 x 512 bytes; 2 indicates
+                              // double buffering.
   }
 
   // Compute vectorizeFlag for sparse KV physical-address vectorization.
@@ -2778,13 +2783,15 @@ ge::graphStatus SmlaVaTiling::DoOpTiling(SMLATilingInfo* tilingInfo) {
 }  // namespace optiling
 
 namespace optiling {
-// --------------------------TilingPrepare function definition----------------------------
+// --------------------------TilingPrepare function
+// definition----------------------------
 static ge::graphStatus TilingPrepareForSmlaVa(
     gert::TilingParseContext* /* context */) {
   return ge::GRAPH_SUCCESS;
 }
 
-// --------------------------Tiling function definition---------------------------
+// --------------------------Tiling function
+// definition---------------------------
 ge::graphStatus TilingForSmlaVa(gert::TilingContext* context) {
   OP_CHECK_IF(context == nullptr,
               OPS_REPORT_VECTOR_INNER_ERR("SmlaVa", "Tiling context is null."),
