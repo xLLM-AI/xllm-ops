@@ -94,6 +94,8 @@ ge::graphStatus TilingCrossAttentionAscend950(gert::TilingContext* context)
     serialized.set_qRowsPerTile(native.qRowsPerTile);
     serialized.set_qRowTileNum(native.qRowTileNum);
     serialized.set_rowsPerTask(native.rowsPerTask);
+    serialized.set_gPerTile(native.gPerTile);
+    serialized.set_gTileNum(native.gTileNum);
     serialized.set_kvTile(native.kvTile);
     serialized.set_kSeg(native.kSeg);
     serialized.set_mergeSegBlocks(native.mergeSegBlocks);

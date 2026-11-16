@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <cstddef>
 
-#define CA_TILING_VERSION 1u
+#define CA_TILING_VERSION 2u
 
 // dtype encoding carried in shape / tiling; enum is not allowed here
 #define CA_DTYPE_BF16 0u
@@ -41,7 +41,9 @@ struct CrossAttentionTilingData {
     // Task space
     uint32_t qRowsPerTile;      // q rows per task: (16/groupSize)*4 when groupSize divides 16
     uint32_t qRowTileNum;       // ceil(qSeqlen / qRowsPerTile)
-    uint32_t rowsPerTask;       // R limit = qRowsPerTile * groupSize (<= 64)
+    uint32_t rowsPerTask;       // R limit = qRowsPerTile * gPerTile (<= 64)
+    uint32_t gPerTile;          // heads covered by one task = min(groupSize, 16)
+    uint32_t gTileNum;          // ceil(groupSize / gPerTile): one group is split into this many tiles
     uint32_t kvTile;            // 128 (fixed)
     uint32_t kSeg;
     uint32_t mergeSegBlocks;    // ceil(maxNumBlocksPerBatch / kSeg)
@@ -60,9 +62,9 @@ struct CrossAttentionTilingData {
 
 static_assert(sizeof(CrossAttentionTilingData) % 8 == 0, "tiling ABI: 8B alignment");
 
-static_assert(sizeof(CrossAttentionTilingData) == 120, "arch35 tiling ABI size");
-static_assert(offsetof(CrossAttentionTilingData, mergeSlotBytes) == 72, "arch35 tiling ABI workspace");
-static_assert(offsetof(CrossAttentionTilingData, tilingVersion) == 112, "arch35 tiling ABI version");
+static_assert(sizeof(CrossAttentionTilingData) == 128, "arch35 tiling ABI size");
+static_assert(offsetof(CrossAttentionTilingData, mergeSlotBytes) == 80, "arch35 tiling ABI workspace");
+static_assert(offsetof(CrossAttentionTilingData, tilingVersion) == 120, "arch35 tiling ABI version");
 
 } // namespace Xllm
 

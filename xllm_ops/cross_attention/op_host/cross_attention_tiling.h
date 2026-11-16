@@ -68,6 +68,8 @@ BEGIN_TILING_DATA_DEF(CrossAttentionArch35TilingData)
   TILING_DATA_FIELD_DEF(uint32_t, qRowsPerTile);
   TILING_DATA_FIELD_DEF(uint32_t, qRowTileNum);
   TILING_DATA_FIELD_DEF(uint32_t, rowsPerTask);
+  TILING_DATA_FIELD_DEF(uint32_t, gPerTile);
+  TILING_DATA_FIELD_DEF(uint32_t, gTileNum);
   TILING_DATA_FIELD_DEF(uint32_t, kvTile);
   TILING_DATA_FIELD_DEF(uint32_t, kSeg);
   TILING_DATA_FIELD_DEF(uint32_t, mergeSegBlocks);
