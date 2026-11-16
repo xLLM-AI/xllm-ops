@@ -15,21 +15,44 @@ if (BUILD_OPEN_PROJECT)
     )
 endif()
 
-# CrossAttention kernel uses the AtlasA2 catlass FA building blocks (Arch::AtlasA2,
-# MmadAtlasA2FAIQK/PV ...). Those blocks live behind CATLASS_ARCH == 2201, so the
-# define is required for every target, including ascend950.
-set(CA_CATLASS_ARCH_DEF "-DCATLASS_ARCH=2201")
-
+# Compile options are grouped per compute unit so that a joint build
+# ("-c ascend910b;ascend950") cannot leak one CATLASS_ARCH into the other kernels.
+# Ascend950 (arch35 / DAV_3510) needs the 3510 catlass constants (BYTE_PER_BLK_FP=64, MX_*) plus the
+# CV channel; the Atlas A2/A3 path keeps 2201.
 add_ops_compile_options(
     OP_NAME CrossAttention
+    COMPUTE_UNIT "ascend910b;ascend910_93"
     OPTIONS --cce-auto-sync=on
             -Wno-deprecated-declarations
             -Werror
-            ${CA_CATLASS_ARCH_DEF}
+            -Wno-error
+            -g
+            -DCATLASS_ARCH=2201
             -I${CANN_3RD_LIB_PATH}/catlass/include
+            -I${CMAKE_CURRENT_LIST_DIR}/../third_party/catlass/include
+            -I${CMAKE_CURRENT_LIST_DIR}/../../../
+)
+
+add_ops_compile_options(
+    OP_NAME CrossAttention
+    COMPUTE_UNIT ascend950
+    OPTIONS --cce-auto-sync=on
+            -Wno-deprecated-declarations
+            -Werror
+            -Wno-error
+            -g
+            -DCATLASS_ARCH=3510
+            -DENABLE_CV_COMM_VIA_SSBUF=true
+            -I${CANN_3RD_LIB_PATH}/catlass/include
+            -I${CMAKE_CURRENT_LIST_DIR}/../third_party/catlass/include
             -I${CMAKE_CURRENT_LIST_DIR}/../../../
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
     add_modules_sources(OPTYPE cross_attention ACLNNTYPE aclnn)
+    # Native CV scheme: the Ascend950 (arch35) host tiling source lives in
+    # op_host/arch35 and is not covered by the add_modules_sources GLOB.
+    target_sources(${OPHOST_NAME}_tiling_obj PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/arch35/cross_attention_tiling_arch35.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/arch35/cross_attention_tiling.cpp)
 endif()

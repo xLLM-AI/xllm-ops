@@ -15,6 +15,11 @@ limitations under the License.
 
 #ifndef CROSS_ATTN_CATLASS_HELPER_H
 #define CROSS_ATTN_CATLASS_HELPER_H
+
+// A2 (AtlasA2) path. Never compiled into the Ascend950 (arch35 / DAV_3510)
+// translation unit: cross_attention.cpp routes on __NPU_ARCH__ == 3510 and
+// includes the arch35 fusion helper instead.
+#if !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510))
 #include "cross_attention_catlass_kernel.h"
 
 template <typename INPUT_T, typename TABLE_T, typename KVLEN_T>
@@ -84,4 +89,5 @@ CATLASS_DEVICE void CallCrossAttention(const CrossAttnKernelParams& params, Cros
     crossAttnInferKernel(params);
 }
 
+#endif // A2 (AtlasA2) compilation unit only
 #endif
