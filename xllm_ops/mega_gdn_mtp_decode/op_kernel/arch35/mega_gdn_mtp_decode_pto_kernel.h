@@ -18,8 +18,7 @@ constexpr int32_t kSsmHeadElements = kHeadDim * kHeadDim;
 constexpr int32_t kMaxBatchSize = 32;
 constexpr int32_t kMaxNumKHeads = 16;
 constexpr int32_t kMaxNumVHeads = 64;
-constexpr int32_t kMaxConvDim =
-    (2 * kMaxNumKHeads + kMaxNumVHeads) * kHeadDim;
+constexpr int32_t kMaxConvDim = (2 * kMaxNumKHeads + kMaxNumVHeads) * kHeadDim;
 constexpr int32_t kQkGroupCacheSequenceLength = 9;
 
 #if defined(PTO_NPU_ARCH_A5)
@@ -54,8 +53,7 @@ AICORE PTO_INLINE void SyncAllMixA5() {
 AICORE PTO_INLINE void SyncAllAivStatePublish() {
   pipe_barrier(PIPE_ALL);
   ffts_cross_core_sync(
-      PIPE_MTE3,
-      mega_gdn_decode_pto::GetFftsMessage(0, kStatePublishAivFlag));
+      PIPE_MTE3, mega_gdn_decode_pto::GetFftsMessage(0, kStatePublishAivFlag));
   wait_flag_dev(kStatePublishAivFlag);
 }
 #endif
@@ -164,13 +162,10 @@ constexpr int32_t kUbColumnSumTmp = 156672;
 constexpr int32_t kUbALogStatic = 173824;
 constexpr int32_t kUbDtBiasStatic = 174080;
 constexpr int32_t kUbQkCacheTail = 174112;
-constexpr int32_t kQkCacheBatchBytes =
-    kQkGroupCacheSequenceLength * kHeadDim *
-    static_cast<int32_t>(sizeof(float));
-constexpr int32_t kUbQkCacheK =
-    kUbQkCacheTail + kQkCacheBatchBytes;
-constexpr int32_t kUbQkCacheEnd =
-    kUbQkCacheK + kQkCacheBatchBytes;
+constexpr int32_t kQkCacheBatchBytes = kQkGroupCacheSequenceLength * kHeadDim *
+                                       static_cast<int32_t>(sizeof(float));
+constexpr int32_t kUbQkCacheK = kUbQkCacheTail + kQkCacheBatchBytes;
+constexpr int32_t kUbQkCacheEnd = kUbQkCacheK + kQkCacheBatchBytes;
 constexpr int32_t kUbDeferredReadoutHalf = kUbQkCacheEnd;
 constexpr int32_t kUbDeferredZHalf =
     kUbDeferredReadoutHalf +
@@ -184,20 +179,15 @@ constexpr int32_t kUbQkBatchKHalf =
     kQkGroupCacheSequenceLength * kHeadDim * sizeof(bfloat16_t);
 constexpr int32_t kUbQkNormSquare = kUbState;
 constexpr int32_t kUbQkNormReduceTmp =
-    kUbQkNormSquare +
-    kQkGroupCacheSequenceLength * kHeadDim * sizeof(float);
+    kUbQkNormSquare + kQkGroupCacheSequenceLength * kHeadDim * sizeof(float);
 constexpr int32_t kUbQkNorm =
-    kUbQkNormReduceTmp +
-    kQkGroupCacheSequenceLength * 64 * sizeof(float);
+    kUbQkNormReduceTmp + kQkGroupCacheSequenceLength * 64 * sizeof(float);
 constexpr int32_t kUbQkNormSqrt = kUbQkNorm + 16 * sizeof(float);
 
 static_assert(kUbQHalf % 32 == 0);
-static_assert(
-    kUbKHalf == kUbQHalf + kHeadDim * sizeof(bfloat16_t));
-static_assert(
-    kUbAHalf >= kUbQHalf + 2 * kHeadDim * sizeof(bfloat16_t));
-static_assert(kUbQkCacheTail ==
-              kUbDtBiasStatic + 8 * sizeof(float));
+static_assert(kUbKHalf == kUbQHalf + kHeadDim * sizeof(bfloat16_t));
+static_assert(kUbAHalf >= kUbQHalf + 2 * kHeadDim * sizeof(bfloat16_t));
+static_assert(kUbQkCacheTail == kUbDtBiasStatic + 8 * sizeof(float));
 static_assert(kUbQkCacheEnd == 183328);
 static_assert(kUbDeferredRowsEnd == 187936);
 static_assert(kUbDeferredRowsEnd <= 192 * 1024);
@@ -217,10 +207,9 @@ inline constexpr bool kUseTokenIoPipeline =
 
 #if !defined(PTO_NPU_ARCH_A5)
 template <typename T, int32_t Rows, int32_t Cols>
-AICORE PTO_INLINE void SiluNoCopy(
-    TileUbDataND<T, Rows, Cols>& dst,
-    TileUbDataND<T, Rows, Cols>& src,
-    TileUbDataND<T, Rows, Cols>& tmp) {
+AICORE PTO_INLINE void SiluNoCopy(TileUbDataND<T, Rows, Cols>& dst,
+                                  TileUbDataND<T, Rows, Cols>& src,
+                                  TileUbDataND<T, Rows, Cols>& tmp) {
   TMULS(tmp, src, -1);
   mega_gdn_decode_pto::VectorBarrier();
   TEXP(tmp, tmp);
@@ -235,22 +224,22 @@ AICORE PTO_INLINE void SiluNoCopy(
 
 AICORE PTO_INLINE void LoadBf16Row(__gm__ bfloat16_t* handle,
                                    int32_t ub_address) {
-  mega_gdn_decode_pto::CopyGmToUb<
-      bfloat16_t,
-      bfloat16_t,
-      1,
-      1,
-      1,
-      1,
-      128,
-      1,
-      1,
-      1,
-      128,
-      1,
-      1,
-      128,
-      pto::PadValue::Zero>(handle, ub_address, 0, 1, 128);
+  mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                  bfloat16_t,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  128,
+                                  1,
+                                  1,
+                                  1,
+                                  128,
+                                  1,
+                                  1,
+                                  128,
+                                  pto::PadValue::Zero>(
+      handle, ub_address, 0, 1, 128);
 }
 
 AICORE PTO_INLINE void LoadQkBf16Rows(__gm__ bfloat16_t* handle,
@@ -268,10 +257,9 @@ AICORE PTO_INLINE void LoadQkBf16Rows(__gm__ bfloat16_t* handle,
 }
 
 template <int32_t Rows>
-AICORE PTO_INLINE void LoadStridedBf16Rows(
-    __gm__ bfloat16_t* handle,
-    int32_t ub_address,
-    int32_t row_stride) {
+AICORE PTO_INLINE void LoadStridedBf16Rows(__gm__ bfloat16_t* handle,
+                                           int32_t ub_address,
+                                           int32_t row_stride) {
   using RowShape = pto::Shape<1, 1, 1, Rows, kHeadDim>;
   using RowStride = pto::Stride<1, 1, 1, pto::DYNAMIC, 1>;
   RowShape shape;
@@ -285,28 +273,26 @@ AICORE PTO_INLINE void LoadStridedBf16Rows(
 
 AICORE PTO_INLINE void StoreBf16Row(__gm__ bfloat16_t* handle,
                                     int32_t ub_address) {
-  mega_gdn_decode_pto::CopyUbToGm<
-      bfloat16_t,
-      bfloat16_t,
-      1,
-      1,
-      1,
-      1,
-      128,
-      1,
-      1,
-      1,
-      128,
-      1,
-      1,
-      128>(handle, ub_address, 0, 1, 128);
+  mega_gdn_decode_pto::CopyUbToGm<bfloat16_t,
+                                  bfloat16_t,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  128,
+                                  1,
+                                  1,
+                                  1,
+                                  128,
+                                  1,
+                                  1,
+                                  128>(handle, ub_address, 0, 1, 128);
 }
 
 template <int32_t Rows>
-AICORE PTO_INLINE void StoreStridedBf16Rows(
-    __gm__ bfloat16_t* handle,
-    int32_t ub_address,
-    int32_t row_stride) {
+AICORE PTO_INLINE void StoreStridedBf16Rows(__gm__ bfloat16_t* handle,
+                                            int32_t ub_address,
+                                            int32_t row_stride) {
   using RowShape = pto::Shape<1, 1, 1, Rows, kHeadDim>;
   using RowStride = pto::Stride<1, 1, 1, pto::DYNAMIC, 1>;
   RowShape shape;
@@ -320,88 +306,75 @@ AICORE PTO_INLINE void StoreStridedBf16Rows(
 
 AICORE PTO_INLINE void LoadBf16Scalar(__gm__ bfloat16_t* handle,
                                       int32_t ub_address) {
-  mega_gdn_decode_pto::CopyGmToUb<
-      bfloat16_t,
-      bfloat16_t,
-      1,
-      1,
-      1,
-      1,
-      1,
-      1,
-      1,
-      1,
-      1,
-      1,
-      1,
-      16,
-      pto::PadValue::Null>(handle, ub_address, 0, 1, 1);
+  mega_gdn_decode_pto::CopyGmToUb<bfloat16_t,
+                                  bfloat16_t,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  16,
+                                  pto::PadValue::Null>(
+      handle, ub_address, 0, 1, 1);
 }
 
 AICORE PTO_INLINE void LoadFloatScalar(__gm__ float* handle,
                                        int32_t ub_address) {
   mega_gdn_decode_pto::CopyGmToUb<float,
-                                float,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                8,
-                                pto::PadValue::Null>(
+                                  float,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  1,
+                                  8,
+                                  pto::PadValue::Null>(
       handle, ub_address, 0, 1, 1);
 }
 
 AICORE PTO_INLINE void LoadState(__gm__ float* handle, int32_t ub_address) {
   mega_gdn_decode_pto::CopyGmToUb<float,
-                                float,
-                                1,
-                                1,
-                                1,
-                                128,
-                                128,
-                                1,
-                                1,
-                                1,
-                                128,
-                                1,
-                                128,
-                                128,
-                                pto::PadValue::Zero>(
+                                  float,
+                                  1,
+                                  1,
+                                  1,
+                                  128,
+                                  128,
+                                  1,
+                                  1,
+                                  1,
+                                  128,
+                                  1,
+                                  128,
+                                  128,
+                                  pto::PadValue::Zero>(
       handle, ub_address, 0, 128, 128);
 }
 
 AICORE PTO_INLINE void StoreState(__gm__ float* handle, int32_t ub_address) {
-  mega_gdn_decode_pto::CopyUbToGm<float,
-                                float,
-                                1,
-                                1,
-                                1,
-                                128,
-                                128,
-                                1,
-                                1,
-                                1,
-                                128,
-                                1,
-                                128,
-                                128>(
-      handle, ub_address, 0, 128, 128);
+  mega_gdn_decode_pto::
+      CopyUbToGm<float, float, 1, 1, 1, 128, 128, 1, 1, 1, 128, 1, 128, 128>(
+          handle, ub_address, 0, 128, 128);
 }
 
 template <bool ApplyQScale, int32_t Rows>
-AICORE PTO_INLINE void NormalizeQkRows(
-    int32_t rows_address,
-    int32_t square_address,
-    int32_t reduce_tmp_address,
-    int32_t norm_address,
-    int32_t norm_sqrt_address) {
+AICORE PTO_INLINE void NormalizeQkRows(int32_t rows_address,
+                                       int32_t square_address,
+                                       int32_t reduce_tmp_address,
+                                       int32_t norm_address,
+                                       int32_t norm_sqrt_address) {
   constexpr int32_t kNormCapacity = 16;
   TileUbDataND<float, Rows, kHeadDim> rows;
   TASSIGN(rows, rows_address);
@@ -427,9 +400,7 @@ AICORE PTO_INLINE void NormalizeQkRows(
   wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
   for (int32_t row = 0; row < Rows; ++row) {
     TileUbDataND<float, 1, kHeadDim> row_tile;
-    TASSIGN(
-        row_tile,
-        rows_address + row * kHeadDim * sizeof(float));
+    TASSIGN(row_tile, rows_address + row * kHeadDim * sizeof(float));
     const float row_norm = norm_sqrt.GetValue(row);
 #if defined(PTO_NPU_ARCH_A5)
     TDIVS(row_tile, row_tile, row_norm);
@@ -438,9 +409,7 @@ AICORE PTO_INLINE void NormalizeQkRows(
     // row's dead square tile as a non-alias destination to match TileLang's
     // vector divf rounding.
     TileUbDataND<float, 1, kHeadDim> square_row_tile;
-    TASSIGN(
-        square_row_tile,
-        square_address + row * kHeadDim * sizeof(float));
+    TASSIGN(square_row_tile, square_address + row * kHeadDim * sizeof(float));
     TDIVS(square_row_tile, row_tile, row_norm);
     mega_gdn_decode_pto::VectorBarrier();
     TMOV(row_tile, square_row_tile);
@@ -459,22 +428,22 @@ AICORE PTO_INLINE void NormalizeQkRows(
 }
 
 template <int32_t SpeculativeTokens>
-AICORE PTO_INLINE void RunConvPhase(
-    __gm__ bfloat16_t* qkv_handle,
-    __gm__ bfloat16_t* conv_weight_handle,
-    __gm__ bfloat16_t* conv_state_handle,
-    __gm__ int* read_state_indices_handle,
-    __gm__ int* write_state_indices_handle,
-    __gm__ int* num_accepted_tokens_handle,
-    __gm__ bfloat16_t* conv_out_handle,
-    __gm__ bfloat16_t* conv_state_out_handle,
-    int32_t sequence_length,
-    int32_t batch_size,
-    int32_t conv_dim,
-    int32_t conv_tile_count,
-    int32_t conv_state_stride,
-    int32_t vector_core_idx,
-    int32_t vector_core_count) {
+AICORE PTO_INLINE void RunConvPhase(__gm__ bfloat16_t* qkv_handle,
+                                    __gm__ bfloat16_t* conv_weight_handle,
+                                    __gm__ bfloat16_t* conv_state_handle,
+                                    __gm__ int* read_state_indices_handle,
+                                    __gm__ int* write_state_indices_handle,
+                                    __gm__ int* num_accepted_tokens_handle,
+                                    __gm__ bfloat16_t* conv_out_handle,
+                                    __gm__ bfloat16_t* conv_state_out_handle,
+                                    int32_t sequence_length,
+                                    int32_t batch_size,
+                                    int32_t conv_dim,
+                                    int32_t conv_tile_count,
+                                    int32_t conv_state_stride,
+                                    int32_t vector_core_idx,
+                                    int32_t vector_core_count,
+                                    int32_t state_index_width = 1) {
   TileUbDataND<bfloat16_t, 1, 128> w_half0;
   TASSIGN(w_half0, kUbConvWeightHalf0);
   TileUbDataND<bfloat16_t, 1, 128> w_half1;
@@ -520,9 +489,7 @@ AICORE PTO_INLINE void RunConvPhase(
        conv_tile += vector_core_count) {
     const int32_t channel_offset = conv_tile * kHeadDim;
     mega_gdn_decode_pto::CopyConvWeightsGmToUb(
-        conv_weight_handle + channel_offset,
-        kUbConvWeightHalf0,
-        conv_dim);
+        conv_weight_handle + channel_offset, kUbConvWeightHalf0, conv_dim);
     set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     TCVT(w0, w_half0, RoundMode::CAST_NONE);
@@ -541,12 +508,17 @@ AICORE PTO_INLINE void RunConvPhase(
     }
 
     for (int32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-      const int32_t read_slot = *(read_state_indices_handle + batch_idx);
-      const int32_t write_slot = *(write_state_indices_handle + batch_idx);
+      const int32_t read_slot =
+          *(read_state_indices_handle + batch_idx * state_index_width);
+      const int32_t write_slot =
+          *(write_state_indices_handle + batch_idx * state_index_width);
+      if (read_slot < 0 || write_slot < 0) {
+        continue;
+      }
       const int32_t accepted =
-          *(num_accepted_tokens_handle + batch_idx);
-      const int32_t read_history_offset =
-          read_slot * conv_state_stride +
+          sequence_length == 1 ? 1 : *(num_accepted_tokens_handle + batch_idx);
+      const int64_t read_history_offset =
+          static_cast<int64_t>(read_slot) * conv_state_stride +
           (accepted - 1) * conv_dim + channel_offset;
       mega_gdn_decode_pto::CopyConvHistoryGmToUb(
           conv_state_handle + read_history_offset,
@@ -562,19 +534,18 @@ AICORE PTO_INLINE void RunConvPhase(
       // Snapshot accepted rows before a same-slot write can overwrite them.
       set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
       wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-      StoreBf16Row(
-          conv_state_out_handle +
-              write_slot * conv_state_stride + channel_offset,
-          kUbConvHistoryHalf1);
-      StoreBf16Row(
-          conv_state_out_handle +
-              write_slot * conv_state_stride + conv_dim + channel_offset,
-          kUbConvHistoryHalf2);
+      StoreBf16Row(conv_state_out_handle +
+                       static_cast<int64_t>(write_slot) * conv_state_stride +
+                       channel_offset,
+                   kUbConvHistoryHalf1);
+      StoreBf16Row(conv_state_out_handle +
+                       static_cast<int64_t>(write_slot) * conv_state_stride +
+                       conv_dim + channel_offset,
+                   kUbConvHistoryHalf2);
       set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
 
-      for (int32_t token_idx = 0; token_idx < sequence_length;
-           ++token_idx) {
+      for (int32_t token_idx = 0; token_idx < sequence_length; ++token_idx) {
         const int32_t token_offset =
             (batch_idx * sequence_length + token_idx) * conv_dim +
             channel_offset;
@@ -583,16 +554,13 @@ AICORE PTO_INLINE void RunConvPhase(
         event_t conv_pingpong_event;
         if constexpr (kUseTokenIoPipeline<SpeculativeTokens>) {
           conv_input_half_address =
-              conv_pingpong_flag == 0 ? kUbConvInputHalf
-                                      : kUbConvInputHalfPong;
-          conv_output_half_address =
-              conv_pingpong_flag == 0 ? kUbConvOutputHalf
-                                      : kUbConvOutputHalfPong;
-          conv_pingpong_event =
-              static_cast<event_t>(conv_pingpong_flag + 2);
+              conv_pingpong_flag == 0 ? kUbConvInputHalf : kUbConvInputHalfPong;
+          conv_output_half_address = conv_pingpong_flag == 0
+                                         ? kUbConvOutputHalf
+                                         : kUbConvOutputHalfPong;
+          conv_pingpong_event = static_cast<event_t>(conv_pingpong_flag + 2);
           wait_flag(PIPE_MTE3, PIPE_MTE2, conv_pingpong_event);
-          LoadBf16Row(
-              qkv_handle + token_offset, conv_input_half_address);
+          LoadBf16Row(qkv_handle + token_offset, conv_input_half_address);
           set_flag(PIPE_MTE2, PIPE_V, conv_pingpong_event);
           wait_flag(PIPE_MTE2, PIPE_V, conv_pingpong_event);
           TileUbDataND<bfloat16_t, 1, 128> conv_input_half;
@@ -649,12 +617,11 @@ AICORE PTO_INLINE void RunConvPhase(
         if constexpr (kUseTokenIoPipeline<SpeculativeTokens>) {
           set_flag(PIPE_V, PIPE_MTE3, conv_pingpong_event);
           wait_flag(PIPE_V, PIPE_MTE3, conv_pingpong_event);
-          StoreBf16Row(
-              conv_out_handle + token_offset,
-              conv_output_half_address);
+          StoreBf16Row(conv_out_handle + token_offset,
+                       conv_output_half_address);
           StoreBf16Row(
               conv_state_out_handle +
-                  write_slot * conv_state_stride +
+                  static_cast<int64_t>(write_slot) * conv_state_stride +
                   (token_idx + 2) * conv_dim + channel_offset,
               conv_input_half_address);
           set_flag(PIPE_MTE3, PIPE_MTE2, conv_pingpong_event);
@@ -662,11 +629,10 @@ AICORE PTO_INLINE void RunConvPhase(
         } else {
           set_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
           wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
-          StoreBf16Row(
-              conv_out_handle + token_offset, kUbConvOutputHalf);
+          StoreBf16Row(conv_out_handle + token_offset, kUbConvOutputHalf);
           StoreBf16Row(
               conv_state_out_handle +
-                  write_slot * conv_state_stride +
+                  static_cast<int64_t>(write_slot) * conv_state_stride +
                   (token_idx + 2) * conv_dim + channel_offset,
               kUbConvInputHalf);
           set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID3);
@@ -693,19 +659,17 @@ AICORE PTO_INLINE void RunConvPhase(
   }
 }
 
-AICORE PTO_INLINE void LoadInitialState(
-    __gm__ float* ssm_state_handle,
-    __gm__ bfloat16_t* norm_weight_handle,
-    __gm__ float* a_log_handle,
-    __gm__ float* dt_bias_handle,
-    int32_t read_slot,
-    int32_t accepted,
-    int32_t sequence_length,
-    int32_t ssm_checkpoint_stride,
-    int32_t head_idx,
-    bool load_norm_weight) {
-  const int32_t read_checkpoint =
-      read_slot * sequence_length + accepted - 1;
+AICORE PTO_INLINE void LoadInitialState(__gm__ float* ssm_state_handle,
+                                        __gm__ bfloat16_t* norm_weight_handle,
+                                        __gm__ float* a_log_handle,
+                                        __gm__ float* dt_bias_handle,
+                                        int32_t read_slot,
+                                        int32_t accepted,
+                                        int32_t sequence_length,
+                                        int32_t ssm_checkpoint_stride,
+                                        int32_t head_idx,
+                                        bool load_norm_weight) {
+  const int32_t read_checkpoint = read_slot * sequence_length + accepted - 1;
   const int64_t read_state_offset =
       static_cast<int64_t>(read_checkpoint) * ssm_checkpoint_stride +
       head_idx * kSsmHeadElements;
@@ -732,12 +696,10 @@ AICORE PTO_INLINE void LoadInitialState(
   mega_gdn_decode_pto::VectorBarrier();
 }
 
-template <bool UseDeferredNorm, bool FlaSsmStateLayout,
-          bool UseRegBase = false>
-AICORE PTO_INLINE void RunRecurrentStep(
-    int32_t q_token_address,
-    int32_t k_token_address,
-    int32_t deferred_readout_address) {
+template <bool UseDeferredNorm, bool FlaSsmStateLayout, bool UseRegBase = false>
+AICORE PTO_INLINE void RunRecurrentStep(int32_t q_token_address,
+                                        int32_t k_token_address,
+                                        int32_t deferred_readout_address) {
   TileUbDataND<float, 1, 128> q_token;
   TASSIGN(q_token, q_token_address);
   TileUbDataND<float, 1, 128> k_token;
@@ -846,8 +808,8 @@ AICORE PTO_INLINE void RunRecurrentStep(
   if constexpr (UseRegBase) {
     static_assert(FlaSsmStateLayout);
     mega_gdn_decode_pto::a5_b4_deferred::NormVectorBarrier();
-    mega_gdn_decode_pto::a5_b4_deferred::
-        StateVectorProductRegBase128(prediction, state, k_token);
+    mega_gdn_decode_pto::a5_b4_deferred::StateVectorProductRegBase128(
+        prediction, state, k_token);
     mega_gdn_decode_pto::a5_b4_deferred::NormVectorBarrier();
   } else
 #endif
@@ -869,9 +831,8 @@ AICORE PTO_INLINE void RunRecurrentStep(
 #if defined(PTO_NPU_ARCH_A5)
   if constexpr (UseRegBase) {
     mega_gdn_decode_pto::a5_b4_deferred::NormVectorBarrier();
-    mega_gdn_decode_pto::a5_b4_deferred::
-        StateRankOneUpdateAndProductRegBase128(
-            prediction, state, k_token, delta, q_token);
+    mega_gdn_decode_pto::a5_b4_deferred::StateRankOneUpdateAndProductRegBase128(
+        prediction, state, k_token, delta, q_token);
     mega_gdn_decode_pto::a5_b4_deferred::NormVectorBarrier();
   } else
 #endif
@@ -897,15 +858,13 @@ AICORE PTO_INLINE void RunRecurrentStep(
   }
 }
 
-AICORE PTO_INLINE void WriteCheckpoint(
-    __gm__ float* ssm_state_out_handle,
-    int32_t write_slot,
-    int32_t sequence_length,
-    int32_t ssm_checkpoint_stride,
-    int32_t head_idx,
-    int32_t token_idx) {
-  const int32_t write_checkpoint =
-      write_slot * sequence_length + token_idx;
+AICORE PTO_INLINE void WriteCheckpoint(__gm__ float* ssm_state_out_handle,
+                                       int32_t write_slot,
+                                       int32_t sequence_length,
+                                       int32_t ssm_checkpoint_stride,
+                                       int32_t head_idx,
+                                       int32_t token_idx) {
+  const int32_t write_checkpoint = write_slot * sequence_length + token_idx;
   const int64_t write_state_offset =
       static_cast<int64_t>(write_checkpoint) * ssm_checkpoint_stride +
       head_idx * kSsmHeadElements;
@@ -917,13 +876,12 @@ AICORE PTO_INLINE void WriteCheckpoint(
 }
 
 template <int32_t SpeculativeTokens>
-AICORE PTO_INLINE void RunNormStep(
-    __gm__ bfloat16_t* out_handle,
-    int32_t batch_idx,
-    int32_t token_idx,
-    int32_t head_idx,
-    int32_t sequence_length,
-    int32_t v_width) {
+AICORE PTO_INLINE void RunNormStep(__gm__ bfloat16_t* out_handle,
+                                   int32_t batch_idx,
+                                   int32_t token_idx,
+                                   int32_t head_idx,
+                                   int32_t sequence_length,
+                                   int32_t v_width) {
   TileUbDataND<bfloat16_t, 1, 128> norm_half;
   TASSIGN(norm_half, kUbNormHalf);
   TileUbDataND<float, 1, 128> norm_fp32;
@@ -1011,8 +969,7 @@ AICORE PTO_INLINE void RunNormStep(
   TMUL(norm_fp32, norm_fp32, norm_weight_fp32);
   TileUbDataND<float, 1, 128> silu_tmp;
   TASSIGN(silu_tmp, kUbVectorScratch);
-  mega_gdn_decode_pto::Silu<float, 1, 128>(
-      gate_fp32, z_fp32, silu_tmp);
+  mega_gdn_decode_pto::Silu<float, 1, 128>(gate_fp32, z_fp32, silu_tmp);
   mega_gdn_decode_pto::VectorBarrier();
   TMUL(norm_fp32, norm_fp32, gate_fp32);
   mega_gdn_decode_pto::VectorBarrier();
@@ -1021,11 +978,10 @@ AICORE PTO_INLINE void RunNormStep(
   mega_gdn_decode_pto::VectorBarrier();
   set_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
   wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
-  StoreBf16Row(
-      out_handle +
-          (batch_idx * sequence_length + token_idx) * v_width +
-          head_idx * kHeadDim,
-      kUbFinalHalf);
+  StoreBf16Row(out_handle +
+                   (batch_idx * sequence_length + token_idx) * v_width +
+                   head_idx * kHeadDim,
+               kUbFinalHalf);
   set_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
   wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
   if constexpr (!kUseTokenIoPipeline<SpeculativeTokens>) {
@@ -1078,12 +1034,11 @@ class DeferredNormUbLayout final {
 };
 
 template <int32_t Rows, bool UseQkGroupCache>
-AICORE PTO_INLINE void RunDeferredNorm(
-    __gm__ bfloat16_t* out_handle,
-    int32_t batch_idx,
-    int32_t head_idx,
-    int32_t sequence_length,
-    int32_t v_width) {
+AICORE PTO_INLINE void RunDeferredNorm(__gm__ bfloat16_t* out_handle,
+                                       int32_t batch_idx,
+                                       int32_t head_idx,
+                                       int32_t sequence_length,
+                                       int32_t v_width) {
   using Layout = DeferredNormUbLayout<Rows, UseQkGroupCache>;
   pipe_barrier(PIPE_ALL);
 
@@ -1117,8 +1072,7 @@ AICORE PTO_INLINE void RunDeferredNorm(
   TASSIGN(rms_batch_dn, Layout::kRmsBatch);
   TileUbDataND<float, 1, Layout::kRmsBatchCapacity, 1, Rows> rms_batch;
   TASSIGN(rms_batch, Layout::kRmsBatch);
-  TileUbDataND<float, 1, Layout::kRmsBatchCapacity, 1, Rows>
-      rms_sqrt_batch;
+  TileUbDataND<float, 1, Layout::kRmsBatchCapacity, 1, Rows> rms_sqrt_batch;
   TASSIGN(rms_sqrt_batch, Layout::kRmsSqrtBatch);
   TileUbDataND<float, Rows, 64> reduce_tmp_batch;
   TASSIGN(reduce_tmp_batch, Layout::kReduceTmpBatch);
@@ -1127,21 +1081,14 @@ AICORE PTO_INLINE void RunDeferredNorm(
 
   for (int32_t row = 0; row < Rows; ++row) {
     TileUbDataND<bfloat16_t, 1, kHeadDim> cached_readout_row;
-    TASSIGN(
-        cached_readout_row,
-        Layout::kReadoutHalf + row * kHeadDim * sizeof(bfloat16_t));
+    TASSIGN(cached_readout_row,
+            Layout::kReadoutHalf + row * kHeadDim * sizeof(bfloat16_t));
     TileUbDataND<bfloat16_t, 1, kHeadDim> cached_z_row;
-    TASSIGN(
-        cached_z_row,
-        Layout::kZHalf + row * kHeadDim * sizeof(bfloat16_t));
+    TASSIGN(cached_z_row, Layout::kZHalf + row * kHeadDim * sizeof(bfloat16_t));
     TileUbDataND<float, 1, kHeadDim> input_row;
-    TASSIGN(
-        input_row,
-        Layout::kInputBatch + row * kHeadDim * sizeof(float));
+    TASSIGN(input_row, Layout::kInputBatch + row * kHeadDim * sizeof(float));
     TileUbDataND<float, 1, kHeadDim> z_row;
-    TASSIGN(
-        z_row,
-        Layout::kZBatch + row * kHeadDim * sizeof(float));
+    TASSIGN(z_row, Layout::kZBatch + row * kHeadDim * sizeof(float));
     TCVT(input_row, cached_readout_row, RoundMode::CAST_NONE);
     TCVT(z_row, cached_z_row, RoundMode::CAST_NONE);
   }
@@ -1151,15 +1098,12 @@ AICORE PTO_INLINE void RunDeferredNorm(
 #if defined(PTO_NPU_ARCH_A5)
   for (int32_t row = 0; row < Rows; ++row) {
     TileUbDataND<float, 1, 64> square_low;
-    TASSIGN(square_low,
-            Layout::kSquareBatch + row * kHeadDim * sizeof(float));
+    TASSIGN(square_low, Layout::kSquareBatch + row * kHeadDim * sizeof(float));
     TileUbDataND<float, 1, 64> square_high;
     TASSIGN(square_high,
-            Layout::kSquareBatch +
-                (row * kHeadDim + 64) * sizeof(float));
+            Layout::kSquareBatch + (row * kHeadDim + 64) * sizeof(float));
     TileUbDataND<float, 1, 64> reduced_row;
-    TASSIGN(reduced_row,
-            Layout::kReduceTmpBatch + row * 64 * sizeof(float));
+    TASSIGN(reduced_row, Layout::kReduceTmpBatch + row * 64 * sizeof(float));
     TADD(reduced_row, square_low, square_high);
   }
   mega_gdn_decode_pto::VectorBarrier();
@@ -1187,9 +1131,7 @@ AICORE PTO_INLINE void RunDeferredNorm(
   wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
   for (int32_t row = 0; row < Rows; ++row) {
     TileUbDataND<float, 1, kHeadDim> input_row;
-    TASSIGN(
-        input_row,
-        Layout::kInputBatch + row * kHeadDim * sizeof(float));
+    TASSIGN(input_row, Layout::kInputBatch + row * kHeadDim * sizeof(float));
     const float rms_value = rms_sqrt_batch.GetValue(row);
     TMULS(input_row, input_row, 1.0f / rms_value);
   }
@@ -1197,9 +1139,7 @@ AICORE PTO_INLINE void RunDeferredNorm(
   mega_gdn_decode_pto::VectorBarrier();
   for (int32_t row = 0; row < Rows; ++row) {
     TileUbDataND<float, 1, kHeadDim> input_row;
-    TASSIGN(
-        input_row,
-        Layout::kInputBatch + row * kHeadDim * sizeof(float));
+    TASSIGN(input_row, Layout::kInputBatch + row * kHeadDim * sizeof(float));
     TMUL(input_row, input_row, norm_weight_fp32);
   }
   mega_gdn_decode_pto::VectorBarrier();
@@ -1218,8 +1158,7 @@ AICORE PTO_INLINE void RunDeferredNorm(
   // Match the A5 Triton backend's midpoint-tie behavior at the norm boundary.
   TCVT(final_half_batch, input_batch, RoundMode::CAST_ROUND);
 #else
-  SiluNoCopy<float, Rows, kHeadDim>(
-      gate_batch, z_batch, silu_tmp_batch);
+  SiluNoCopy<float, Rows, kHeadDim>(gate_batch, z_batch, silu_tmp_batch);
   mega_gdn_decode_pto::VectorBarrier();
   TMUL(input_batch, input_batch, gate_batch);
   mega_gdn_decode_pto::VectorBarrier();
@@ -1233,9 +1172,7 @@ AICORE PTO_INLINE void RunDeferredNorm(
   set_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
   wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
   StoreStridedBf16Rows<Rows>(
-      out_handle + output_base_offset,
-      Layout::kFinalHalfBatch,
-      v_width);
+      out_handle + output_base_offset, Layout::kFinalHalfBatch, v_width);
   set_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
   wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
 }
@@ -1254,28 +1191,28 @@ template <int32_t SpeculativeTokens,
           bool FlaSsmStateLayout = true,
           bool UseRegBase = false>
 #endif
-AICORE PTO_INLINE void Run(
-    __gm__ bfloat16_t* qkv_handle,
-    __gm__ bfloat16_t* z_handle,
-    __gm__ bfloat16_t* b_handle,
-    __gm__ bfloat16_t* a_handle,
-    __gm__ bfloat16_t* conv_weight_handle,
-    __gm__ bfloat16_t* conv_state_handle,
-    __gm__ float* a_log_handle,
-    __gm__ float* dt_bias_handle,
-    __gm__ float* ssm_state_handle,
-    __gm__ int* read_state_indices_handle,
-    __gm__ int* write_state_indices_handle,
-    __gm__ int* num_accepted_tokens_handle,
-    __gm__ bfloat16_t* norm_weight_handle,
-    __gm__ bfloat16_t* conv_out_handle,
-    __gm__ bfloat16_t* conv_state_out_handle,
-    __gm__ float* ssm_state_out_handle,
-    __gm__ bfloat16_t* out_handle,
-    int32_t num_k_heads,
-    int32_t num_v_heads,
-    int32_t batch_size,
-    int32_t runtime_sequence_length) {
+AICORE PTO_INLINE void Run(__gm__ bfloat16_t* qkv_handle,
+                           __gm__ bfloat16_t* z_handle,
+                           __gm__ bfloat16_t* b_handle,
+                           __gm__ bfloat16_t* a_handle,
+                           __gm__ bfloat16_t* conv_weight_handle,
+                           __gm__ bfloat16_t* conv_state_handle,
+                           __gm__ float* a_log_handle,
+                           __gm__ float* dt_bias_handle,
+                           __gm__ float* ssm_state_handle,
+                           __gm__ int* read_state_indices_handle,
+                           __gm__ int* write_state_indices_handle,
+                           __gm__ int* num_accepted_tokens_handle,
+                           __gm__ bfloat16_t* norm_weight_handle,
+                           __gm__ bfloat16_t* conv_out_handle,
+                           __gm__ bfloat16_t* conv_state_out_handle,
+                           __gm__ float* ssm_state_out_handle,
+                           __gm__ bfloat16_t* out_handle,
+                           int32_t num_k_heads,
+                           int32_t num_v_heads,
+                           int32_t batch_size,
+                           int32_t runtime_sequence_length,
+                           int32_t state_index_width = 1) {
   constexpr bool kIsDynamic = SpeculativeTokens == 0;
   static_assert(!UseDeferredNorm || !kIsDynamic);
 #if defined(PTO_NPU_ARCH_A5)
@@ -1290,20 +1227,17 @@ AICORE PTO_INLINE void Run(
       UseDeferredNorm ? SpeculativeTokens + 1 : 1;
   using RunDeferredLayout =
       DeferredNormUbLayout<kRunDeferredNormRows, UseQkGroupCache>;
-  constexpr int32_t kRunDeferredReadoutHalf =
-      RunDeferredLayout::kReadoutHalf;
+  constexpr int32_t kRunDeferredReadoutHalf = RunDeferredLayout::kReadoutHalf;
   constexpr int32_t kRunDeferredZHalf = RunDeferredLayout::kZHalf;
   const int32_t sequence_length =
       kIsDynamic ? runtime_sequence_length : SpeculativeTokens + 1;
   const int32_t conv_state_length = sequence_length + 2;
-  const int32_t conv_dim =
-      (2 * num_k_heads + num_v_heads) * kHeadDim;
+  const int32_t conv_dim = (2 * num_k_heads + num_v_heads) * kHeadDim;
   const int32_t conv_tile_count = conv_dim / kHeadDim;
   const int32_t conv_state_stride = conv_state_length * conv_dim;
   const int32_t v_heads_per_k = num_v_heads / num_k_heads;
   const int32_t v_width = num_v_heads * kHeadDim;
-  const int32_t ssm_checkpoint_stride =
-      num_v_heads * kSsmHeadElements;
+  const int32_t ssm_checkpoint_stride = num_v_heads * kSsmHeadElements;
 
   TileUbDataND<bfloat16_t, 1, 128> q_half;
   TASSIGN(q_half, kUbQHalf);
@@ -1339,22 +1273,12 @@ AICORE PTO_INLINE void Run(
   TASSIGN(z_fp32, kUbZ);
   // Full-span alias keeps the static UB footprint parser aware of the
   // dynamically addressed all-token Q/K subtiles.
-  TileUbDataND<
-      float,
-      2 * kQkGroupCacheSequenceLength,
-      128> qk_cache_tail;
+  TileUbDataND<float, 2 * kQkGroupCacheSequenceLength, 128> qk_cache_tail;
   TASSIGN(qk_cache_tail, kUbQkCacheTail);
-  TileUbDataND<
-      bfloat16_t,
-      kRunDeferredNormRows,
-      kHeadDim>
+  TileUbDataND<bfloat16_t, kRunDeferredNormRows, kHeadDim>
       deferred_readout_half;
   TASSIGN(deferred_readout_half, kRunDeferredReadoutHalf);
-  TileUbDataND<
-      bfloat16_t,
-      kRunDeferredNormRows,
-      kHeadDim>
-      deferred_z_half;
+  TileUbDataND<bfloat16_t, kRunDeferredNormRows, kHeadDim> deferred_z_half;
   TASSIGN(deferred_z_half, kRunDeferredZHalf);
 
 #if defined(__DAV_VEC__) || defined(__DAV_C220_VEC__)
@@ -1364,30 +1288,29 @@ AICORE PTO_INLINE void Run(
   set_mask_norm();
   set_vector_mask(-1, -1);
   const int32_t vector_core_idx = cid * get_subblockdim() + vid;
-  const int32_t vector_core_count =
-      get_block_num() * get_subblockdim();
+  const int32_t vector_core_count = get_block_num() * get_subblockdim();
 #else
   const int32_t vector_core_idx = get_block_idx();
   const int32_t vector_core_count = get_block_num();
 #endif
 
   // Phase 1: select accepted Conv history and write the private window.
-  RunConvPhase<SpeculativeTokens>(
-      qkv_handle,
-      conv_weight_handle,
-      conv_state_handle,
-      read_state_indices_handle,
-      write_state_indices_handle,
-      num_accepted_tokens_handle,
-      conv_out_handle,
-      conv_state_out_handle,
-      sequence_length,
-      batch_size,
-      conv_dim,
-      conv_tile_count,
-      conv_state_stride,
-      vector_core_idx,
-      vector_core_count);
+  RunConvPhase<SpeculativeTokens>(qkv_handle,
+                                  conv_weight_handle,
+                                  conv_state_handle,
+                                  read_state_indices_handle,
+                                  write_state_indices_handle,
+                                  num_accepted_tokens_handle,
+                                  conv_out_handle,
+                                  conv_state_out_handle,
+                                  sequence_length,
+                                  batch_size,
+                                  conv_dim,
+                                  conv_tile_count,
+                                  conv_state_stride,
+                                  vector_core_idx,
+                                  vector_core_count,
+                                  state_index_width);
 #endif
 
   // Conv output is a GM hand-off between different channel/head owners.
@@ -1408,9 +1331,9 @@ AICORE PTO_INLINE void Run(
                 SpeculativeTokens == 8);
   const int32_t total_heads = batch_size * num_v_heads;
   const int32_t qk_group_count = batch_size * num_k_heads;
-  const bool use_two_owner_schedule =
-      UseTwoOwnerQkGroups && v_heads_per_k == 3 &&
-      vector_core_count > qk_group_count;
+  const bool use_two_owner_schedule = UseTwoOwnerQkGroups &&
+                                      v_heads_per_k == 3 &&
+                                      vector_core_count > qk_group_count;
   int32_t owner_task_count = 0;
   if constexpr (UseTwoOwnerQkGroups) {
     if (use_two_owner_schedule) {
@@ -1419,30 +1342,25 @@ AICORE PTO_INLINE void Run(
       } else {
         const int32_t singleton_owner_count =
             vector_core_count - qk_group_count;
-        const int32_t first_singleton_group =
-            vector_core_idx - qk_group_count;
+        const int32_t first_singleton_group = vector_core_idx - qk_group_count;
         if (first_singleton_group < qk_group_count) {
-          owner_task_count =
-              (qk_group_count - first_singleton_group +
-               singleton_owner_count - 1) /
-              singleton_owner_count;
+          owner_task_count = (qk_group_count - first_singleton_group +
+                              singleton_owner_count - 1) /
+                             singleton_owner_count;
         }
       }
     } else if (vector_core_idx < qk_group_count) {
       owner_task_count = v_heads_per_k;
     }
   } else if constexpr (UseQkGroupCache) {
-    owner_task_count =
-        vector_core_idx < qk_group_count ? v_heads_per_k : 0;
+    owner_task_count = vector_core_idx < qk_group_count ? v_heads_per_k : 0;
   } else if (vector_core_idx < total_heads) {
-    owner_task_count =
-        (total_heads - vector_core_idx + vector_core_count - 1) /
-        vector_core_count;
+    owner_task_count = (total_heads - vector_core_idx + vector_core_count - 1) /
+                       vector_core_count;
   }
 
   int32_t cached_qk_group = -1;
-  for (int32_t owner_task_idx = 0;
-       owner_task_idx < owner_task_count;
+  for (int32_t owner_task_idx = 0; owner_task_idx < owner_task_count;
        ++owner_task_idx) {
     int32_t qk_group = 0;
     int32_t local_v_head_idx = 0;
@@ -1475,39 +1393,27 @@ AICORE PTO_INLINE void Run(
     }
     const int32_t batch_idx = qk_group / num_k_heads;
     const int32_t qk_head_idx = qk_group % num_k_heads;
-    const int32_t head_idx =
-        qk_head_idx * v_heads_per_k + local_v_head_idx;
-    const bool load_norm_weight =
-        !UseQkGroupCache || owner_task_idx == 0;
+    const int32_t head_idx = qk_head_idx * v_heads_per_k + local_v_head_idx;
+    const bool load_norm_weight = !UseQkGroupCache || owner_task_idx == 0;
 
     if constexpr (UseQkGroupCache) {
       if (qk_group != cached_qk_group) {
         const int32_t batch_conv_offset =
             batch_idx * sequence_length * conv_dim;
         LoadStridedBf16Rows<kRunDeferredNormRows>(
-            conv_out_handle +
-                batch_conv_offset +
-                qk_head_idx * kHeadDim,
+            conv_out_handle + batch_conv_offset + qk_head_idx * kHeadDim,
             kUbQkBatchQHalf,
             conv_dim);
         LoadStridedBf16Rows<kRunDeferredNormRows>(
-            conv_out_handle +
-                batch_conv_offset +
-                num_k_heads * kHeadDim +
+            conv_out_handle + batch_conv_offset + num_k_heads * kHeadDim +
                 qk_head_idx * kHeadDim,
             kUbQkBatchKHalf,
             conv_dim);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
-        TileUbDataND<
-            bfloat16_t,
-            kRunDeferredNormRows,
-            kHeadDim> q_half_batch;
+        TileUbDataND<bfloat16_t, kRunDeferredNormRows, kHeadDim> q_half_batch;
         TASSIGN(q_half_batch, kUbQkBatchQHalf);
-        TileUbDataND<
-            bfloat16_t,
-            kRunDeferredNormRows,
-            kHeadDim> k_half_batch;
+        TileUbDataND<bfloat16_t, kRunDeferredNormRows, kHeadDim> k_half_batch;
         TASSIGN(k_half_batch, kUbQkBatchKHalf);
         TileUbDataND<float, kRunDeferredNormRows, kHeadDim> q_batch;
         TASSIGN(q_batch, kUbQkCacheTail);
@@ -1517,18 +1423,16 @@ AICORE PTO_INLINE void Run(
         TCVT(k_batch, k_half_batch, RoundMode::CAST_NONE);
         mega_gdn_decode_pto::VectorBarrier();
 
-        NormalizeQkRows<true, kRunDeferredNormRows>(
-            kUbQkCacheTail,
-            kUbQkNormSquare,
-            kUbQkNormReduceTmp,
-            kUbQkNorm,
-            kUbQkNormSqrt);
-        NormalizeQkRows<false, kRunDeferredNormRows>(
-            kUbQkCacheK,
-            kUbQkNormSquare,
-            kUbQkNormReduceTmp,
-            kUbQkNorm,
-            kUbQkNormSqrt);
+        NormalizeQkRows<true, kRunDeferredNormRows>(kUbQkCacheTail,
+                                                    kUbQkNormSquare,
+                                                    kUbQkNormReduceTmp,
+                                                    kUbQkNorm,
+                                                    kUbQkNormSqrt);
+        NormalizeQkRows<false, kRunDeferredNormRows>(kUbQkCacheK,
+                                                     kUbQkNormSquare,
+                                                     kUbQkNormReduceTmp,
+                                                     kUbQkNorm,
+                                                     kUbQkNormSqrt);
         cached_qk_group = qk_group;
       }
     }
@@ -1542,8 +1446,7 @@ AICORE PTO_INLINE void Run(
   const int32_t total_heads = batch_size * num_v_heads;
   const int32_t recurrent_loop_end =
       UseQkGroupCache ? vector_core_count * v_heads_per_k : total_heads;
-  for (int32_t head_index = vector_core_idx;
-       head_index < recurrent_loop_end;
+  for (int32_t head_index = vector_core_idx; head_index < recurrent_loop_end;
        head_index += vector_core_count) {
     if constexpr (UseQkGroupCache) {
       if (vector_core_idx >= batch_size * num_k_heads) {
@@ -1551,51 +1454,36 @@ AICORE PTO_INLINE void Run(
       }
     }
     const int32_t task_head_idx =
-        UseQkGroupCache
-            ? (head_index - vector_core_idx) / vector_core_count
-            : 0;
-    const int32_t batch_idx =
-        UseQkGroupCache ? vector_core_idx / num_k_heads
-                        : head_index / num_v_heads;
+        UseQkGroupCache ? (head_index - vector_core_idx) / vector_core_count
+                        : 0;
+    const int32_t batch_idx = UseQkGroupCache ? vector_core_idx / num_k_heads
+                                              : head_index / num_v_heads;
     const int32_t qk_head_idx =
         UseQkGroupCache ? vector_core_idx % num_k_heads
-                        : (head_index % num_v_heads) /
-                              v_heads_per_k;
-    const int32_t head_idx =
-        UseQkGroupCache
-            ? qk_head_idx * v_heads_per_k + task_head_idx
-            : head_index % num_v_heads;
-    const bool load_norm_weight =
-        !UseQkGroupCache || task_head_idx == 0;
+                        : (head_index % num_v_heads) / v_heads_per_k;
+    const int32_t head_idx = UseQkGroupCache
+                                 ? qk_head_idx * v_heads_per_k + task_head_idx
+                                 : head_index % num_v_heads;
+    const bool load_norm_weight = !UseQkGroupCache || task_head_idx == 0;
 
     if constexpr (UseQkGroupCache) {
       if (task_head_idx == 0) {
         const int32_t batch_conv_offset =
             batch_idx * sequence_length * conv_dim;
         LoadStridedBf16Rows<kRunDeferredNormRows>(
-            conv_out_handle +
-                batch_conv_offset +
-                qk_head_idx * kHeadDim,
+            conv_out_handle + batch_conv_offset + qk_head_idx * kHeadDim,
             kUbQkBatchQHalf,
             conv_dim);
         LoadStridedBf16Rows<kRunDeferredNormRows>(
-            conv_out_handle +
-                batch_conv_offset +
-                num_k_heads * kHeadDim +
+            conv_out_handle + batch_conv_offset + num_k_heads * kHeadDim +
                 qk_head_idx * kHeadDim,
             kUbQkBatchKHalf,
             conv_dim);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
-        TileUbDataND<
-            bfloat16_t,
-            kRunDeferredNormRows,
-            kHeadDim> q_half_batch;
+        TileUbDataND<bfloat16_t, kRunDeferredNormRows, kHeadDim> q_half_batch;
         TASSIGN(q_half_batch, kUbQkBatchQHalf);
-        TileUbDataND<
-            bfloat16_t,
-            kRunDeferredNormRows,
-            kHeadDim> k_half_batch;
+        TileUbDataND<bfloat16_t, kRunDeferredNormRows, kHeadDim> k_half_batch;
         TASSIGN(k_half_batch, kUbQkBatchKHalf);
         TileUbDataND<float, kRunDeferredNormRows, kHeadDim> q_batch;
         TASSIGN(q_batch, kUbQkCacheTail);
@@ -1605,66 +1493,78 @@ AICORE PTO_INLINE void Run(
         TCVT(k_batch, k_half_batch, RoundMode::CAST_NONE);
         mega_gdn_decode_pto::VectorBarrier();
 
-        NormalizeQkRows<true, kRunDeferredNormRows>(
-            kUbQkCacheTail,
-            kUbQkNormSquare,
-            kUbQkNormReduceTmp,
-            kUbQkNorm,
-            kUbQkNormSqrt);
-        NormalizeQkRows<false, kRunDeferredNormRows>(
-            kUbQkCacheK,
-            kUbQkNormSquare,
-            kUbQkNormReduceTmp,
-            kUbQkNorm,
-            kUbQkNormSqrt);
+        NormalizeQkRows<true, kRunDeferredNormRows>(kUbQkCacheTail,
+                                                    kUbQkNormSquare,
+                                                    kUbQkNormReduceTmp,
+                                                    kUbQkNorm,
+                                                    kUbQkNormSqrt);
+        NormalizeQkRows<false, kRunDeferredNormRows>(kUbQkCacheK,
+                                                     kUbQkNormSquare,
+                                                     kUbQkNormReduceTmp,
+                                                     kUbQkNorm,
+                                                     kUbQkNormSqrt);
         // Q/K normalization scratch aliases the incoming SSM state buffer.
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID5);
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID5);
       }
     }
 #endif
-    const int32_t read_slot = *(read_state_indices_handle + batch_idx);
-    const int32_t write_slot = *(write_state_indices_handle + batch_idx);
+    const int32_t read_slot =
+        *(read_state_indices_handle + batch_idx * state_index_width +
+          state_index_width - 1);
+    const int32_t write_slot =
+        *(write_state_indices_handle + batch_idx * state_index_width +
+          state_index_width - 1);
+    if (read_slot < 0 || write_slot < 0) {
+      TileUbDataND<bfloat16_t, 1, 128> zero_output;
+      TASSIGN(zero_output, kUbOutputHalf);
+      TEXPANDS(zero_output, static_cast<bfloat16_t>(0));
+      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
+      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
+      for (int32_t token_idx = 0; token_idx < sequence_length; ++token_idx) {
+        StoreBf16Row(out_handle +
+                         (batch_idx * sequence_length + token_idx) * v_width +
+                         head_idx * kHeadDim,
+                     kUbOutputHalf);
+      }
+      set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+      wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+      continue;
+    }
     const int32_t accepted =
-        *(num_accepted_tokens_handle + batch_idx);
+        sequence_length == 1 ? 1 : *(num_accepted_tokens_handle + batch_idx);
     LoadInitialState(ssm_state_handle,
                      norm_weight_handle,
                      a_log_handle,
                      dt_bias_handle,
                      read_slot,
                      accepted,
-                     sequence_length,
+                     state_index_width == 2 ? 1 : sequence_length,
                      ssm_checkpoint_stride,
                      head_idx,
                      load_norm_weight);
 
-    for (int32_t token_idx = 0; token_idx < sequence_length;
-         ++token_idx) {
+    for (int32_t token_idx = 0; token_idx < sequence_length; ++token_idx) {
       if constexpr (kUseTokenIoPipeline<SpeculativeTokens>) {
         if (token_idx == 0) {
           const int32_t conv_token_offset =
               batch_idx * sequence_length * conv_dim;
           if constexpr (!UseQkGroupCache) {
             LoadQkBf16Rows(
-                conv_out_handle +
-                    conv_token_offset + qk_head_idx * kHeadDim,
+                conv_out_handle + conv_token_offset + qk_head_idx * kHeadDim,
                 kUbQHalf,
                 num_k_heads * kHeadDim);
           }
-          LoadBf16Row(
-              conv_out_handle +
-                  conv_token_offset + 2 * num_k_heads * kHeadDim +
-                  head_idx * kHeadDim,
-              kUbVHalf);
+          LoadBf16Row(conv_out_handle + conv_token_offset +
+                          2 * num_k_heads * kHeadDim + head_idx * kHeadDim,
+                      kUbVHalf);
           const int32_t scalar_offset =
               batch_idx * sequence_length * num_v_heads + head_idx;
           LoadBf16Scalar(a_handle + scalar_offset, kUbAHalf);
           LoadBf16Scalar(b_handle + scalar_offset, kUbBHalf);
-          LoadBf16Row(
-              z_handle +
-                  batch_idx * sequence_length * v_width +
-                  head_idx * kHeadDim,
-              kUbZHalf);
+          LoadBf16Row(z_handle + batch_idx * sequence_length * v_width +
+                          head_idx * kHeadDim,
+                      kUbZHalf);
           set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
         }
       } else {
@@ -1672,30 +1572,23 @@ AICORE PTO_INLINE void Run(
             (batch_idx * sequence_length + token_idx) * conv_dim;
         if constexpr (!UseQkGroupCache) {
           LoadBf16Row(
-              conv_out_handle +
-                  conv_token_offset + qk_head_idx * kHeadDim,
+              conv_out_handle + conv_token_offset + qk_head_idx * kHeadDim,
               kUbQHalf);
-          LoadBf16Row(
-              conv_out_handle +
-                  conv_token_offset + num_k_heads * kHeadDim +
-                  qk_head_idx * kHeadDim,
-              kUbKHalf);
+          LoadBf16Row(conv_out_handle + conv_token_offset +
+                          num_k_heads * kHeadDim + qk_head_idx * kHeadDim,
+                      kUbKHalf);
         }
-        LoadBf16Row(
-            conv_out_handle +
-                conv_token_offset + 2 * num_k_heads * kHeadDim +
-                head_idx * kHeadDim,
-            kUbVHalf);
+        LoadBf16Row(conv_out_handle + conv_token_offset +
+                        2 * num_k_heads * kHeadDim + head_idx * kHeadDim,
+                    kUbVHalf);
         const int32_t scalar_offset =
-            (batch_idx * sequence_length + token_idx) * num_v_heads +
-            head_idx;
+            (batch_idx * sequence_length + token_idx) * num_v_heads + head_idx;
         LoadBf16Scalar(a_handle + scalar_offset, kUbAHalf);
         LoadBf16Scalar(b_handle + scalar_offset, kUbBHalf);
-        LoadBf16Row(
-            z_handle +
-                (batch_idx * sequence_length + token_idx) * v_width +
-                head_idx * kHeadDim,
-            kUbZHalf);
+        LoadBf16Row(z_handle +
+                        (batch_idx * sequence_length + token_idx) * v_width +
+                        head_idx * kHeadDim,
+                    kUbZHalf);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
       }
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
@@ -1707,10 +1600,8 @@ AICORE PTO_INLINE void Run(
       TCVT(v_fp32, v_half, RoundMode::CAST_NONE);
       if constexpr (UseDeferredNorm) {
         TileUbDataND<bfloat16_t, 1, kHeadDim> cached_z_half;
-        TASSIGN(
-            cached_z_half,
-            kRunDeferredZHalf +
-                token_idx * kHeadDim * sizeof(bfloat16_t));
+        TASSIGN(cached_z_half,
+                kRunDeferredZHalf + token_idx * kHeadDim * sizeof(bfloat16_t));
         TMOV(cached_z_half, z_half);
       } else {
         TCVT(z_fp32, z_half, RoundMode::CAST_NONE);
@@ -1726,28 +1617,22 @@ AICORE PTO_INLINE void Run(
           const int32_t next_conv_token_offset =
               (batch_idx * sequence_length + next_token_idx) * conv_dim;
           if constexpr (!UseQkGroupCache) {
-            LoadQkBf16Rows(
-                conv_out_handle +
-                    next_conv_token_offset + qk_head_idx * kHeadDim,
-                kUbQHalf,
-                num_k_heads * kHeadDim);
+            LoadQkBf16Rows(conv_out_handle + next_conv_token_offset +
+                               qk_head_idx * kHeadDim,
+                           kUbQHalf,
+                           num_k_heads * kHeadDim);
           }
-          LoadBf16Row(
-              conv_out_handle +
-                  next_conv_token_offset +
-                  2 * num_k_heads * kHeadDim +
-                  head_idx * kHeadDim,
-              kUbVHalf);
+          LoadBf16Row(conv_out_handle + next_conv_token_offset +
+                          2 * num_k_heads * kHeadDim + head_idx * kHeadDim,
+                      kUbVHalf);
           const int32_t next_scalar_offset =
-              (batch_idx * sequence_length + next_token_idx) *
-                  num_v_heads +
+              (batch_idx * sequence_length + next_token_idx) * num_v_heads +
               head_idx;
           LoadBf16Scalar(a_handle + next_scalar_offset, kUbAHalf);
           LoadBf16Scalar(b_handle + next_scalar_offset, kUbBHalf);
           LoadBf16Row(
               z_handle +
-                  (batch_idx * sequence_length + next_token_idx) *
-                      v_width +
+                  (batch_idx * sequence_length + next_token_idx) * v_width +
                   head_idx * kHeadDim,
               kUbZHalf);
           set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
@@ -1763,23 +1648,16 @@ AICORE PTO_INLINE void Run(
       int32_t q_token_address = kUbQ;
       int32_t k_token_address = kUbK;
       if constexpr (UseQkGroupCache) {
-        q_token_address =
-            kUbQkCacheTail +
-            token_idx * kHeadDim * sizeof(float);
-        k_token_address =
-            kUbQkCacheK +
-            token_idx * kHeadDim * sizeof(float);
+        q_token_address = kUbQkCacheTail + token_idx * kHeadDim * sizeof(float);
+        k_token_address = kUbQkCacheK + token_idx * kHeadDim * sizeof(float);
       }
       const int32_t deferred_readout_address =
-          kRunDeferredReadoutHalf +
-          token_idx * kHeadDim * sizeof(bfloat16_t);
+          kRunDeferredReadoutHalf + token_idx * kHeadDim * sizeof(bfloat16_t);
       RunRecurrentStep<UseDeferredNorm, FlaSsmStateLayout, UseRegBase>(
-          q_token_address,
-          k_token_address,
-          deferred_readout_address);
+          q_token_address, k_token_address, deferred_readout_address);
       WriteCheckpoint(ssm_state_out_handle,
                       write_slot,
-                      sequence_length,
+                      state_index_width == 2 ? 1 : sequence_length,
                       ssm_checkpoint_stride,
                       head_idx,
                       token_idx);
@@ -1795,18 +1673,14 @@ AICORE PTO_INLINE void Run(
 
     if constexpr (UseDeferredNorm) {
       RunDeferredNorm<kRunDeferredNormRows, UseQkGroupCache>(
-          out_handle,
-          batch_idx,
-          head_idx,
-          sequence_length,
-          v_width);
+          out_handle, batch_idx, head_idx, sequence_length, v_width);
     }
   }
 #endif
 
   // Keep persistent-state publication separate from the Conv-to-GDN hand-off
-  // barrier. Reusing one device flag for both phases can mix barrier generations
-  // under graph replay.
+  // barrier. Reusing one device flag for both phases can mix barrier
+  // generations under graph replay.
 #if defined(PTO_NPU_ARCH_A5)
   SyncAllMixA5();
 #elif defined(__DAV_VEC__) || defined(__DAV_C220_VEC__)

@@ -59,48 +59,33 @@ __aicore__ inline int32_t RoundUp(int32_t num) {
 }
 
 __aicore__ inline void SetGatherMaskPattern(
-    const LocalTensor<uint32_t>& maskPattern) {
-  for (uint32_t i = 0; i < 16; i++) {
-    for (uint32_t word = 0; word < 8; ++word) {
-      const uint32_t firstColumn = (i + word * 2) % 16;
-      const uint32_t secondColumn = (firstColumn + 1) % 16;
-      maskPattern.SetValue(i * 8 + word,
-                           (ONE << firstColumn) | (ONE << (16 + secondColumn)));
-    }
+    const LocalTensor<uint32_t>& mask_pattern,
+    uint32_t rows) {
+  for (uint32_t row = 0; row < rows; ++row) {
+    Duplicate(mask_pattern[row * MASK_PATTERN_REPEAT_SIZE],
+              ONE << (row % MASK_PATTERN_DIM_SIZE),
+              MASK_PATTERN_REPEAT_SIZE);
   }
-  const event_t eventId =
-      static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
-  SetFlag<HardEvent::S_V>(eventId);
-  WaitFlag<HardEvent::S_V>(eventId);
+  PipeBarrier<PIPE_V>();
 }
 
 __aicore__ inline void GatherMaskByDiagonal(
     const LocalTensor<float>& output,
     const LocalTensor<float>& input,
-    const LocalTensor<uint32_t> maskPattern,
-    uint16_t dim0) {
-  uint32_t totalCount = MASK_PATTERN_DIM_SIZE * MASK_PATTERN_DIM_SIZE;
-  uint32_t remainCount = (dim0 % MASK_PATTERN_DIM_SIZE) * MASK_PATTERN_DIM_SIZE;
-  uint32_t loopCount = dim0 / MASK_PATTERN_DIM_SIZE;
-  uint64_t rsvdCnt = 0;
-  for (uint32_t loopIdx = 0; loopIdx < loopCount; loopIdx++) {
-    GatherMask(output[loopIdx * MASK_PATTERN_DIM_SIZE],
-               input[loopIdx * totalCount],
-               maskPattern,
-               true,
-               totalCount,
-               {1, 1, 8, 8},
-               rsvdCnt);
-  }
-  if (remainCount != 0) {
-    GatherMask(output[loopCount * MASK_PATTERN_DIM_SIZE],
-               input[loopCount * totalCount],
-               maskPattern,
-               true,
-               remainCount,
-               {1, 1, 8, 8},
-               rsvdCnt);
-  }
+    const LocalTensor<uint32_t>& mask_pattern,
+    uint16_t rows,
+    uint16_t diagonal_offset) {
+  // Each source row contains sixteen adjacent diagonal candidates. A cyclic
+  // pattern per row keeps the source and destination operands aligned.
+  uint64_t reserved_count = 0;
+  GatherMask(output,
+             input,
+             mask_pattern[(diagonal_offset % MASK_PATTERN_DIM_SIZE) *
+                          MASK_PATTERN_REPEAT_SIZE],
+             true,
+             MASK_PATTERN_DIM_SIZE,
+             {1, rows, 2, 1},
+             reserved_count);
   PipeBarrier<PIPE_V>();
 }
 
@@ -639,6 +624,54 @@ __aicore__ void inline ProcessY(const LocalTensor<T>& yLocal,
                                 const uint32_t dim1,
                                 const uint32_t dim2,
                                 const uint32_t mixRowStride) {
+  if (dim1 == 4) {
+    // Match the four-stream collapse: retain the accumulator through each
+    // multiply-add instead of rounding four products before the reduction.
+    CastTwoDim(xCastLocal, xLocal, dim0 * dim1, dim2);
+    const uint32_t hidden_stride = RoundUp<float>(dim2);
+    BinaryRepeatParams params;
+    params.dstBlkStride = 1;
+    params.src0BlkStride = 1;
+    params.src1BlkStride = 0;
+    params.dstRepStride = DEFAULT_REPEAT_STRIDE;
+    params.src0RepStride = DEFAULT_REPEAT_STRIDE;
+    params.src1RepStride = 0;
+    const bool packed_mix = mixRowStride == 4;
+    if (packed_mix) {
+      Brcb(hcBrcbLocal1,
+           mix01Local,
+           CeilDiv(dim0 * 4, 8),
+           {DEFAULT_BLOCK_STRIDE, DEFAULT_REPEAT_STRIDE});
+      PipeBarrier<PIPE_V>();
+    }
+    for (uint32_t row = 0; row < dim0; ++row) {
+      if (!packed_mix) {
+        Brcb(hcBrcbLocal1,
+             mix01Local[row * mixRowStride],
+             1,
+             {DEFAULT_BLOCK_STRIDE, DEFAULT_REPEAT_STRIDE});
+        PipeBarrier<PIPE_V>();
+      }
+      for (uint32_t stream = 0; stream < 4; ++stream) {
+        for (uint32_t offset = 0; offset < dim2; offset += 64) {
+          const uint32_t remaining = dim2 - offset;
+          const uint64_t count = remaining < 64 ? remaining : 64;
+          auto destination = yCastLocal[row * hidden_stride + offset];
+          auto source = xCastLocal[(row * 4 + stream) * hidden_stride + offset];
+          auto weight =
+              hcBrcbLocal1[(packed_mix ? row * 4 * 8 : 0) + stream * 8];
+          if (stream == 0) {
+            Mul(destination, source, weight, count, 1, params);
+          } else {
+            MulAddDst(destination, source, weight, count, 1, params);
+          }
+        }
+        PipeBarrier<PIPE_V>();
+      }
+    }
+    CastTwoDim(yLocal, yCastLocal, dim0, dim2);
+    return;
+  }
   CastTwoDim(xCastLocal, xLocal, dim0 * dim1, dim2);
   if (mixRowStride == dim1) {
     MulABLastDimBrcInline<float, true>(

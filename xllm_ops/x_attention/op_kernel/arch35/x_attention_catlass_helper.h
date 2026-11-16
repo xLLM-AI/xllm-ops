@@ -19,7 +19,7 @@ limitations under the License.
 #include "unshared_infer_catlass_kernel.h"
 #include "combine_kernel.h"
 
-template <typename INPUT_T, typename KVLEN_T>
+template <typename INPUT_T, typename KVLEN_T, bool SHARED_PAGED>
 CATLASS_DEVICE void CallSharedInferKernel(const XAttnKernelCommonParams& params, XAttentionTilingData* tilingData) {
     using ArchTag = Arch::Ascend950;
     using ElementQ = INPUT_T;
@@ -63,13 +63,13 @@ CATLASS_DEVICE void CallSharedInferKernel(const XAttnKernelCommonParams& params,
     using EpilogueRescaleO = Epilogue::Block::BlockEpilogue<DispatchPolicyRescaleO, L1TileShape, OTmpType>;
     
     using SharedFAInferKernel = SharedFaInferKernel<
-            BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO, KVLEN_T>;
+            BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO, KVLEN_T, SHARED_PAGED>;
 
     SharedFAInferKernel sharedInferKernel(tilingData);
     sharedInferKernel(params);
 }
 
-template <typename INPUT_T, typename KVLEN_T, typename TABLE_T>
+template <typename INPUT_T, typename KVLEN_T, typename TABLE_T, bool UNSHARED_PAGED>
 CATLASS_DEVICE void CallUnsharedInferKernel(const XAttnKernelCommonParams& params, XAttentionTilingData* tilingData) {
     using ArchTag = Arch::Ascend950;
     using ElementQ = INPUT_T;
@@ -108,7 +108,7 @@ CATLASS_DEVICE void CallUnsharedInferKernel(const XAttnKernelCommonParams& param
     using BlockMmadPV = Gemm::Block::BlockMmadTla<DispatchPolicyPV, L1TileShape, L0TileShape, ElementP, ElementV, ElementOTmp, void, TileCopyPV, TileMmadPV>;
 
     using UnSharedInferKernel = UnSharedInferKernel<
-            BlockMmadQK, BlockMmadPV, EpilogueSoftmax, KVLEN_T, TABLE_T>;
+            BlockMmadQK, BlockMmadPV, EpilogueSoftmax, KVLEN_T, TABLE_T, UNSHARED_PAGED>;
     
     UnSharedInferKernel unsharedInferKernel(tilingData);
     unsharedInferKernel(params);

@@ -50,6 +50,7 @@ struct ShapeInfo {
   int64_t num_k_heads = 0;
   int64_t num_v_heads = 0;
   int64_t conv_tile_count = 0;
+  int64_t state_index_width = 1;
 };
 
 bool IsSupportedHeadGeometry(int64_t num_k_heads, int64_t num_v_heads) {
@@ -62,8 +63,7 @@ bool IsSupportedHeadGeometry(int64_t num_k_heads, int64_t num_v_heads) {
   return v_heads_per_k >= 1 && v_heads_per_k <= 4;
 }
 
-bool HasShape(const gert::Shape& shape,
-              std::initializer_list<int64_t> dims) {
+bool HasShape(const gert::Shape& shape, std::initializer_list<int64_t> dims) {
   if (shape.GetDimNum() != dims.size()) {
     return false;
   }
@@ -76,13 +76,20 @@ bool HasShape(const gert::Shape& shape,
   return true;
 }
 
-ge::graphStatus GetShapeInfo(gert::TilingContext* context,
-                             ShapeInfo& info) {
-  constexpr std::array<size_t, 13> kRequiredInputs = {
-      kQkv,          kZ,          kB,       kA,       kConvWeight,
-      kConvState,    kALog,       kDtBias,  kSsmState,
-      kReadStateIndices, kWriteStateIndices, kNumAcceptedTokens,
-      kNormWeight};
+ge::graphStatus GetShapeInfo(gert::TilingContext* context, ShapeInfo& info) {
+  constexpr std::array<size_t, 13> kRequiredInputs = {kQkv,
+                                                      kZ,
+                                                      kB,
+                                                      kA,
+                                                      kConvWeight,
+                                                      kConvState,
+                                                      kALog,
+                                                      kDtBias,
+                                                      kSsmState,
+                                                      kReadStateIndices,
+                                                      kWriteStateIndices,
+                                                      kNumAcceptedTokens,
+                                                      kNormWeight};
   for (const size_t index : kRequiredInputs) {
     if (context->GetInputShape(index) == nullptr ||
         context->GetInputDesc(index) == nullptr) {
@@ -90,8 +97,7 @@ ge::graphStatus GetShapeInfo(gert::TilingContext* context,
     }
   }
 
-  const gert::Shape& qkv =
-      context->GetInputShape(kQkv)->GetStorageShape();
+  const gert::Shape& qkv = context->GetInputShape(kQkv)->GetStorageShape();
   const gert::Shape& z = context->GetInputShape(kZ)->GetStorageShape();
   const gert::Shape& b = context->GetInputShape(kB)->GetStorageShape();
   const gert::Shape& a = context->GetInputShape(kA)->GetStorageShape();
@@ -99,8 +105,7 @@ ge::graphStatus GetShapeInfo(gert::TilingContext* context,
       context->GetInputShape(kConvWeight)->GetStorageShape();
   const gert::Shape& conv_state =
       context->GetInputShape(kConvState)->GetStorageShape();
-  const gert::Shape& a_log =
-      context->GetInputShape(kALog)->GetStorageShape();
+  const gert::Shape& a_log = context->GetInputShape(kALog)->GetStorageShape();
   const gert::Shape& dt_bias =
       context->GetInputShape(kDtBias)->GetStorageShape();
   const gert::Shape& ssm_state =
@@ -114,17 +119,22 @@ ge::graphStatus GetShapeInfo(gert::TilingContext* context,
   const gert::Shape& norm_weight =
       context->GetInputShape(kNormWeight)->GetStorageShape();
 
-  if (qkv.GetDimNum() != 3 || z.GetDimNum() != 4 ||
-      b.GetDimNum() != 3 || a.GetDimNum() != 3 ||
-      conv_weight.GetDimNum() != 2 || conv_state.GetDimNum() != 3 ||
-      a_log.GetDimNum() != 1 || dt_bias.GetDimNum() != 1 ||
-      ssm_state.GetDimNum() != 4 || read_indices.GetDimNum() != 1 ||
-      write_indices.GetDimNum() != 1 || accepted.GetDimNum() != 1 ||
-      norm_weight.GetDimNum() != 1) {
+  if (qkv.GetDimNum() != 3 || z.GetDimNum() != 4 || b.GetDimNum() != 3 ||
+      a.GetDimNum() != 3 || conv_weight.GetDimNum() != 2 ||
+      conv_state.GetDimNum() != 3 || a_log.GetDimNum() != 1 ||
+      dt_bias.GetDimNum() != 1 || ssm_state.GetDimNum() != 4 ||
+      accepted.GetDimNum() != 1 || norm_weight.GetDimNum() != 1) {
     return ge::GRAPH_FAILED;
   }
 
   info.batch_size = qkv.GetDim(0);
+  info.state_index_width = read_indices.GetDimNum() == 2 ? 2 : 1;
+  const bool split_indices = info.state_index_width == 2;
+  const bool valid_indices =
+      split_indices ? HasShape(read_indices, {info.batch_size, 2}) &&
+                          HasShape(write_indices, {info.batch_size, 2})
+                    : HasShape(read_indices, {info.batch_size}) &&
+                          HasShape(write_indices, {info.batch_size});
   info.sequence_length = qkv.GetDim(1);
   const int64_t conv_dim = qkv.GetDim(2);
   info.speculative_tokens = info.sequence_length - 1;
@@ -142,24 +152,21 @@ ge::graphStatus GetShapeInfo(gert::TilingContext* context,
                  info.sequence_length,
                  info.num_v_heads,
                  kHeadDim}) ||
-      !HasShape(b,
-                {info.batch_size, info.sequence_length, info.num_v_heads}) ||
-      !HasShape(a,
-                {info.batch_size, info.sequence_length, info.num_v_heads}) ||
-      !HasShape(conv_weight, {4, conv_dim}) ||
-      conv_state.GetDim(0) < 1 ||
-      conv_state.GetDim(0) > kMaxNumCacheSlots ||
+      !HasShape(b, {info.batch_size, info.sequence_length, info.num_v_heads}) ||
+      !HasShape(a, {info.batch_size, info.sequence_length, info.num_v_heads}) ||
+      !HasShape(conv_weight, {4, conv_dim}) || conv_state.GetDim(0) < 1 ||
+      (!split_indices && conv_state.GetDim(0) > kMaxNumCacheSlots) ||
       !HasShape(conv_state,
                 {conv_state.GetDim(0), info.conv_state_length, conv_dim}) ||
       !HasShape(a_log, {info.num_v_heads}) ||
       !HasShape(dt_bias, {info.num_v_heads}) ||
       !HasShape(ssm_state,
-                {conv_state.GetDim(0) * info.sequence_length,
+                {split_indices ? ssm_state.GetDim(0)
+                               : conv_state.GetDim(0) * info.sequence_length,
                  info.num_v_heads,
                  kHeadDim,
                  kHeadDim}) ||
-      !HasShape(read_indices, {info.batch_size}) ||
-      !HasShape(write_indices, {info.batch_size}) ||
+      !valid_indices || ssm_state.GetDim(0) < 1 ||
       !HasShape(accepted, {info.batch_size}) ||
       !HasShape(norm_weight, {kHeadDim})) {
     return ge::GRAPH_FAILED;
@@ -189,15 +196,13 @@ uint64_t GetTilingKey(int64_t speculative_tokens) {
 
 }  // namespace
 
-static ge::graphStatus MegaGdnMtpDecodeTiling(
-    gert::TilingContext* context) {
+static ge::graphStatus MegaGdnMtpDecodeTiling(gert::TilingContext* context) {
   ShapeInfo info;
   if (GetShapeInfo(context, info) != ge::GRAPH_SUCCESS) {
     return ge::GRAPH_FAILED;
   }
 
-  auto platform =
-      platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+  auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
   uint64_t ub_size = 0;
   platform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ub_size);
   if (ub_size < kRequiredUbBytes) {
@@ -207,16 +212,14 @@ static ge::graphStatus MegaGdnMtpDecodeTiling(
   const uint32_t aiv_core_count = platform.GetCoreNumAiv();
   const auto* attrs = context->GetAttrs();
   const bool* fla_ssm_state_layout =
-      attrs == nullptr
-          ? nullptr
-          : attrs->GetAttrPointer<bool>(kFlaSsmStateLayoutAttr);
+      attrs == nullptr ? nullptr
+                       : attrs->GetAttrPointer<bool>(kFlaSsmStateLayoutAttr);
   if (fla_ssm_state_layout == nullptr) {
     return ge::GRAPH_FAILED;
   }
   const uint32_t recurrent_tasks =
       static_cast<uint32_t>(info.batch_size * info.num_v_heads);
-  const uint32_t conv_tasks =
-      static_cast<uint32_t>(info.conv_tile_count);
+  const uint32_t conv_tasks = static_cast<uint32_t>(info.conv_tile_count);
   const bool is_ascend950 =
       platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950;
   const bool is_qk_group_cache_shape =
@@ -224,42 +227,37 @@ static ge::graphStatus MegaGdnMtpDecodeTiling(
       info.num_k_heads == 8 && info.num_v_heads == 24;
   const bool is_a5_two_owner_qk_group_shape =
       (info.speculative_tokens == 3 || info.speculative_tokens == 8) &&
-      info.batch_size == 4 && info.num_k_heads == 8 &&
-      info.num_v_heads == 24;
+      info.batch_size == 4 && info.num_k_heads == 8 && info.num_v_heads == 24;
   const uint32_t qk_group_count =
       static_cast<uint32_t>(info.batch_size * info.num_k_heads);
   const uint32_t a5_mixed_aiv_core_count =
       std::min(aiv_core_count, aic_core_count * kAivPerA5MixedBlock);
   const uint32_t schedulable_aiv_core_count =
       is_ascend950 ? a5_mixed_aiv_core_count : aiv_core_count;
-  const uint32_t min_two_owner_aiv_cores =
-      (recurrent_tasks + 1) / 2;
+  const uint32_t min_two_owner_aiv_cores = (recurrent_tasks + 1) / 2;
   const uint32_t max_useful_two_owner_aiv_cores = 2 * qk_group_count;
   const bool use_a5_two_owner_qk_group =
-      *fla_ssm_state_layout && is_ascend950 &&
-      is_a5_two_owner_qk_group_shape &&
+      *fla_ssm_state_layout && is_ascend950 && is_a5_two_owner_qk_group_shape &&
       schedulable_aiv_core_count >= min_two_owner_aiv_cores &&
       ub_size >= kQkGroupCacheRequiredUbBytes;
   const uint32_t recurrent_dispatch_tasks =
       use_a5_two_owner_qk_group
           ? std::min(recurrent_tasks, max_useful_two_owner_aiv_cores)
           : recurrent_tasks;
-  const uint32_t task_count =
-      std::max(conv_tasks, recurrent_dispatch_tasks);
+  const uint32_t task_count = std::max(conv_tasks, recurrent_dispatch_tasks);
   const uint32_t used_aiv_cores =
       std::min(task_count, schedulable_aiv_core_count);
   const uint32_t block_dim =
       is_ascend950
-          ? (used_aiv_cores + kAivPerA5MixedBlock - 1) /
-                kAivPerA5MixedBlock
+          ? (used_aiv_cores + kAivPerA5MixedBlock - 1) / kAivPerA5MixedBlock
           : platform.CalcTschBlockDim(
                 used_aiv_cores, aic_core_count, aiv_core_count);
   if (block_dim == 0) {
     return ge::GRAPH_FAILED;
   }
-  const uint32_t launched_aiv_cores =
-      is_ascend950 ? block_dim * kAivPerA5MixedBlock
-                   : block_dim * kAivPerA2A3MixedBlock;
+  const uint32_t launched_aiv_cores = is_ascend950
+                                          ? block_dim * kAivPerA5MixedBlock
+                                          : block_dim * kAivPerA2A3MixedBlock;
   const bool use_qk_group_cache =
       *fla_ssm_state_layout && is_qk_group_cache_shape &&
       launched_aiv_cores >= kQkGroupCacheRequiredAivCores &&
@@ -301,6 +299,7 @@ static ge::graphStatus MegaGdnMtpDecodeTiling(
 
   MegaGdnMtpDecodeTilingData tiling;
   tiling.set_batch_size(info.batch_size);
+  tiling.set_state_index_width(info.state_index_width);
   tiling.set_sequence_length(info.sequence_length);
   tiling.set_num_k_heads(info.num_k_heads);
   tiling.set_num_v_heads(info.num_v_heads);
@@ -320,7 +319,6 @@ static ge::graphStatus MegaGdnMtpDecodeTiling(
   return ge::GRAPH_SUCCESS;
 }
 
-
 }  // namespace optiling
 
-} // namespace gdn_a5_backend
+}  // namespace gdn_a5_backend

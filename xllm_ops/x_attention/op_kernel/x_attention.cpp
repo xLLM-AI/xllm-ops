@@ -66,13 +66,28 @@ extern "C" __global__ __aicore__ void x_attention(GM_ADDR query, GM_ADDR shared_
      shared_block_table, unshared_block_table, shared_kv_lens, decode_step, sharedO, sharedMax, sharedSum, unsharedO, unsharedMax,
      unsharedSum, attn_out, tiling};
 
-    if (coreIdx < tiling_data.sharedInfo.usedCoreNum) {
-        CallSharedInferKernel<DTYPE_QUERY, DTYPE_SHARED_KV_LENS>(params, &tiling_data);
-    } else {
-        CallUnsharedInferKernel<DTYPE_QUERY, DTYPE_SHARED_KV_LENS, DTYPE_UNSHARED_BLOCK_TABLE>(params, &tiling_data);
+    #define CALL_A5_XATTN(INPUT_TYPE, SHARED_PAGED_FLAG, UNSHARED_PAGED_FLAG) \
+        do { \
+            if (coreIdx < tiling_data.sharedInfo.usedCoreNum) { \
+                CallSharedInferKernel<INPUT_TYPE, DTYPE_SHARED_KV_LENS, SHARED_PAGED_FLAG>( \
+                    params, &tiling_data); \
+            } else { \
+                CallUnsharedInferKernel<INPUT_TYPE, DTYPE_SHARED_KV_LENS, DTYPE_UNSHARED_BLOCK_TABLE, \
+                                        UNSHARED_PAGED_FLAG>(params, &tiling_data); \
+            } \
+            AscendC::SyncAll<false>(); \
+            CallCombineScale<INPUT_TYPE>(params, &tiling_data); \
+        } while (0)
+
+    if (TILING_KEY_IS(4)) {
+        CALL_A5_XATTN(half, false, true);
+    } else if (TILING_KEY_IS(6)) {
+        CALL_A5_XATTN(bfloat16_t, false, true);
+    } else if (TILING_KEY_IS(8)) {
+        CALL_A5_XATTN(half, true, false);
+    } else if (TILING_KEY_IS(10)) {
+        CALL_A5_XATTN(bfloat16_t, true, false);
     }
-    AscendC::SyncAll<false>();
-    CallCombineScale<DTYPE_QUERY>(params, &tiling_data);
 #else
     // ===== A3(AtlasA2/A3) path =====
     // workspace use; [s,p,oTemp,oUpdate,shared_workspace,unshared_workspace]
