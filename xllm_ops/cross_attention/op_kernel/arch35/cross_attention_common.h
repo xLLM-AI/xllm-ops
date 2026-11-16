@@ -49,10 +49,12 @@ constexpr uint32_t CA_V_L1_SLOTS = 2;
 // ---- Numeric constants ----
 constexpr float CA_MINV = -3.4e38f;
 constexpr float CA_BIGV = 3.0e38f;
-// Upper clamp for s*scale. m is fixed at the beat 0 block maximum and reused for the whole task, so a
-// later beat can exceed it; the clamp keeps exp() bounded in fp32 and the fp16 result stable after the
-// final l normalisation. Tighten it to 30.0f for a wider margin.
-constexpr float CA_SOFT_CLAMP = 60.0f;
+// Upper clamp span for P. m is the per-row maximum of beat 0 and the clamp is applied after the
+// subtraction, so this bounds exp(s*scale - m) directly. The bound follows the 16-bit representable
+// window of P: fp16 holds [2^-24, 65504], i.e. about [-16.6, +11.09] around m, hence 10 (exp = 22026);
+// bf16 spans about [-92, +88], so 60 (exp = 1.1e26) is kept unchanged.
+constexpr float CA_SOFT_CLAMP_FP16 = 10.0f;
+constexpr float CA_SOFT_CLAMP_BF16 = 60.0f;
 
 // ---- Cross-core flag ids ----
 // AIC and its AIV pair handshake with mode 4 (intra block, AIC<->AIV event registers), one id per sub:
@@ -117,8 +119,13 @@ constexpr uint32_t CA_UB_LSUM = CA_UB_SCAL + 1024;                     // row su
 constexpr uint32_t CA_UB_ML = CA_UB_LSUM + CA_UB_ROWS * 64 * sizeof(float); // merge m/l (2*R per sub)
 // Merge accumulator, used only in the kSeg>1 epilogue and sized for this sub's CA_UB_ROWS rows.
 constexpr uint32_t CA_UB_MRG = CA_UB_ML + 2048;
-// Total UB use is about 140 KB, comfortably inside the 256 KB budget of one sub.
-static_assert(CA_UB_MRG + CA_UB_ROWS * CA_HEAD_DIM * sizeof(float) <= 256u * 1024u, "AIV UB over budget");
+// Per-row softmax maximum: computed once on beat 0 and reused for the whole task. Stored as 64 floats per
+// row so it can be fetched with DIST_BRC_B32, the same layout as the CA_UB_LSUM row sums. Appended at the
+// end of the arena, so no existing address or ring depth moves.
+constexpr uint32_t CA_UB_ROWM = CA_UB_MRG + CA_UB_ROWS * CA_HEAD_DIM * sizeof(float);
+constexpr uint32_t CA_UB_ROWM_BYTES = CA_UB_ROWS * 64 * sizeof(float);
+// Total UB use is about 164 KB, comfortably inside the 256 KB budget of one sub.
+static_assert(CA_UB_ROWM + CA_UB_ROWM_BYTES <= 256u * 1024u, "AIV UB over budget");
 
 __aicore__ inline uint32_t CaCeilDiv(uint32_t a, uint32_t b)
 {
