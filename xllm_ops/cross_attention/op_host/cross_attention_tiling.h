@@ -14,7 +14,6 @@ limitations under the License.
 ==============================================================================*/
 
 #include "register/tilingdata_base.h"
-#include "tiling/tiling_api.h"
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(CrossAttentionTilingData)
@@ -39,17 +38,6 @@ BEGIN_TILING_DATA_DEF(CrossAttentionTilingData)
   TILING_DATA_FIELD_DEF(uint64_t, pOutSize);
   TILING_DATA_FIELD_DEF(uint64_t, mm2OutSize);
   TILING_DATA_FIELD_DEF(uint64_t, wsBlockSizeDb);
-  // r51 (A案 qbmm 直连): host-generated TCubeTiling for the two per-beat
-  // GEMMs, consumed by two AIC Matmul objects. Serialized at tiling offset
-  // 104 (2 x 204B); the AIC copies each member onto its stack via the
-  // generated GET_TILING_DATA_MEMBER macro and hands it to mm.Init - the
-  // official quant_batch_matmul_v3 arch35 cube_on_the_fly direct-connect form.
-  // r52: two members because QK runs SetTensorB(gmK, true) while PV runs
-  // SetTensorB(gmV, false) - the runtime isTransposeB fully drives the GM->L1
-  // load layout and the host transB participates in the GetTiling tiling
-  // computation, so the two GEMMs cannot share one tiling.
-  TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, matmulTiling)
-  TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, matmulPvTiling)
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(CrossAttention, CrossAttentionTilingData)

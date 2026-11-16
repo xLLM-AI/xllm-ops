@@ -16,6 +16,7 @@ limitations under the License.
 #include "cross_attention_tiling.h"
 #include "register/op_def_registry.h"
 #include "tiling/platform/platform_ascendc.h"
+#include <cmath>
 #include <iostream>
 
 #define OP_LOGE(nodeName, fmt, ...) \
