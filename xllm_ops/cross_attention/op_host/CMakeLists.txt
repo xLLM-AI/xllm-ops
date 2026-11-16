@@ -15,26 +15,34 @@ if (BUILD_OPEN_PROJECT)
     )
 endif()
 
-# Ascend950 (arch35 / DAV_3510) builds need the 3510 catlass constants
-# (BYTE_PER_BLK_FP=64, MX_*); the AtlasA2 path keeps 2201.
-string(TOLOWER "${ASCEND_COMPUTE_UNIT}" _CA_UNIT_LOWER)
-if(_CA_UNIT_LOWER MATCHES "ascend950")
-    set(CA_CATLASS_ARCH_DEF "-DCATLASS_ARCH=3510")
-    set(CA_ARCH35_COMPILE_OPTIONS "-DENABLE_CV_COMM_VIA_SSBUF=true")
-else()
-    set(CA_CATLASS_ARCH_DEF "-DCATLASS_ARCH=2201")
-    set(CA_ARCH35_COMPILE_OPTIONS "")
-endif()
-
+# Compile options are grouped per compute unit so that a joint build
+# ("-c ascend910b;ascend950") cannot leak one CATLASS_ARCH into the other kernels.
+# Ascend950 (arch35 / DAV_3510) needs the 3510 catlass constants (BYTE_PER_BLK_FP=64, MX_*) plus the
+# CV channel; the Atlas A2/A3 path keeps 2201.
 add_ops_compile_options(
     OP_NAME CrossAttention
+    COMPUTE_UNIT "ascend910b;ascend910_93"
     OPTIONS --cce-auto-sync=on
             -Wno-deprecated-declarations
             -Werror
             -Wno-error
             -g
-            ${CA_CATLASS_ARCH_DEF}
-            ${CA_ARCH35_COMPILE_OPTIONS}
+            -DCATLASS_ARCH=2201
+            -I${CANN_3RD_LIB_PATH}/catlass/include
+            -I${CMAKE_CURRENT_LIST_DIR}/../third_party/catlass/include
+            -I${CMAKE_CURRENT_LIST_DIR}/../../../
+)
+
+add_ops_compile_options(
+    OP_NAME CrossAttention
+    COMPUTE_UNIT ascend950
+    OPTIONS --cce-auto-sync=on
+            -Wno-deprecated-declarations
+            -Werror
+            -Wno-error
+            -g
+            -DCATLASS_ARCH=3510
+            -DENABLE_CV_COMM_VIA_SSBUF=true
             -I${CANN_3RD_LIB_PATH}/catlass/include
             -I${CMAKE_CURRENT_LIST_DIR}/../third_party/catlass/include
             -I${CMAKE_CURRENT_LIST_DIR}/../../../

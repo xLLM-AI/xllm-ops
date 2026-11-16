@@ -879,7 +879,6 @@ public:
         // Scalar values are read into registers once in Init: feeding a GM value directly as the scalar
         // operand of a vector instruction is unreliable.
         scaleV_ = t->scaleValue;
-        m_ = 0.0f;
         begin_ = 0u;
         nRows_ = 0u;
         pUbSeq_ = 0u;
@@ -1042,22 +1041,25 @@ private:
         }
     }
 
-    // Beat 0 block maximum over the whole tile, with scale and mask applied; the result lands in the
-    // scalar area and is returned.
-    __aicore__ inline float ComputeBlockMax(__local_mem__ float* sPtr)
+    // Beat 0 per-row maximum with scale and mask applied; the result lands in CA_UB_ROWM, one vector per
+    // row, and is broadcast back on every beat. Per row rather than per tile is what keeps P representable:
+    // with a single tile-wide offset, rows sitting more than ~16.6 below the tile maximum underflow to 0 in
+    // fp16, and a later beat exceeding it by more than ~11.1 overflows to inf.
+    __aicore__ inline void ComputeRowMax(__local_mem__ float* sPtr)
     {
         __local_mem__ float* maskPtr = UbF32(CA_UB_MASK);
-        __local_mem__ float* redPtr = UbF32(CA_UB_SCAL + CA_SCAL_RED);
+        __local_mem__ float* rowmPtr = UbF32(CA_UB_ROWM);
         const uint16_t nRows = static_cast<uint16_t>(nRows_);
         const float scale = scaleV_;
         __VEC_SCOPE__
         {
-            Mapi::RegTensor<float> vS0, vS1, vN0, vN1, vAcc, vR;
+            Mapi::RegTensor<float> vS0, vS1, vN0, vN1, vR;
             uint32_t cFull = 64u;
             Mapi::MaskReg mFull = Mapi::UpdateMask<float>(cFull);
+            // The mask row holds CA_BIGV/CA_MINV here: valid columns pass through, invalid ones collapse to
+            // CA_MINV and never win the maximum
             Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vN0, maskPtr);
             Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vN1, maskPtr + 64);
-            Mapi::Duplicate(vAcc, CA_MINV, mFull);
             for (uint16_t r = 0; r < nRows; ++r) {
                 const uint32_t ro = static_cast<uint32_t>(r) * CA_HEAD_DIM;
                 Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vS0, sPtr + ro);
@@ -1066,27 +1068,32 @@ private:
                 Mapi::Muls(vS1, vS1, scale, mFull);
                 Mapi::Min(vS0, vS0, vN0, mFull);
                 Mapi::Min(vS1, vS1, vN1, mFull);
-                Mapi::Max(vAcc, vAcc, vS0, mFull);
-                Mapi::Max(vAcc, vAcc, vS1, mFull);
+                Mapi::Max(vS0, vS0, vS1, mFull);
+                Mapi::ReduceMax(vR, vS0, mFull);
+                Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(rowmPtr + static_cast<uint32_t>(r) * 64, vR, mFull);
             }
-            Mapi::ReduceMax(vR, vAcc, mFull);
-            Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(redPtr, vR, mFull);
         }
         SetFlag<HardEvent::V_S>(EVENT_ID0);
         WaitFlag<HardEvent::V_S>(EVENT_ID0);
-        LocalTensor<float> red = UbF32Tensor(CA_UB_SCAL + CA_SCAL_RED, 64);
-        const float mv = red.GetValue(0);
-        return (mv > CA_MINV) ? mv : 0.0f;
     }
 
-    // One softmax beat: exp(s*scale - m) accumulated into l and cast to T into the P UB buffer
+    // Upper clamp span for this dtype: the largest exp argument, relative to a row's own m, that still fits P.
+    __aicore__ inline float SoftClampV() const
+    {
+        return AscendC::IsSameType<T, half>::value ? CA_SOFT_CLAMP_FP16 : CA_SOFT_CLAMP_BF16;
+    }
+
+    // One softmax beat: exp(s*scale - m_row) accumulated into l and cast to T into the P UB buffer.
+    // The subtraction uses each row's own m (broadcast from CA_UB_ROWM) and the mask Min runs afterwards, so
+    // that single Min both masks the tail block (invalid columns become CA_MINV, exp = 0) and clamps the
+    // result into the 16-bit window of P.
     __aicore__ inline void SoftmaxRows(__local_mem__ float* sPtr, uint32_t pseq)
     {
         __local_mem__ float* laccPtr = UbF32(CA_UB_LACC);
         __local_mem__ float* maskPtr = UbF32(CA_UB_MASK);
+        __local_mem__ float* rowmPtr = UbF32(CA_UB_ROWM);
         __local_mem__ T* pPtr = UbT(CA_UB_P + (pseq % CA_P_UB_SLOTS) * CA_UB_P_SLOT_BYTES);
         const uint16_t nRows = static_cast<uint16_t>(nRows_);
-        const float mSub = m_;
         const float scale = scaleV_;
         __VEC_SCOPE__
         {
@@ -1094,7 +1101,6 @@ private:
             Mapi::RegTensor<T> vT0, vT1;
             uint32_t cFull = 64u;
             Mapi::MaskReg mFull = Mapi::UpdateMask<float>(cFull);
-            Mapi::Duplicate(vM, mSub, mFull);
             Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vN0, maskPtr);
             Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vN1, maskPtr + 64);
             for (uint16_t r = 0; r < nRows; ++r) {
@@ -1103,11 +1109,12 @@ private:
                 Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vS1, sPtr + ro + 64);
                 Mapi::Muls(vS0, vS0, scale, mFull);
                 Mapi::Muls(vS1, vS1, scale, mFull);
-                // A single Min handles both the tail mask and the overflow clamp
-                Mapi::Min(vS0, vS0, vN0, mFull);
-                Mapi::Min(vS1, vS1, vN1, mFull);
+                // One broadcast load per row is the only extra instruction versus a tile-wide m
+                Mapi::DataCopy<float, Mapi::LoadDist::DIST_BRC_B32>(vM, rowmPtr + static_cast<uint32_t>(r) * 64);
                 Mapi::Sub(vS0, vS0, vM, mFull);
                 Mapi::Sub(vS1, vS1, vM, mFull);
+                Mapi::Min(vS0, vS0, vN0, mFull);
+                Mapi::Min(vS1, vS1, vN1, mFull);
                 Mapi::Exp(vS0, vS0, mFull);
                 Mapi::Exp(vS1, vS1, mFull);
                 Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vL0, laccPtr + ro);
@@ -1209,12 +1216,13 @@ private:
 
         if (nRows_ != 0u) {
             if (beat == 0u) {
-                // m is computed once per task on the first beat: block maximum plus mask, invalid columns excluded
+                // m is computed once per task on the first beat: per-row maximum plus mask (invalid columns
+                // are set to CA_BIGV so they stay out of it)
                 BuildMaskRow(nReal, CA_BIGV);
-                m_ = ComputeBlockMax(sPtr);
+                ComputeRowMax(sPtr);
             }
-            // Valid columns are clamped to m+CA_SOFT_CLAMP, invalid ones are set to CA_MINV
-            BuildMaskRow(nReal, m_ + CA_SOFT_CLAMP);
+            // Valid columns are clamped to this dtype's P window, invalid ones are set to CA_MINV
+            BuildMaskRow(nReal, SoftClampV());
             // The MTE3 of the previous round must finish reading the P slot this beat writes (the credit was set
             // CA_P_UB_SLOTS beats earlier)
             if (pseq >= CA_P_UB_SLOTS) {
@@ -1378,8 +1386,16 @@ private:
     {
         LocalTensor<float> mL = UbF32Tensor(CA_UB_ML, 2 * CA_MAX_R);
         LocalTensor<float> lsum = UbF32Tensor(CA_UB_LSUM, CA_UB_ROWS * 64);
+        // Per-row m comes from this sub's CA_UB_ROWM, written on beat 0 and untouched for the rest of the task
+        LocalTensor<float> rowm = UbF32Tensor(CA_UB_ROWM, CA_UB_ROWS * 64);
+        SetFlag<HardEvent::V_S>(EVENT_ID0);
+        WaitFlag<HardEvent::V_S>(EVENT_ID0);
         for (uint32_t r = 0; r < CA_MAX_R; ++r) {
-            mL.SetValue(r, m_); // m
+            float mv = CA_MINV;
+            if (r >= begin_ && (r - begin_) < nRows_) {
+                mv = rowm.GetValue((r - begin_) * 64);
+            }
+            mL.SetValue(r, mv); // m: per row, the kSeg>1 merge keeps the group maximum
             float lv = 0.0f;
             if (r >= begin_ && (r - begin_) < nRows_) {
                 lv = lsum.GetValue((r - begin_) * 64);
@@ -1521,7 +1537,6 @@ private:
     uint32_t begin_;
     uint32_t nRows_;
     float scaleV_;
-    float m_;
     uint32_t effSeg_;  // effective segment count from the actual kvLen (1 = no merge)
     // P UB double-slot credit: event ids 2/3 keep it separate from the OUTPUT buffer's MTE3_V (EVENT_ID0).
     // Set and Wait on one id must alternate strictly, so the slot index uses the continuous pUbSeq_
