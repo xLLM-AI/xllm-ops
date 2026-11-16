@@ -90,13 +90,15 @@ struct CaTaskDesc {
     uint32_t batchIdx;
     uint32_t kvHeadIdx;
     uint32_t qRowTileIdx;
+    uint32_t gTileIdx;  // head tile inside the group (always 0 when groupSize <= 16)
     uint32_t kvSegIdx;
     uint32_t nQ;      // q rows actually covered by this tile
-    uint32_t rows;    // R = nQ * groupSize
+    uint32_t g;       // heads covered by this tile = min(gPerTile, groupSize - gBase)
+    uint32_t rows;    // R = nQ * g
     uint32_t kvLoops; // beat count
     uint32_t segStartBlock;
     uint32_t segValid;
-    uint64_t qHeadBase; // element offset of q row 0, head kh*groupSize
+    uint64_t qHeadBase; // element offset of q row 0, first head of this tile
 };
 
 __aicore__ inline void ParseTask(const __gm__ CrossAttentionTilingData* t, uint32_t taskIdx,
@@ -105,16 +107,26 @@ __aicore__ inline void ParseTask(const __gm__ CrossAttentionTilingData* t, uint3
     const uint32_t kSeg = t->kSeg;
     d.kvSegIdx = taskIdx % kSeg;
     const uint32_t base = taskIdx / kSeg;
-    d.qRowTileIdx = base % t->qRowTileNum;
-    d.kvHeadIdx = (base / t->qRowTileNum) % t->kvHeads;
-    d.batchIdx = base / (t->qRowTileNum * t->kvHeads);
+    d.gTileIdx = base % t->gTileNum;
+    const uint32_t rowBase = base / t->gTileNum;
+    d.qRowTileIdx = rowBase % t->qRowTileNum;
+    d.kvHeadIdx = (rowBase / t->qRowTileNum) % t->kvHeads;
+    d.batchIdx = rowBase / (t->qRowTileNum * t->kvHeads);
+
+    // This task covers heads [gBase, gBase + g) of the group; gBase is 0 and g is groupSize when
+    // groupSize <= 16, so the single tile case keeps the original layout.
+    const uint32_t gBase = d.gTileIdx * t->gPerTile;
+    d.g = t->groupSize - gBase;
+    if (d.g > t->gPerTile) {
+        d.g = t->gPerTile;
+    }
 
     const uint32_t qRowStart = d.qRowTileIdx * t->qRowsPerTile;
     d.nQ = t->qSeqlen - qRowStart;
     if (d.nQ > t->qRowsPerTile) {
         d.nQ = t->qRowsPerTile;
     }
-    d.rows = d.nQ * t->groupSize;
+    d.rows = d.nQ * d.g;
 
     d.segStartBlock = d.kvSegIdx * t->mergeSegBlocks;
     uint32_t segBlocksThis = 0;
@@ -137,7 +149,7 @@ __aicore__ inline void ParseTask(const __gm__ CrossAttentionTilingData* t, uint3
     d.kvLoops = CaCeilDiv(d.segValid, t->kvTile);
 
     d.qHeadBase = ((static_cast<uint64_t>(d.batchIdx) * t->qSeqlen + qRowStart) * t->qHeads +
-                   static_cast<uint64_t>(d.kvHeadIdx) * t->groupSize) *
+                   static_cast<uint64_t>(d.kvHeadIdx) * t->groupSize + gBase) *
                   t->headDim;
 }
 
@@ -402,7 +414,7 @@ private:
 
     __aicore__ inline void BuildQ(const CaTaskDesc& d, LocalTensor<T>& a1)
     {
-        const uint32_t g = tiling_->groupSize;
+        const uint32_t g = d.g;
         if (CaInterleaved(d.rows)) {
             // The g heads of one q row are contiguous in GM (row stride headDim) and q rows are qHeads*headDim
             // apart. On the interleaved L1 panel matrix p starts at row p*g and the matrices are g*C0 apart.
@@ -1301,19 +1313,20 @@ private:
 
     __aicore__ inline uint64_t OutputElem(const CaTaskDesc& d, uint32_t r) const
     {
-        const uint32_t qHeadIdx = d.kvHeadIdx * tiling_->groupSize + (r % tiling_->groupSize);
-        const uint32_t qRowIdx = d.qRowTileIdx * tiling_->qRowsPerTile + (r / tiling_->groupSize);
+        const uint32_t gBase = d.gTileIdx * tiling_->gPerTile;
+        const uint32_t qHeadIdx = d.kvHeadIdx * tiling_->groupSize + gBase + (r % d.g);
+        const uint32_t qRowIdx = d.qRowTileIdx * tiling_->qRowsPerTile + (r / d.g);
         return ((static_cast<uint64_t>(d.batchIdx) * tiling_->qSeqlen + qRowIdx) * tiling_->qHeads + qHeadIdx) *
                tiling_->headDim;
     }
 
-    // Write the output rows back to GM: the groupSize heads of one q row are adjacent in GM and adjacent
+    // Write the output rows back to GM: the g heads of one q row tile are adjacent in GM and adjacent
     // q rows are qHeads heads apart, so the whole range fits one multi-block descriptor instead of one
     // DataCopy per q row, each of which pays a fixed launch overhead.
     __aicore__ inline void CopyRowsToGm(const CaTaskDesc& d, const LocalTensor<T>& src, uint32_t begin,
                                         uint32_t rows)
     {
-        const uint32_t g = tiling_->groupSize;
+        const uint32_t g = d.g;
         const uint32_t headBytes = tiling_->headDim * sizeof(T);
         const uint32_t blkBytes = g * headBytes;
         const uint32_t gapBytes = (tiling_->qHeads - g) * headBytes;
@@ -1364,7 +1377,10 @@ private:
 
     __aicore__ inline uint32_t TaskIdxOfSeg(const CaTaskDesc& d, uint32_t s) const
     {
-        const uint32_t base = (d.batchIdx * tiling_->kvHeads + d.kvHeadIdx) * tiling_->qRowTileNum + d.qRowTileIdx;
+        const uint32_t base = ((d.batchIdx * tiling_->kvHeads + d.kvHeadIdx) * tiling_->qRowTileNum +
+                               d.qRowTileIdx) *
+                              tiling_->gTileNum +
+                              d.gTileIdx;
         return base * tiling_->kSeg + s;
     }
 

@@ -44,10 +44,6 @@ int32_t ComputeCrossAttentionTiling(const CrossAttentionShape& shape, float scal
         return 3;
     }
     const uint32_t groupSize = shape.qHeads / shape.kvHeads;
-    if (groupSize > CA_BLOCK_CUBE) {
-        printf("[CrossAttention] groupSize=%u exceeds M fractal limit %u\n", groupSize, CA_BLOCK_CUBE);
-        return 4;
-    }
     if (shape.qSeqlen == 0 || shape.batch == 0) {
         printf("[CrossAttention] empty problem: batch=%u qSeqlen=%u\n", shape.batch, shape.qSeqlen);
         return 5;
@@ -57,15 +53,21 @@ int32_t ComputeCrossAttentionTiling(const CrossAttentionShape& shape, float scal
         return 6;
     }
 
-    // q rows per task: when groupSize divides the 16-row fractal, fill all CA_MAX_R rows so one K/V panel
-    // is reused by several 16-row fractals; otherwise fall back to a single fractal row group.
-    const uint32_t qRowsPerTile = (CA_BLOCK_CUBE % groupSize == 0u)
-                                      ? (CA_BLOCK_CUBE / groupSize) * (CA_MAX_R / CA_BLOCK_CUBE)
-                                      : (CA_BLOCK_CUBE / groupSize);
-    const uint32_t qRowTileNum = CeilDiv(shape.qSeqlen, qRowsPerTile);
-    const uint32_t rowsPerTask = qRowsPerTile * groupSize;
+    // A group larger than one cube fractal (16 rows) is split along its heads: one task covers only
+    // gPerTile heads, so R = nQ * gPerTile still stays inside CA_MAX_R and the L0C / UB budget is
+    // exactly the one used when groupSize == 16.
+    const uint32_t gPerTile = (groupSize < CA_BLOCK_CUBE) ? groupSize : CA_BLOCK_CUBE;
+    const uint32_t gTileNum = CeilDiv(groupSize, gPerTile);
 
-    const uint32_t baseTaskNum = shape.batch * shape.kvHeads * qRowTileNum;
+    // q rows per task: when gPerTile divides the 16-row fractal, fill all CA_MAX_R rows so one K/V
+    // panel is reused by several 16-row fractals; otherwise fall back to a single fractal row group.
+    const uint32_t qRowsPerTile = (CA_BLOCK_CUBE % gPerTile == 0u)
+                                      ? (CA_BLOCK_CUBE / gPerTile) * (CA_MAX_R / CA_BLOCK_CUBE)
+                                      : (CA_BLOCK_CUBE / gPerTile);
+    const uint32_t qRowTileNum = CeilDiv(shape.qSeqlen, qRowsPerTile);
+    const uint32_t rowsPerTask = qRowsPerTile * gPerTile;
+
+    const uint32_t baseTaskNum = shape.batch * shape.kvHeads * qRowTileNum * gTileNum;
     uint32_t coreNum = aicCoreNum == 0 ? 32u : aicCoreNum;
     if (coreNum > CA_MAX_CORE) {
         coreNum = CA_MAX_CORE;
@@ -87,6 +89,8 @@ int32_t ComputeCrossAttentionTiling(const CrossAttentionShape& shape, float scal
     out.qRowsPerTile = qRowsPerTile;
     out.qRowTileNum = qRowTileNum;
     out.rowsPerTask = rowsPerTask;
+    out.gPerTile = gPerTile;
+    out.gTileNum = gTileNum;
     out.kvTile = CA_KV_TILE;
     out.kSeg = kSeg;
     out.mergeSegBlocks = CeilDiv(shape.maxNumBlocksPerBatch, kSeg);
