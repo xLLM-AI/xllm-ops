@@ -26,28 +26,28 @@ using namespace ge;
 namespace ops {
 namespace {
 constexpr size_t IDX_QKV = 0;
+constexpr size_t IDX_Q_GAMMA = 1;
 constexpr size_t OUT_Q = 0;
 constexpr size_t OUT_K = 1;
 constexpr size_t OUT_V = 2;
-constexpr int64_t kHeadDim = 128;
 constexpr size_t ATTR_NUM_Q_HEADS = 0;
 constexpr size_t ATTR_NUM_KV_HEADS = 1;
 constexpr size_t ATTR_GQA_EXPAND = 3;
 constexpr size_t ATTR_LAYOUT_BNSD = 4;
 
-void SetOutputShape(gert::Shape *out, int64_t batch, int64_t seqLen, int64_t heads, bool bnsd)
+void SetOutputShape(gert::Shape *out, int64_t batch, int64_t seqLen, int64_t heads, int64_t headDim, bool bnsd)
 {
     if (bnsd) {
         out->SetDimNum(4);
         out->SetDim(0, batch);
         out->SetDim(1, heads);
         out->SetDim(2, seqLen);
-        out->SetDim(3, kHeadDim);
+        out->SetDim(3, headDim);
     } else {
         out->SetDimNum(3);
         out->SetDim(0, batch);
         out->SetDim(1, seqLen);
-        out->SetDim(2, heads * kHeadDim);
+        out->SetDim(2, heads * headDim);
     }
 }
 }  // namespace
@@ -57,6 +57,13 @@ static ge::graphStatus InferShapeSplitQkvNormRope(gert::InferShapeContext *conte
     const gert::Shape *qkvShape = context->GetInputShape(IDX_QKV);
     OP_CHECK_NULL_WITH_CONTEXT(context, qkvShape);
     OP_CHECK_IF(qkvShape->GetDimNum() != 3, OP_LOGE(context, "qkv must be [B,S,stride]."), return GRAPH_FAILED);
+
+    // D 从 q_gamma 形状推导（与 tiling 同一来源）；q_gamma 缺省时回退 128 保持向后兼容
+    const gert::Shape *qGammaShape = context->GetInputShape(IDX_Q_GAMMA);
+    int64_t headDim = 128;
+    if (qGammaShape != nullptr && qGammaShape->GetDimNum() == 1 && qGammaShape->GetDim(0) > 0) {
+        headDim = qGammaShape->GetDim(0);
+    }
 
     gert::Shape *qShape = context->GetOutputShape(OUT_Q);
     gert::Shape *kShape = context->GetOutputShape(OUT_K);
@@ -92,11 +99,11 @@ static ge::graphStatus InferShapeSplitQkvNormRope(gert::InferShapeContext *conte
         }
     }
 
-    SetOutputShape(qShape, batch, seqLen, numHeadQ, layoutBNSD);
+    SetOutputShape(qShape, batch, seqLen, numHeadQ, headDim, layoutBNSD);
     // gqa_expand 时 k/v 输出扩张到 Nq 头，与 kernel 的 kvOutHeads_ 保持一致
     const int64_t kvHeads = gqaExpand ? numHeadQ : numHeadK;
-    SetOutputShape(kShape, batch, seqLen, kvHeads, layoutBNSD);
-    SetOutputShape(vShape, batch, seqLen, kvHeads, layoutBNSD);  // v1：Nv == Nk
+    SetOutputShape(kShape, batch, seqLen, kvHeads, headDim, layoutBNSD);
+    SetOutputShape(vShape, batch, seqLen, kvHeads, headDim, layoutBNSD);  // v1：Nv == Nk
     return GRAPH_SUCCESS;
 }
 

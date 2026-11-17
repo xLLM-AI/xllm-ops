@@ -33,8 +33,9 @@ def split_qkv_norm_rope_torch(qkv, q_gamma, k_gamma, cos, sin, num_q_heads,
 
     Args:
         qkv: [B, S, stride] with q/k/v heads packed contiguously at row start.
-        q_gamma/k_gamma: [D] RMSNorm gamma for q/k heads.
-        cos/sin: [B, S, rope_stride], only the first HALF_DIM entries are used
+        q_gamma/k_gamma: [D] RMSNorm gamma for q/k heads. D is derived from
+            q_gamma (single source, same as host tiling).
+        cos/sin: [B, S, rope_stride], only the first D/2 entries are used
             (NeoX half-split layout).
         num_q_heads/num_kv_heads: head counts; v heads == kv heads.
     Returns:
@@ -42,27 +43,29 @@ def split_qkv_norm_rope_torch(qkv, q_gamma, k_gamma, cos, sin, num_q_heads,
     """
     dtype = qkv.dtype
     b, s, _ = qkv.shape
+    d = q_gamma.shape[-1]
+    half = d // 2
     num_v_heads = num_kv_heads
-    used = (num_q_heads + num_kv_heads + num_v_heads) * HEAD_DIM
+    used = (num_q_heads + num_kv_heads + num_v_heads) * d
 
     x = qkv[..., :used].float()
-    q = x[..., :num_q_heads * HEAD_DIM].reshape(b, s, num_q_heads, HEAD_DIM)
-    k_head = x[..., num_q_heads * HEAD_DIM:(num_q_heads + num_kv_heads) * HEAD_DIM]
-    k = k_head.reshape(b, s, num_kv_heads, HEAD_DIM)
-    v_head = x[..., (num_q_heads + num_kv_heads) * HEAD_DIM:]
-    v = v_head.reshape(b, s, num_v_heads, HEAD_DIM)
+    q = x[..., :num_q_heads * d].reshape(b, s, num_q_heads, d)
+    k_head = x[..., num_q_heads * d:(num_q_heads + num_kv_heads) * d]
+    k = k_head.reshape(b, s, num_kv_heads, d)
+    v_head = x[..., (num_q_heads + num_kv_heads) * d:]
+    v = v_head.reshape(b, s, num_v_heads, d)
 
     def rms_norm(t, gamma):
         var = t.pow(2).mean(dim=-1, keepdim=True)
-        return t * torch.rsqrt(var + eps) * gamma.float().view(1, 1, 1, HEAD_DIM)
+        return t * torch.rsqrt(var + eps) * gamma.float().view(1, 1, 1, d)
 
     def rope_half(t, c, sn):
-        t1 = t[..., :HALF_DIM]
-        t2 = t[..., HALF_DIM:]
+        t1 = t[..., :half]
+        t2 = t[..., half:]
         return torch.cat([t1 * c - t2 * sn, t2 * c + t1 * sn], dim=-1)
 
-    c = cos[..., :HALF_DIM].float().unsqueeze(2)
-    sn = sin[..., :HALF_DIM].float().unsqueeze(2)
+    c = cos[..., :half].float().unsqueeze(2)
+    sn = sin[..., :half].float().unsqueeze(2)
 
     q = rope_half(rms_norm(q, q_gamma), c, sn)
     k = rope_half(rms_norm(k, k_gamma), c, sn)
@@ -92,46 +95,55 @@ def _get_device():
         return False
 
 
-# (batch, seq, nq, nkv, stride_tail, rope_stride, gqa_expand, layout_bnsd)
+# (batch, seq, nq, nkv, stride_tail, rope_stride, gqa_expand, layout_bnsd, head_dim)
 CASES = [
-    (1, 512, 6, 2, 6, 64, False, False),   # JoyOV2 DiT main scenario
-    (1, 512, 6, 2, 6, 64, False, True),    # BNSD layout
-    (1, 512, 6, 2, 6, 64, True, False),    # GQA inline expand
-    (1, 512, 6, 2, 0, 64, False, False),   # no tail columns
-    (1, 1, 6, 2, 6, 64, False, False),     # single token (refiner)
-    (1, 7, 6, 2, 6, 64, False, False),     # tail tile, S not multiple of 8
-    (1, 259, 8, 2, 0, 64, False, False),   # text-side 2 kv heads
-    (2, 64, 6, 2, 6, 64, False, False),    # B > 1
-    (1, 128, 6, 2, 6, 128, False, False),  # full-width rope table
-    (1, 128, 8, 1, 0, 64, False, False),   # Nk = Nv = 1
-    (1, 128, 6, 2, 6, 64, True, True),     # BNSD + gqa_expand
+    (1, 512, 6, 2, 6, 64, False, False, 128),   # JoyOV2 DiT main scenario
+    (1, 512, 6, 2, 6, 64, False, True, 128),    # BNSD layout
+    (1, 512, 6, 2, 6, 64, True, False, 128),    # GQA inline expand
+    (1, 512, 6, 2, 0, 64, False, False, 128),   # no tail columns
+    (1, 1, 6, 2, 6, 64, False, False, 128),     # single token (refiner)
+    (1, 7, 6, 2, 6, 64, False, False, 128),     # tail tile, S not multiple of 8
+    (1, 259, 8, 2, 0, 64, False, False, 128),   # text-side 2 kv heads
+    (2, 64, 6, 2, 6, 64, False, False, 128),    # B > 1
+    (1, 128, 6, 2, 6, 128, False, False, 128),  # full-width rope table
+    (1, 128, 8, 1, 0, 64, False, False, 128),   # Nk = Nv = 1
+    (1, 128, 6, 2, 6, 64, True, True, 128),     # BNSD + gqa_expand
+    # --- D = 256（Tier 1：VF chunk/pair 循环，nPairs=2）---
+    (1, 512, 6, 2, 6, 128, False, False, 256),  # D=256 main scenario
+    (1, 512, 6, 2, 6, 128, False, True, 256),   # D=256 BNSD
+    (1, 512, 6, 2, 6, 128, True, False, 256),   # D=256 GQA inline expand
+    (1, 1, 6, 2, 6, 128, False, False, 256),    # D=256 single token
+    (1, 7, 6, 2, 6, 128, False, False, 256),    # D=256 tail tile
+    (2, 64, 6, 2, 6, 128, False, False, 256),   # D=256 B > 1
+    (1, 128, 8, 1, 0, 128, False, False, 256),  # D=256 Nk = Nv = 1
 ]
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
-    "batch,seq,nq,nkv,tail,rope_stride,gqa_expand,layout_bnsd", CASES)
+    "batch,seq,nq,nkv,tail,rope_stride,gqa_expand,layout_bnsd,head_dim", CASES)
 def test_split_qkv_norm_rope(batch, seq, nq, nkv, tail, rope_stride,
-                             gqa_expand, layout_bnsd, dtype):
+                             gqa_expand, layout_bnsd, head_dim, dtype):
     if not _get_device():
         return
 
     torch.manual_seed(20261106)
     eps = 1e-6
-    stride = (nq + 2 * nkv) * HEAD_DIM + tail
+    half_dim = head_dim // 2
+    stride = (nq + 2 * nkv) * head_dim + tail
 
     qkv = (torch.randn(batch, seq, stride, dtype=torch.float32) * 0.5).to(dtype)
-    q_gamma = (1.0 + 0.1 * torch.randn(HEAD_DIM, dtype=torch.float32)).to(dtype)
-    k_gamma = (1.0 + 0.1 * torch.randn(HEAD_DIM, dtype=torch.float32)).to(dtype)
+    q_gamma = (1.0 + 0.1 * torch.randn(head_dim, dtype=torch.float32)).to(dtype)
+    k_gamma = (1.0 + 0.1 * torch.randn(head_dim, dtype=torch.float32)).to(dtype)
 
     inv_freq = 1.0 / (10000.0**(torch.arange(
-        0, HEAD_DIM, 2, dtype=torch.float32) / HEAD_DIM))
+        0, head_dim, 2, dtype=torch.float32) / head_dim))
     pos = torch.arange(seq, dtype=torch.float32).view(1, seq, 1)
     freqs = pos * inv_freq.view(1, 1, -1)
     cos = torch.zeros(batch, seq, rope_stride, dtype=torch.float32)
     sin = torch.zeros(batch, seq, rope_stride, dtype=torch.float32)
-    cos[..., :HALF_DIM] = freqs.cos().expand(batch, seq, HALF_DIM)
-    sin[..., :HALF_DIM] = freqs.sin().expand(batch, seq, HALF_DIM)
+    cos[..., :half_dim] = freqs.cos().expand(batch, seq, half_dim)
+    sin[..., :half_dim] = freqs.sin().expand(batch, seq, half_dim)
     cos = cos.to(dtype)
     sin = sin.to(dtype)
 
@@ -170,61 +182,65 @@ def test_split_qkv_norm_rope(batch, seq, nq, nkv, tail, rope_stride,
         v_npu.cpu().float(), v_ref.float(), atol=0, rtol=0)
 
 
-def _to_interleaved(qkv, num_q_heads, num_kv_heads):
+def _to_interleaved(qkv, num_q_heads, num_kv_heads, d=HEAD_DIM):
     """Repack ``[Q | K... | V... | tail]`` -> ``[Q | K0 V0 K1 V1 ... | tail]``."""
     b, s, _ = qkv.shape
-    q_end = num_q_heads * HEAD_DIM
-    kv_end = q_end + 2 * num_kv_heads * HEAD_DIM
+    q_end = num_q_heads * d
+    kv_end = q_end + 2 * num_kv_heads * d
     q = qkv[..., :q_end]
-    k = qkv[..., q_end:q_end + num_kv_heads * HEAD_DIM].reshape(
-        b, s, num_kv_heads, HEAD_DIM)
-    v = qkv[..., q_end + num_kv_heads * HEAD_DIM:kv_end].reshape(
-        b, s, num_kv_heads, HEAD_DIM)
+    k = qkv[..., q_end:q_end + num_kv_heads * d].reshape(
+        b, s, num_kv_heads, d)
+    v = qkv[..., q_end + num_kv_heads * d:kv_end].reshape(
+        b, s, num_kv_heads, d)
     kv_interleaved = torch.stack([k, v], dim=3).reshape(
-        b, s, 2 * num_kv_heads * HEAD_DIM)
+        b, s, 2 * num_kv_heads * d)
     return torch.cat([q, kv_interleaved, qkv[..., kv_end:]], dim=-1).contiguous()
 
 
-# (batch, seq, nq, nkv, stride_tail, rope_stride, gqa_expand, layout_bnsd)
+# (batch, seq, nq, nkv, stride_tail, rope_stride, gqa_expand, layout_bnsd, head_dim)
 INTERLEAVED_CASES = [
-    (1, 512, 6, 2, 6, 64, False, False),   # main scenario, K_iV_i interleaved
-    (1, 512, 6, 2, 6, 64, True, False),    # interleaved + GQA expand
-    (1, 7, 6, 2, 6, 64, False, False),     # interleaved tail tile
-    (2, 64, 6, 2, 6, 64, False, True),     # interleaved + BNSD + B > 1
+    (1, 512, 6, 2, 6, 64, False, False, 128),   # main scenario, K_iV_i interleaved
+    (1, 512, 6, 2, 6, 64, True, False, 128),    # interleaved + GQA expand
+    (1, 7, 6, 2, 6, 64, False, False, 128),     # interleaved tail tile
+    (2, 64, 6, 2, 6, 64, False, True, 128),     # interleaved + BNSD + B > 1
+    (1, 512, 6, 2, 6, 128, False, False, 256),  # D=256 interleaved main
+    (1, 512, 6, 2, 6, 128, True, False, 256),   # D=256 interleaved + GQA expand
 ]
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
-    "batch,seq,nq,nkv,tail,rope_stride,gqa_expand,layout_bnsd", INTERLEAVED_CASES)
+    "batch,seq,nq,nkv,tail,rope_stride,gqa_expand,layout_bnsd,head_dim", INTERLEAVED_CASES)
 def test_split_qkv_norm_rope_kv_interleaved(
-        batch, seq, nq, nkv, tail, rope_stride, gqa_expand, layout_bnsd, dtype):
+        batch, seq, nq, nkv, tail, rope_stride, gqa_expand, layout_bnsd,
+        head_dim, dtype):
     if not _get_device():
         return
 
     torch.manual_seed(20261106)
     eps = 1e-6
-    stride = (nq + 2 * nkv) * HEAD_DIM + tail
+    half_dim = head_dim // 2
+    stride = (nq + 2 * nkv) * head_dim + tail
 
     qkv = (torch.randn(batch, seq, stride, dtype=torch.float32) * 0.5).to(dtype)
-    q_gamma = (1.0 + 0.1 * torch.randn(HEAD_DIM, dtype=torch.float32)).to(dtype)
-    k_gamma = (1.0 + 0.1 * torch.randn(HEAD_DIM, dtype=torch.float32)).to(dtype)
+    q_gamma = (1.0 + 0.1 * torch.randn(head_dim, dtype=torch.float32)).to(dtype)
+    k_gamma = (1.0 + 0.1 * torch.randn(head_dim, dtype=torch.float32)).to(dtype)
 
     inv_freq = 1.0 / (10000.0**(torch.arange(
-        0, HEAD_DIM, 2, dtype=torch.float32) / HEAD_DIM))
+        0, head_dim, 2, dtype=torch.float32) / head_dim))
     pos = torch.arange(seq, dtype=torch.float32).view(1, seq, 1)
     freqs = pos * inv_freq.view(1, 1, -1)
     cos = torch.zeros(batch, seq, rope_stride, dtype=torch.float32)
     sin = torch.zeros(batch, seq, rope_stride, dtype=torch.float32)
-    cos[..., :HALF_DIM] = freqs.cos().expand(batch, seq, HALF_DIM)
-    sin[..., :HALF_DIM] = freqs.sin().expand(batch, seq, HALF_DIM)
+    cos[..., :half_dim] = freqs.cos().expand(batch, seq, half_dim)
+    sin[..., :half_dim] = freqs.sin().expand(batch, seq, half_dim)
     cos = cos.to(dtype)
     sin = sin.to(dtype)
 
     # Reference consumes the block layout; the kernel consumes the interleaved one.
     q_ref, k_ref, v_ref = split_qkv_norm_rope_torch(
         qkv, q_gamma, k_gamma, cos, sin, nq, nkv, eps, gqa_expand, layout_bnsd)
-    qkvi = _to_interleaved(qkv, nq, nkv)
+    qkvi = _to_interleaved(qkv, nq, nkv, head_dim)
 
     q_npu, k_npu, v_npu = custom_ops.split_qkv_norm_rope_npu(
         qkvi.npu(),
@@ -261,44 +277,47 @@ def test_split_qkv_norm_rope_kv_interleaved(
 # 宽头数用例：验证 host 按 UB 预算自动降 tokenTile（8 -> 4 -> 2）
 # (batch, seq, nq, nkv, rope_stride, gqa_expand, layout_bnsd, kv_interleaved)
 WIDE_CASES = [
-    (1, 256, 16, 8, 64, True, False, True),    # headTotal=32, stride=4096 -> tile 4
-    (1, 256, 32, 8, 64, True, False, True),    # headTotal=48, stride=6144 -> tile 4
-    (1, 256, 48, 16, 64, True, False, True),   # headTotal=80, stride=10288 -> tile 2
-    (1, 256, 16, 8, 64, False, False, False),  # 块状布局 + 大 head 数
+    # (batch, seq, nq, nkv, rope_stride, gqa_expand, layout_bnsd, kv_interleaved, head_dim)
+    (1, 256, 16, 8, 64, True, False, True, 128),    # headTotal=32, stride=4096 -> tile 4
+    (1, 256, 32, 8, 64, True, False, True, 128),    # headTotal=48, stride=6144 -> tile 4
+    (1, 256, 48, 16, 64, True, False, True, 128),   # headTotal=80, stride=10288 -> tile 2
+    (1, 256, 16, 8, 64, False, False, False, 128),  # 块状布局 + 大 head 数
+    (1, 256, 16, 8, 128, True, False, True, 256),   # D=256 headTotal=32 -> tile 4（行宽翻倍降档）
 ]
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
-    "batch,seq,nq,nkv,rope_stride,gqa_expand,layout_bnsd,kv_interleaved", WIDE_CASES)
+    "batch,seq,nq,nkv,rope_stride,gqa_expand,layout_bnsd,kv_interleaved,head_dim", WIDE_CASES)
 def test_split_qkv_norm_rope_wide_heads(
         batch, seq, nq, nkv, rope_stride, gqa_expand, layout_bnsd,
-        kv_interleaved, dtype):
+        kv_interleaved, head_dim, dtype):
     if not _get_device():
         return
 
     torch.manual_seed(20261106)
     eps = 1e-6
-    stride = (nq + 2 * nkv) * HEAD_DIM
+    half_dim = head_dim // 2
+    stride = (nq + 2 * nkv) * head_dim
 
     qkv = (torch.randn(batch, seq, stride, dtype=torch.float32) * 0.5).to(dtype)
-    q_gamma = (1.0 + 0.1 * torch.randn(HEAD_DIM, dtype=torch.float32)).to(dtype)
-    k_gamma = (1.0 + 0.1 * torch.randn(HEAD_DIM, dtype=torch.float32)).to(dtype)
+    q_gamma = (1.0 + 0.1 * torch.randn(head_dim, dtype=torch.float32)).to(dtype)
+    k_gamma = (1.0 + 0.1 * torch.randn(head_dim, dtype=torch.float32)).to(dtype)
 
     inv_freq = 1.0 / (10000.0**(torch.arange(
-        0, HEAD_DIM, 2, dtype=torch.float32) / HEAD_DIM))
+        0, head_dim, 2, dtype=torch.float32) / head_dim))
     pos = torch.arange(seq, dtype=torch.float32).view(1, seq, 1)
     freqs = pos * inv_freq.view(1, 1, -1)
     cos = torch.zeros(batch, seq, rope_stride, dtype=torch.float32)
     sin = torch.zeros(batch, seq, rope_stride, dtype=torch.float32)
-    cos[..., :HALF_DIM] = freqs.cos().expand(batch, seq, HALF_DIM)
-    sin[..., :HALF_DIM] = freqs.sin().expand(batch, seq, HALF_DIM)
+    cos[..., :half_dim] = freqs.cos().expand(batch, seq, half_dim)
+    sin[..., :half_dim] = freqs.sin().expand(batch, seq, half_dim)
     cos = cos.to(dtype)
     sin = sin.to(dtype)
 
     q_ref, k_ref, v_ref = split_qkv_norm_rope_torch(
         qkv, q_gamma, k_gamma, cos, sin, nq, nkv, eps, gqa_expand, layout_bnsd)
-    qkvi = _to_interleaved(qkv, nq, nkv) if kv_interleaved else qkv
+    qkvi = _to_interleaved(qkv, nq, nkv, head_dim) if kv_interleaved else qkv
 
     q_npu, k_npu, v_npu = custom_ops.split_qkv_norm_rope_npu(
         qkvi.npu(), q_gamma.npu(), k_gamma.npu(), cos.npu(), sin.npu(),
@@ -330,8 +349,8 @@ REJECT_CASES = [
     (-1, 2, 1, 8, 64, 1e-6, 128, 128, "negative num_q_heads must not wrap to u32"),
     (6, -2, 1, 8, 64, 1e-6, 128, 128, "negative num_kv_heads must not wrap to u32"),
     (6, 2, 1, 8, 65, 1e-6, 128, 128, "rope_stride must be 16-aligned for LoadAlign"),
-    (6, 2, 1, 8, 64, 1e-6, 256, 256, "head_dim 256 unsupported until Tier 1"),
-    (6, 2, 1, 8, 64, 1e-6, 64, 64, "head_dim 64 unsupported until Tier 1"),
+    (6, 2, 1, 8, 64, 1e-6, 512, 512, "head_dim 512 outside support set {128,256}"),
+    (6, 2, 1, 8, 64, 1e-6, 64, 64, "head_dim 64 unsupported until Tier 2"),
     (6, 2, 1, 8, 64, 1e-6, 128, 256, "k_gamma dim must match q_gamma"),
 ]
 

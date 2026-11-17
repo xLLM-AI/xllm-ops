@@ -26,8 +26,8 @@ limitations under the License.
 namespace kernels {
 using namespace AscendC;
 
-constexpr uint32_t kHeadDim = 128;              // head_dim 固定 128
-constexpr uint32_t kHalfDim = kHeadDim / 2;     // 64，RoPE half-split 分界
+constexpr uint32_t kHeadDim = 128;              // head_dim 默认值；运行期实际 D 从 tiling 读入
+constexpr uint32_t kHalfDim = kHeadDim / 2;     // 64，RoPE half-split 分界（仅作 VF 注释参照，不再硬引用）
 constexpr uint32_t kMaxHeads = 64;              // sumsq UB 上界：Nq+Nk <= kMaxHeads
 constexpr uint32_t kTokenTile = 8;              // 默认每 tile 行数；host 会按 UB 预算从 8/4/2/1 里选
 // 每 tile 的 sumsq 个数 = kTokenTile × (Nq+Nk)，scale 链按 64 lane 向上取整分段
@@ -38,11 +38,13 @@ constexpr uint32_t kFlagKvInterleaved = 1u << 2;  // 1：输入行内 KV 按 hea
 
 // ---------------------------------------------------------------------------
 // SqnrNormRopeVfPack：逐行 QK-RMSNorm + 半分化 RoPE（只处理 q/k 头；v 由外层 UB→UB 直通拷贝）
-//   outT      : T 输出 tile，[kTokenTile, numHeadTotal*128]，行距 outStride
+//   outT      : T 输出 tile，[kTokenTile, numHeadTotal*headDim]，行距 outStride
 //   xb        : T qkv tile，[kTokenTile, padStride]，行距 xStride
-//   cosT/sinT : T cos/sin，[kTokenTile, ropeStride]，只用前 64 维（NeoX 半维）
-//   gammaQ/K  : fp32 [128]
+//   cosT/sinT : T cos/sin，[kTokenTile, ropeStride]，只用前 halfDim 维（NeoX 半维）
+//   gammaQ/K  : fp32 [headDim]
 //   sumsq     : fp32 workspace，[kTokenTile, Nq+Nk]，行距 = Nq+Nk（容量按 kMaxHeads 上界分配）
+//   headDim   : 当前支持 {128, 256}；VF 按 64-lane chunk 处理：pass1 对 D/64 段累加 sumsq，
+//               pass2 对 halfDim/64 个 (前半,后半) pair 做 NeoX 旋转，D=128 时各循环恰跑 1 次。
 // 固定处理 kTokenTile 行；末 tile 的脏行不会被拷出。
 //
 // 实现要点（当前实现的约束）：
@@ -62,7 +64,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     __ubuf__ T *outT, __ubuf__ T *xb, __ubuf__ T *cosT, __ubuf__ T *sinT,
     __ubuf__ float *gammaQ, __ubuf__ float *gammaK, __ubuf__ float *sumsq,
     uint16_t numHeadQ, uint16_t numHeadK, uint16_t xStride, uint16_t outStride, uint16_t ropeStride,
-    uint16_t tileRows, uint16_t kvHeadStep, float eps, float recip)
+    uint16_t tileRows, uint16_t kvHeadStep, uint16_t headDim, uint16_t halfDim, float eps, float recip)
 {
     using namespace AscendC::Reg;
     RegTensor<float> y1;
@@ -90,29 +92,29 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
 
     const uint16_t qkHeads = static_cast<uint16_t>(numHeadQ + numHeadK);
     // 输入行内 KV 区起点（k/v 区）；q 头从行首按 D 连续，k 头按 kvHeadStep 步进
-    const uint32_t kvHeadBase = static_cast<uint32_t>(numHeadQ) * kHeadDim;
+    const uint32_t kvHeadBase = static_cast<uint32_t>(numHeadQ) * headDim;
     // sumsq 段数：每段 64 lane，向上取整覆盖 tileRows*(Nq+Nk) 个有效元素；
     // 末段多出的 lane 只写回 sumsq，pass2 只按 (t,h) 单点广播读取，不回读这些 lane。
     constexpr uint16_t kSeg = 64;
     const uint16_t segs = static_cast<uint16_t>((tileRows * qkHeads + kSeg - 1) / kSeg);
-
-    // γq / γk 每 tile 各装载 1 次
-    LoadAlign(gq1, gammaQ);
-    LoadAlign(gq2, gammaQ + kHalfDim);
-    LoadAlign(gk1, gammaK);
-    LoadAlign(gk2, gammaK + kHalfDim);
+    // D 按 64-lane chunk 处理：pass1 累加 D/64 段；pass2 把 half 区切成 halfDim/64 个 (前半,后半) pair
+    const uint16_t nChunks = static_cast<uint16_t>(headDim / kSeg);
+    const uint16_t nPairs = static_cast<uint16_t>(halfDim / kSeg);
 
     // pass 1：每 (token, head) 的 sumsq（q/k 直接从 T 载入）
     for (uint16_t t = 0; t < tileRows; ++t) {
         __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
         for (uint16_t h = 0; h < numHeadQ; ++h) {
-            __ubuf__ T *src = row + static_cast<uint32_t>(h) * kHeadDim;
+            __ubuf__ T *src = row + static_cast<uint32_t>(h) * headDim;
             LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
             Cast<float, T, AscendC::layoutZMrgZ>(y1, tv, mFull);
             Mul(acc, y1, y1, mFull);
-            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + kHalfDim);
-            Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mFull);
-            MulAddDst(acc, y2, y2, mFull);
+            // 余下 64-lane 段继续累加；D=128 时循环体恰跑 1 次（等价原 hardcode）
+            for (uint16_t c = 1; c < nChunks; ++c) {
+                LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + static_cast<uint32_t>(c) * kSeg);
+                Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mFull);
+                MulAddDst(acc, y2, y2, mFull);
+            }
             ReduceSum(acc, acc, mFull);
             StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(
                 sumsq + static_cast<uint32_t>(t) * qkHeads + h, acc, mOne);
@@ -123,9 +125,11 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
             LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
             Cast<float, T, AscendC::layoutZMrgZ>(y1, tv, mFull);
             Mul(acc, y1, y1, mFull);
-            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + kHalfDim);
-            Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mFull);
-            MulAddDst(acc, y2, y2, mFull);
+            for (uint16_t c = 1; c < nChunks; ++c) {
+                LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + static_cast<uint32_t>(c) * kSeg);
+                Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mFull);
+                MulAddDst(acc, y2, y2, mFull);
+            }
             ReduceSum(acc, acc, mFull);
             StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(
                 sumsq + static_cast<uint32_t>(t) * qkHeads + numHeadQ + h, acc, mOne);
@@ -150,61 +154,73 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     for (uint16_t t = 0; t < tileRows; ++t) {
         __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
         __ubuf__ T *orow = outT + static_cast<uint32_t>(t) * outStride;
-        LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, cosT + static_cast<uint32_t>(t) * ropeStride);
-        Cast<float, T, AscendC::layoutZMrgZ>(cr, tv, mFull);
-        LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, sinT + static_cast<uint32_t>(t) * ropeStride);
-        Cast<float, T, AscendC::layoutZMrgZ>(sr, tv, mFull);
-        Muls(sn, sr, -1.0f, mFull);
-
-        // q 组：γq 折进 cos/sin
-        Mul(ca, gq1, cr, mFull);
-        Mul(cc, gq1, sr, mFull);
-        Mul(cd, gq2, cr, mFull);
-        Mul(cb, gq2, sn, mFull);
-        for (uint16_t h = 0; h < numHeadQ; ++h) {
-            __ubuf__ T *src = row + static_cast<uint32_t>(h) * kHeadDim;
-            __ubuf__ T *dst = orow + static_cast<uint32_t>(h) * kHeadDim;
-            LoadAlign<float, LoadDist::DIST_BRC_B32>(sg, sumsq + static_cast<uint32_t>(t) * qkHeads + h);
-            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
-            Cast<float, T, AscendC::layoutZMrgZ>(y1, tv, mFull);
-            Mul(y1, y1, sg, mFull);
-            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + kHalfDim);
-            Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mFull);
-            Mul(y2, y2, sg, mFull);
-            Mul(t1, y1, ca, mFull);
-            MulAddDst(t1, y2, cb, mFull);
-            Mul(t2, y2, cd, mFull);
-            MulAddDst(t2, y1, cc, mFull);
-            Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t1, mFull);
-            StoreAlign<T, StoreDist::DIST_PACK_B32>(dst, pk, mFull);
-            Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t2, mFull);
-            StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + kHalfDim, pk, mFull);
+        // q 组：γq 折进 cos/sin；逐 64-lane pair 处理（D=128 → nPairs=1，等价原 hardcode）
+        for (uint16_t p = 0; p < nPairs; ++p) {
+            LoadAlign(gq1, gammaQ + static_cast<uint32_t>(p) * kSeg);
+            LoadAlign(gq2, gammaQ + halfDim + static_cast<uint32_t>(p) * kSeg);
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, cosT + static_cast<uint32_t>(t) * ropeStride + static_cast<uint32_t>(p) * kSeg);
+            Cast<float, T, AscendC::layoutZMrgZ>(cr, tv, mFull);
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, sinT + static_cast<uint32_t>(t) * ropeStride + static_cast<uint32_t>(p) * kSeg);
+            Cast<float, T, AscendC::layoutZMrgZ>(sr, tv, mFull);
+            Muls(sn, sr, -1.0f, mFull);
+            Mul(ca, gq1, cr, mFull);
+            Mul(cc, gq1, sr, mFull);
+            Mul(cd, gq2, cr, mFull);
+            Mul(cb, gq2, sn, mFull);
+            for (uint16_t h = 0; h < numHeadQ; ++h) {
+                __ubuf__ T *src = row + static_cast<uint32_t>(h) * headDim;
+                __ubuf__ T *dst = orow + static_cast<uint32_t>(h) * headDim;
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(sg, sumsq + static_cast<uint32_t>(t) * qkHeads + h);
+                LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + static_cast<uint32_t>(p) * kSeg);
+                Cast<float, T, AscendC::layoutZMrgZ>(y1, tv, mFull);
+                Mul(y1, y1, sg, mFull);
+                LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + halfDim + static_cast<uint32_t>(p) * kSeg);
+                Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mFull);
+                Mul(y2, y2, sg, mFull);
+                Mul(t1, y1, ca, mFull);
+                MulAddDst(t1, y2, cb, mFull);
+                Mul(t2, y2, cd, mFull);
+                MulAddDst(t2, y1, cc, mFull);
+                Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t1, mFull);
+                StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + static_cast<uint32_t>(p) * kSeg, pk, mFull);
+                Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t2, mFull);
+                StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + halfDim + static_cast<uint32_t>(p) * kSeg, pk, mFull);
+            }
         }
 
         // k 组：γk 折进 cos/sin
-        Mul(ca, gk1, cr, mFull);
-        Mul(cc, gk1, sr, mFull);
-        Mul(cd, gk2, cr, mFull);
-        Mul(cb, gk2, sn, mFull);
-        for (uint16_t h = 0; h < numHeadK; ++h) {
-            uint32_t hh = static_cast<uint32_t>(numHeadQ) + h;
-            __ubuf__ T *src = row + kvHeadBase + static_cast<uint32_t>(h) * kvHeadStep;
-            __ubuf__ T *dst = orow + hh * kHeadDim;
-            LoadAlign<float, LoadDist::DIST_BRC_B32>(sg, sumsq + static_cast<uint32_t>(t) * qkHeads + hh);
-            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
-            Cast<float, T, AscendC::layoutZMrgZ>(y1, tv, mFull);
-            Mul(y1, y1, sg, mFull);
-            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + kHalfDim);
-            Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mFull);
-            Mul(y2, y2, sg, mFull);
-            Mul(t1, y1, ca, mFull);
-            MulAddDst(t1, y2, cb, mFull);
-            Mul(t2, y2, cd, mFull);
-            MulAddDst(t2, y1, cc, mFull);
-            Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t1, mFull);
-            StoreAlign<T, StoreDist::DIST_PACK_B32>(dst, pk, mFull);
-            Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t2, mFull);
-            StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + kHalfDim, pk, mFull);
+        for (uint16_t p = 0; p < nPairs; ++p) {
+            LoadAlign(gk1, gammaK + static_cast<uint32_t>(p) * kSeg);
+            LoadAlign(gk2, gammaK + halfDim + static_cast<uint32_t>(p) * kSeg);
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, cosT + static_cast<uint32_t>(t) * ropeStride + static_cast<uint32_t>(p) * kSeg);
+            Cast<float, T, AscendC::layoutZMrgZ>(cr, tv, mFull);
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, sinT + static_cast<uint32_t>(t) * ropeStride + static_cast<uint32_t>(p) * kSeg);
+            Cast<float, T, AscendC::layoutZMrgZ>(sr, tv, mFull);
+            Muls(sn, sr, -1.0f, mFull);
+            Mul(ca, gk1, cr, mFull);
+            Mul(cc, gk1, sr, mFull);
+            Mul(cd, gk2, cr, mFull);
+            Mul(cb, gk2, sn, mFull);
+            for (uint16_t h = 0; h < numHeadK; ++h) {
+                uint32_t hh = static_cast<uint32_t>(numHeadQ) + h;
+                __ubuf__ T *src = row + kvHeadBase + static_cast<uint32_t>(h) * kvHeadStep;
+                __ubuf__ T *dst = orow + hh * headDim;
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(sg, sumsq + static_cast<uint32_t>(t) * qkHeads + hh);
+                LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + static_cast<uint32_t>(p) * kSeg);
+                Cast<float, T, AscendC::layoutZMrgZ>(y1, tv, mFull);
+                Mul(y1, y1, sg, mFull);
+                LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + halfDim + static_cast<uint32_t>(p) * kSeg);
+                Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mFull);
+                Mul(y2, y2, sg, mFull);
+                Mul(t1, y1, ca, mFull);
+                MulAddDst(t1, y2, cb, mFull);
+                Mul(t2, y2, cd, mFull);
+                MulAddDst(t2, y1, cc, mFull);
+                Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t1, mFull);
+                StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + static_cast<uint32_t>(p) * kSeg, pk, mFull);
+                Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t2, mFull);
+                StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + halfDim + static_cast<uint32_t>(p) * kSeg, pk, mFull);
+            }
         }
     }
 }
@@ -225,6 +241,8 @@ public:
         numHeadK_ = tiling->numHeadK;
         numHeadV_ = tiling->numHeadV;
         numHeadTotal_ = numHeadQ_ + numHeadK_ + numHeadV_;
+        headDim_ = tiling->headDim;
+        halfDim_ = headDim_ / 2;
         qkvStride_ = tiling->qkvStride;
         padStride_ = tiling->padStride;
         ropeStride_ = tiling->ropeStride;
@@ -244,21 +262,21 @@ public:
         qkvGm_.SetGlobalBuffer((__gm__ T *)qkv, tiling->totalTokens * qkvStride_);
         cosGm_.SetGlobalBuffer((__gm__ T *)cosGm, tiling->totalTokens * ropeStride_);
         sinGm_.SetGlobalBuffer((__gm__ T *)sinGm, tiling->totalTokens * ropeStride_);
-        gammaQGm_.SetGlobalBuffer((__gm__ T *)qGamma, kHeadDim);
-        gammaKGm_.SetGlobalBuffer((__gm__ T *)kGamma, kHeadDim);
-        qGm_.SetGlobalBuffer((__gm__ T *)qOut, tiling->totalTokens * numHeadQ_ * kHeadDim);
-        kGm_.SetGlobalBuffer((__gm__ T *)kOut, tiling->totalTokens * kvOutHeads_ * kHeadDim);
-        vGm_.SetGlobalBuffer((__gm__ T *)vOut, tiling->totalTokens * kvOutHeads_ * kHeadDim);
+        gammaQGm_.SetGlobalBuffer((__gm__ T *)qGamma, headDim_);
+        gammaKGm_.SetGlobalBuffer((__gm__ T *)kGamma, headDim_);
+        qGm_.SetGlobalBuffer((__gm__ T *)qOut, tiling->totalTokens * numHeadQ_ * headDim_);
+        kGm_.SetGlobalBuffer((__gm__ T *)kOut, tiling->totalTokens * kvOutHeads_ * headDim_);
+        vGm_.SetGlobalBuffer((__gm__ T *)vOut, tiling->totalTokens * kvOutHeads_ * headDim_);
 
         // 深度 2：支持「下一个 tile 预取」+「上一个 tile 延后写出」
         pipe_->InitBuffer(inQkv_, 2, tileRows_ * padStride_ * sizeof(T));
         pipe_->InitBuffer(inCos_, 2, tileRows_ * ropeStride_ * sizeof(T));
         pipe_->InitBuffer(inSin_, 2, tileRows_ * ropeStride_ * sizeof(T));
-        pipe_->InitBuffer(inGamma_, 2, kHeadDim * sizeof(T));
-        pipe_->InitBuffer(outTile_, 2, tileRows_ * numHeadTotal_ * kHeadDim * sizeof(T));
+        pipe_->InitBuffer(inGamma_, 2, headDim_ * sizeof(T));
+        pipe_->InitBuffer(outTile_, 2, tileRows_ * numHeadTotal_ * headDim_ * sizeof(T));
 
-        pipe_->InitBuffer(bufGammaQ_, kHeadDim * sizeof(float));
-        pipe_->InitBuffer(bufGammaK_, kHeadDim * sizeof(float));
+        pipe_->InitBuffer(bufGammaQ_, headDim_ * sizeof(float));
+        pipe_->InitBuffer(bufGammaK_, headDim_ * sizeof(float));
         pipe_->InitBuffer(bufSum_, tileRows_ * kMaxHeads * sizeof(float));
 
         // 本核 token 区间与 tile 数（供三级流水使用）
@@ -299,18 +317,18 @@ private:
     {
         DataCopyPadExtParams<T> pad{false, 0, 0, 0};
         LocalTensor<T> gq = inGamma_.AllocTensor<T>();
-        DataCopyPad(gq, gammaQGm_, DataCopyExtParams{1, static_cast<uint32_t>(kHeadDim * sizeof(T)), 0, 0, 0}, pad);
+        DataCopyPad(gq, gammaQGm_, DataCopyExtParams{1, static_cast<uint32_t>(headDim_ * sizeof(T)), 0, 0, 0}, pad);
         inGamma_.EnQue(gq);
         LocalTensor<T> gk = inGamma_.AllocTensor<T>();
-        DataCopyPad(gk, gammaKGm_, DataCopyExtParams{1, static_cast<uint32_t>(kHeadDim * sizeof(T)), 0, 0, 0}, pad);
+        DataCopyPad(gk, gammaKGm_, DataCopyExtParams{1, static_cast<uint32_t>(headDim_ * sizeof(T)), 0, 0, 0}, pad);
         inGamma_.EnQue(gk);
 
         gq = inGamma_.DeQue<T>();
         gk = inGamma_.DeQue<T>();
         LocalTensor<float> gqf = bufGammaQ_.Get<float>();
         LocalTensor<float> gkf = bufGammaK_.Get<float>();
-        Cast(gqf, gq, RoundMode::CAST_NONE, kHeadDim);
-        Cast(gkf, gk, RoundMode::CAST_NONE, kHeadDim);
+        Cast(gqf, gq, RoundMode::CAST_NONE, headDim_);
+        Cast(gkf, gk, RoundMode::CAST_NONE, headDim_);
         inGamma_.FreeTensor(gq);
         inGamma_.FreeTensor(gk);
         PipeBarrier<PIPE_V>();
@@ -350,9 +368,9 @@ private:
 
         // ---- 输出 tile 分配（pack-store 直写目标）----
         AscendC::LocalTensor<T> ob = outTile_.AllocTensor<T>();
-        const uint32_t rowElems = numHeadTotal_ * kHeadDim;
-        const uint32_t qkElems = (numHeadQ_ + numHeadK_) * kHeadDim;
-        const uint32_t vElems = numHeadV_ * kHeadDim;
+        const uint32_t rowElems = numHeadTotal_ * headDim_;
+        const uint32_t qkElems = (numHeadQ_ + numHeadK_) * headDim_;
+        const uint32_t vElems = numHeadV_ * headDim_;
 
         // ---- v 直通：UB→UB 拷贝，原样 T，不经 fp32 ----
         //   块状布局一次多行搬完；KV 交错布局下 v 头间隔 2D，按 head 逐个搬
@@ -365,15 +383,15 @@ private:
                 static_cast<uint16_t>((rowElems - vElems) * sizeof(T) / 32)};
             AscendC::DataCopy(ob[qkElems], xb[qkElems], vParams);
         } else {
-            const uint16_t headBlocks = static_cast<uint16_t>(kHeadDim * sizeof(T) / 32);
+            const uint16_t headBlocks = static_cast<uint16_t>(headDim_ * sizeof(T) / 32);
             for (uint16_t h = 0; h < static_cast<uint16_t>(numHeadV_); ++h) {
                 AscendC::DataCopyParams vParams{
                     static_cast<uint16_t>(tileRows_),
                     headBlocks,
-                    static_cast<uint16_t>((padStride_ - kHeadDim) * sizeof(T) / 32),
-                    static_cast<uint16_t>((rowElems - kHeadDim) * sizeof(T) / 32)};
-                AscendC::DataCopy(ob[qkElems + static_cast<uint32_t>(h) * kHeadDim],
-                                  xb[(numHeadQ_ + 2 * h + 1) * kHeadDim], vParams);
+                    static_cast<uint16_t>((padStride_ - headDim_) * sizeof(T) / 32),
+                    static_cast<uint16_t>((rowElems - headDim_) * sizeof(T) / 32)};
+                AscendC::DataCopy(ob[qkElems + static_cast<uint32_t>(h) * headDim_],
+                                  xb[(numHeadQ_ + 2 * h + 1) * headDim_], vParams);
             }
         }
 
@@ -389,7 +407,8 @@ private:
             static_cast<uint16_t>(numHeadK_), static_cast<uint16_t>(padStride_),
             static_cast<uint16_t>(rowElems), static_cast<uint16_t>(ropeStride_),
             static_cast<uint16_t>(tileRows_),
-            static_cast<uint16_t>(kvInterleaved_ ? 2 * kHeadDim : kHeadDim), eps_, recip_);
+            static_cast<uint16_t>(kvInterleaved_ ? 2 * headDim_ : headDim_),
+            static_cast<uint16_t>(headDim_), static_cast<uint16_t>(halfDim_), eps_, recip_);
         AscendC::PipeBarrier<PIPE_V>();
         inQkv_.FreeTensor(xb);
         inCos_.FreeTensor(cb);
@@ -421,21 +440,21 @@ private:
                                       uint32_t t0, uint32_t nTok, uint32_t srcHeadBase, uint32_t dstHeads,
                                       uint32_t srcHeads)
     {
-        const uint32_t rowElems = numHeadTotal_ * kHeadDim;
+        const uint32_t rowElems = numHeadTotal_ * headDim_;
         const uint32_t elemBytes = sizeof(T);
         if (dstHeads == srcHeads) {
-            uint32_t segBytes = dstHeads * kHeadDim * elemBytes;
-            DataCopyPad(gm[t0 * dstHeads * kHeadDim], src[srcHeadBase * kHeadDim],
+            uint32_t segBytes = dstHeads * headDim_ * elemBytes;
+            DataCopyPad(gm[t0 * dstHeads * headDim_], src[srcHeadBase * headDim_],
                 DataCopyExtParams{static_cast<uint16_t>(nTok), segBytes,
                     (rowElems * elemBytes - segBytes) / 32, 0, 0});
         } else {
             // GQA 扩张：dest 每 token 行内 head 之间不连续（跨 dstHeads*D），dstStride 单位是字节
-            uint32_t headBytes = kHeadDim * elemBytes;
-            uint32_t srcStride = (rowElems - kHeadDim) * elemBytes / 32;
-            uint32_t dstStride = (dstHeads - 1) * kHeadDim * elemBytes;
+            uint32_t headBytes = headDim_ * elemBytes;
+            uint32_t srcStride = (rowElems - headDim_) * elemBytes / 32;
+            uint32_t dstStride = (dstHeads - 1) * headDim_ * elemBytes;
             for (uint32_t h = 0; h < dstHeads; ++h) {
                 uint32_t sh = h / gqaGroup_;
-                DataCopyPad(gm[(t0 * dstHeads + h) * kHeadDim], src[(srcHeadBase + sh) * kHeadDim],
+                DataCopyPad(gm[(t0 * dstHeads + h) * headDim_], src[(srcHeadBase + sh) * headDim_],
                     DataCopyExtParams{static_cast<uint16_t>(nTok), headBytes, srcStride, dstStride, 0});
             }
         }
@@ -446,10 +465,10 @@ private:
                                       uint32_t t0, uint32_t nTok, uint32_t srcHeadBase, uint32_t dstHeads,
                                       uint32_t srcHeads)
     {
-        const uint32_t rowElems = numHeadTotal_ * kHeadDim;
+        const uint32_t rowElems = numHeadTotal_ * headDim_;
         const uint32_t elemBytes = sizeof(T);
-        const uint32_t headBytes = kHeadDim * elemBytes;
-        const uint32_t srcStride = (rowElems - kHeadDim) * elemBytes / 32;
+        const uint32_t headBytes = headDim_ * elemBytes;
+        const uint32_t srcStride = (rowElems - headDim_) * elemBytes / 32;
         const uint32_t dstStride = 0;  // BNSD 下同一 head 内 token 相邻，落盘连续
 
         uint32_t done = 0;
@@ -464,9 +483,9 @@ private:
             for (uint32_t h = 0; h < dstHeads; ++h) {
                 uint32_t sh = (dstHeads == srcHeads) ? h : (h / gqaGroup_);
                 uint32_t dstOff = static_cast<uint32_t>(
-                    (static_cast<uint64_t>(b) * dstHeads + h) * seqLen_ * kHeadDim +
-                    static_cast<uint64_t>(s) * kHeadDim);
-                DataCopyPad(gm[dstOff], src[done * rowElems + (srcHeadBase + sh) * kHeadDim],
+                    (static_cast<uint64_t>(b) * dstHeads + h) * seqLen_ * headDim_ +
+                    static_cast<uint64_t>(s) * headDim_);
+                DataCopyPad(gm[dstOff], src[done * rowElems + (srcHeadBase + sh) * headDim_],
                     DataCopyExtParams{static_cast<uint16_t>(rows), headBytes, srcStride, dstStride, 0});
             }
             done += rows;
@@ -500,6 +519,8 @@ private:
     uint32_t numHeadK_ = 0;
     uint32_t numHeadV_ = 0;
     uint32_t numHeadTotal_ = 0;
+    uint32_t headDim_ = kHeadDim;
+    uint32_t halfDim_ = kHalfDim;
     uint32_t qkvStride_ = 0;
     uint32_t padStride_ = 0;
     uint32_t ropeStride_ = 0;

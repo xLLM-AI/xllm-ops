@@ -26,9 +26,10 @@ limitations under the License.
 #include "register/tilingdata_base.h"
 
 namespace optiling {
-// kernel VF 支持的 head_dim（RoPE 64-lane 半区硬分区）。
-// host 从 q_gamma 形状推导 D 并校验 == 此值；更大支持集（D=256 chunk 循环）在 Tier 1 放开。
+// kernel VF 支持的 head_dim 集合（RoPE 64-lane 半区分对处理：half = D/2 必须是 64 的倍数）。
+// host 从 q_gamma 形状推导 D 并按此集合校验；更小头宽（D=64/96，半区不足 64 lane）留 Tier 2。
 constexpr uint32_t SQNR_HEAD_DIM = 128;
+constexpr uint32_t SQNR_HEAD_DIM_256 = 256;
 constexpr uint32_t SQNR_TOKEN_TILE = 8;
 constexpr uint32_t SQNR_MAX_HEADS = 64;
 constexpr uint32_t SQNR_FLAG_GQA_EXPAND = 1u << 0;

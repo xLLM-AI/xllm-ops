@@ -104,9 +104,11 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
                         qGammaShape.GetDim(0), kGammaShape.GetDim(0)),
                 return ge::GRAPH_FAILED);
     const uint32_t headDim = static_cast<uint32_t>(qGammaShape.GetDim(0));
-    OP_CHECK_IF(headDim != SQNR_HEAD_DIM,
-                OP_LOGE(context, "head_dim %u unsupported (derived from q_gamma), kernel requires D=%u.",
-                        headDim, SQNR_HEAD_DIM),
+    // Tier 1 支持集：D ∈ {128, 256}；VF 按 64-lane chunk/pair 处理，两档均为 half=多整 64-lane pair。
+    // D=64/96 需要半区不足 64 lane 的特殊布局（模板 + tilingKey），留 Tier 2。
+    OP_CHECK_IF(headDim != SQNR_HEAD_DIM && headDim != SQNR_HEAD_DIM_256,
+                OP_LOGE(context, "head_dim %u unsupported (derived from q_gamma), kernel supports D={%u,%u}.",
+                        headDim, SQNR_HEAD_DIM, SQNR_HEAD_DIM_256),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(static_cast<uint32_t>(kGammaShape.GetDim(0)) != headDim,
                 OP_LOGE(context, "k_gamma dim %ld != q_gamma dim %u.", kGammaShape.GetDim(0), headDim),
