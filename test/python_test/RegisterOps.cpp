@@ -1071,7 +1071,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> split_qkv_norm_rope_impl_npu(
     double epsilon,
     bool gqa_expand,
     bool layout_bnsd,
-    bool kv_interleaved) {
+    bool kv_interleaved,
+    int64_t rope_dim) {
   constexpr int64_t kHeadDimFallback = 128;
   const int64_t kHeadDim = q_gamma.dim() > 0 ? q_gamma.size(-1) : kHeadDimFallback;
   auto sizes = qkv.sizes().vec();
@@ -1104,6 +1105,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> split_qkv_norm_rope_impl_npu(
                gqa_expand,
                layout_bnsd,
                kv_interleaved,
+               rope_dim,
                q,
                k,
                v);

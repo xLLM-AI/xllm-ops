@@ -20,7 +20,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 ```text
 1. SplitQKV : qkv[B,S,(Nq+2*Nk)*D + tail] -> q / k / v
 2. QK-Norm  : q、k 各自按 head 做 RMSNorm（gamma 独立）
-3. RoPE     : q、k 做 NeoX 半分化旋转（cos/sin 只取前 D/2 维）
+3. RoPE     : q、k 做 NeoX 半分化旋转（cos/sin 只取前 rope_dim/2 维，其余维度经 RMSNorm*gamma 直通）
 ```
 
 融合收益来自两点：把 29 个 kernel 收成 1 个（省 launch 与调度），以及把中间张量
@@ -53,8 +53,11 @@ kv_interleaved = 行内 KV 布局开关：
             false -> [Q | K0..K(Nk-1) | V0..V(Nk-1) | tail]（块状）
             true  -> [Q | K0 V0 | K1 V1 | ... | tail]（逐 kv head 交错）
             两种布局都要求 Q 区在前，gate 等附加列放在最后
-ropeStride= cos/sin 行跨度（元素），取值 [D/2, D] 且必须 16 对齐；只读前 D/2 = 64 维
-            仅支持 NeoX 半分化 RoPE（前 64 维与后 64 维配对）
+ropeStride= cos/sin 行跨度（元素），取值 [D/2, D] 且必须 16 对齐；只读前 rope_dim/2 维
+            仅支持 NeoX 半分化 RoPE（每半区前 rope_dim/2 与对应后半配对）
+rope_dim   = 参与 NeoX 旋转的维度数（属性，attr#6），0（缺省）= 全 head_dim 旋转；
+            非 0 时要求 0 < rope_dim <= D 且 rope_dim % 128 == 0（64-lane pair 对齐）；
+            仅前 rope_dim/2 维旋转，其余经 RMSNorm*gamma 直通（部分 rope）
 dtype     = bf16 / fp16；五个输入与三个输出必须同 dtype
 rank      = qkv / cos / sin 均为 3 维
 B / S     = 均 > 0；空张量直接拒绝
@@ -71,14 +74,15 @@ workspace = 0，调用方不需要申请
 | `Nv` | `Nv ≡ Nk` | 无 `num_v_heads` 属性，按 `Nk` 处理 |
 | `Nq` / `Nk` | 均 `> 0`（按符号类型校验，负数不回绕），且 `Nq % Nk == 0`；各自 `<= 64` | `ACLNN_ERR_PARAM_INVALID` |
 | `Nq + Nk` | `<= 64` | `ACLNN_ERR_PARAM_INVALID` |
-| `stride` | `>= (Nq + 2*Nk) * 128` | `ACLNN_ERR_PARAM_INVALID` |
-| `ropeStride` | `∈ [64, 128]` 且为 16 的倍数 | `ACLNN_ERR_PARAM_INVALID` |
+| `stride` | `>= (Nq + 2*Nk) * D` | `ACLNN_ERR_PARAM_INVALID` |
+| `ropeStride` | `∈ [D/2, D]` 且为 16 的倍数 | `ACLNN_ERR_PARAM_INVALID` |
+| `rope_dim` | `0` 或 `∈ (0, D]` 且 `% 128 == 0` | `ACLNN_ERR_PARAM_INVALID` |
 | `rank` | 3 维 | `GRAPH_FAILED` |
 | `dtype` | bf16 / fp16，且输入输出一致 | 参数错误 |
 | `B` / `S` | 均 `> 0` | `GRAPH_FAILED`（避免 tiling 除零） |
 | `epsilon` | 有限且非负 | `ACLNN_ERR_PARAM_INVALID` |
 | `UB` | `<= 253952 B` | `GRAPH_FAILED` |
-| `q_gamma` / `k_gamma` | 形状 `[D]`（当前 `D=128`），rank-1 且两者一致 | `ACLNN_ERR_PARAM_INVALID` |
+| `q_gamma` / `k_gamma` | 形状 `[D]`（`D` 由 `q_gamma` 推导），rank-1 且两者一致 | `ACLNN_ERR_PARAM_INVALID` |
 | `sin` | 形状与 `cos` 一致 | **未校验**，越界读 |
 | `cos` / `sin` 的 `B,S` | 与 `qkv` 一致 | **未校验**，按 `b*S+s` 索引会错位 |
 
@@ -107,7 +111,7 @@ aclnnStatus aclnnSplitQkvNormRopeGetWorkspaceSize(
     const aclTensor *qkv, const aclTensor *qGamma, const aclTensor *kGamma,
     const aclTensor *cos, const aclTensor *sin,
     int64_t numHeadQ, int64_t numHeadK, float epsilon,
-    bool gqaExpand, bool layoutBNSD, bool kvInterleaved,
+    bool gqaExpand, bool layoutBNSD, bool kvInterleaved, int64_t ropeDim,
     aclTensor *qOut, aclTensor *kOut, aclTensor *vOut,
     uint64_t *workspaceSize, aclOpExecutor **executor);
 
@@ -135,6 +139,7 @@ aclnnStatus aclnnSplitQkvNormRope(
 | `gqa_expand` | Bool | false | 仅在 `Nq % Nk == 0` 时有意义；`true` 时 k/v 输出 `Nq` 头 | k/v 是否扩张到 `Nq` 头 |
 | `layout_bnsd` | Bool | false | 只影响输出布局 | 输出 `[B,H,S,D]` / `[B,S,H*D]` |
 | `kv_interleaved` | Bool | false | 要求 `Nv == Nk`（当前恒成立）；数据必须与所选布局一致 | 输入行内 KV 是否按 head 交错 `[K_i,V_i]`（JoyOV2 `to_qkv` 的打包方式） |
+| `rope_dim` | Int | 0 | `0` 或 `rope_dim ∈ (0, D]` 且 `% 128 == 0`；`D=128` 时仅 `0/128`（等价全旋转） | 参与 NeoX 旋转的维度数，`0` = 全 `head_dim` 旋转；其余维度直通 |
 
 > 头数上限 `Nq + Nk <= 64` 来自 `sumsq` workspace 的容量（`kMaxHeads`）；
 > 更大的头数即使放开该常量，也会被 UB 预算拒绝。`tokenTile` 不在属性里暴露，
@@ -144,6 +149,7 @@ aclnnStatus aclnnSplitQkvNormRope(
 
 - `stride >= (Nq+2*Nk)*D`、`ropeStride ∈ [D/2, D]` 且 16 对齐、`Nq % Nk == 0`、`Nq+Nk <= 64`；
 - `D` 由 `q_gamma` 形状推导（单一来源），`q_gamma`/`k_gamma` rank-1 且维度一致；当前支持 `D ∈ {128, 256}`；
+- `rope_dim` 为 0 或满足 `0 < rope_dim <= D` 且 `% 128 == 0`（64-lane pair 对齐），否则参数错误；
 - 头数按符号类型校验：负值在转 u32 前直接拒绝，避免回绕绕过后续检查；
 - `B > 0`、`S > 0`（空张量拒绝，避免 tiling 除零）；`epsilon` 有限且非负；
 - 输入输出 dtype 一致且为 bf16/fp16，`qkv`/`cos` 必须 3 维；
@@ -153,7 +159,7 @@ aclnnStatus aclnnSplitQkvNormRope(
 当前已知限制（尚未泛化）：
 
 - `Nv` 不能独立于 `Nk`（无 `num_v_heads` 属性），MLA 类非对称 KV 暂不支持；
-- RoPE 固定作用于整个 `head_dim`，且只有 NeoX 半分化一种形式（无部分 rope / 交错 rope）；
+- RoPE 仅支持 NeoX 半分化一种形式；部分旋转经 `rope_dim` 属性支持（前 `rope_dim/2` 对配对旋转，其余直通），交错 rope 不支持；
 - `head_dim` 从 `q_gamma` 推导并校验；当前支持 `{128, 256}`（VF 按 64-lane chunk/pair 循环，
   `D=256` 时 nPairs=2，pass1 累加 4 段、pass2 走 2 个 NeoX pair，D=128 路径指令数不变）；
   `D=64/96` 半区不足 64 lane，需模板 + tilingKey，留 Tier 2；
@@ -180,9 +186,19 @@ aclnnStatus aclnnSplitQkvNormRope(
 sumsq  = Σ_{i=0}^{D-1} x_i^2
 scale  = 1 / sqrt(sumsq / D + eps)
 y_i    = x_i * scale * gamma_i
-x1     = y[0:64],  x2 = y[64:128]
+x1     = y[0:D/2],  x2 = y[D/2:D]
 out    = [ x1*cos - x2*sin ,  x2*cos + x1*sin ]
 ```
+
+部分 rope（`rope_dim < D`，如 `D=256, rope_dim=128`）时把每半区切成两段：
+```text
+r = rope_dim/2   （必须是 64 的倍数）
+out[0:r]     = y[0:r]*cos - y[D/2:D/2+r]*sin        # 前 r 对配对旋转
+out[r:D/2]   = y[r:D/2]                              # passthrough（norm*gamma 后直通）
+out[D/2:D/2+r] = y[D/2:D/2+r]*cos + y[0:r]*sin
+out[D/2+r:D] = y[D/2+r:D]
+```
+`rope_dim = 0`（缺省）等价 `rope_dim = D`，走全旋转路径，与历史行为一致。
 
 `v` 头不做 norm/rope，由一次多行 UB→UB `DataCopy` 原样搬进输出 tile（不经 fp32）。
 
@@ -228,7 +244,8 @@ ACLNN 路径 `aivNum = ascendcPlatform.GetCoreNumAiv() = 54`，主场景
 
 TilingData 字段：`batch / seqLen / numHeadQ / numHeadK / numHeadV / headDim /
 qkvStride / padStride / ropeStride / totalTokens / tokenPerCore / tokenTile /
-lastBlockTokenNum / eps / reciprocal / flags / blockDim`。
+lastBlockTokenNum / eps / reciprocal / flags / blockDim / ropeDim`。
+`ropeDim` = 属性 `rope_dim`（0 时 host 已展开为 `headDim`），kernel 据此拆 rope/passthrough 循环；
 `flags` 用位域替代 tilingKey 做布局与 GQA 分支：`bit0 = gqa_expand`、`bit1 = layout_bnsd`；
 tilingKey 只区分 dtype（`0 = bf16`、`1 = fp16`）。
 
@@ -245,6 +262,10 @@ tilingKey 只区分 dtype（`0 = bf16`、`1 = fp16`）。
   `LoadAlign<DIST_BRC_B32>` 广播。末段多出的 lane 只写回 `sumsq`，pass2 不会回读。
 - **γ 折进 cos/sin**：`a=γ1·cos、c=γ1·sin、d=γ2·cos、b=-γ2·sin`，每 head 少 2 次乘法。
 - **RoPE 融合**：每半 1 次 `Mul` + 1 次 `MulAddDst`。
+- **部分 rope（Tier 3）**：pass2 按 `nRopePairs = rope_dim/2/64` 拆两个循环——前 `nRopePairs` 个
+  64-lane pair 走 NeoX 旋转（γ 折进 cos/sin），其余 `nPairs - nRopePairs` 个 pair 走
+  passthrough（`y = x*scale*gamma` 直通写出）；全 rope 时 `nRopePairs == nPairs`，
+  passthrough 循环不执行，指令路径与原实现完全一致。
 - **输出 pack-store**：`Cast<T,float,RndRSatNS>` + `StoreAlign<T, DIST_PACK_B32>`
   直接把 fp32 结果打包进输出 tile，无整趟 cast-out；目标行距用输出 tile 行距
   `numHeadTotal*128`，不是 q/k 行宽。
@@ -306,10 +327,12 @@ k `1.55e-2`、v `0`。
 
 ## 测试
 
-`test/python_test/test_split_qkv_norm_rope.py`，覆盖 11 组形状 × 2 种 dtype（共 22 条）：
-主场景、BNSD、`gqa_expand`、无 tail、单 token、尾 tile、文本侧 `[8,1,1]`/`[8,2,2]`、
-`B>1`、`ropeStride=128`、BNSD+gqa。参考实现用 torch 逐元素复算；
-`v` 用 `atol=rtol=0` 校验纯拷贝语义。
+`test/python_test/test_split_qkv_norm_rope.py`，覆盖 35 组形状 × 2 种 dtype（共 70 条功能用例）
+加 8 条拒绝用例：主场景、BNSD、`gqa_expand`、无 tail、单 token、尾 tile、文本侧
+`[8,1,1]`/`[8,2,2]`、`B>1`、`ropeStride=128`、BNSD+gqa、KV 交错、宽头数（16/32/48 q heads）、
+部分 rope（`D=256, rope_dim=128` × 6 组）；参考实现用 torch 逐元素复算（含部分 rope 的
+旋转/直通拼接）；`v` 用 `atol=rtol=0` 校验纯拷贝语义。拒绝用例覆盖负头数、非 16 对齐
+`ropeStride`、`D` 超支持集、`k_gamma` 维度不一致、`rope_dim % 128 != 0`、`rope_dim > D`。
 
 端到端验证（编译算子包 → 安装 → 编译 python 扩展 → pytest）：
 
@@ -330,4 +353,4 @@ python3 setup.py build bdist_wheel && pip3 install --force-reinstall --no-deps d
 python3 -m pytest -q test_split_qkv_norm_rope.py
 ```
 
-上板结果（`Ascend950PR_9579`，单卡）：**22 passed**。
+上板结果（`Ascend950PR_9579`，单卡）：**78 passed**（70 功能 + 8 拒绝）。

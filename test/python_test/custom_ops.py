@@ -258,10 +258,11 @@ def gamma_add_rms_norm_npu(x1, x2, gamma, eps=1e-6,
 #   Returns (q, k, v): BSND [B,S,H*D] or BNSD [B,H,S,D] when layout_bnsd=True.
 def split_qkv_norm_rope_npu(qkv, q_gamma, k_gamma, cos, sin, num_q_heads,
                             num_kv_heads, eps=1e-6, gqa_expand=False,
-                            layout_bnsd=False, kv_interleaved=False):
+                            layout_bnsd=False, kv_interleaved=False,
+                            rope_dim=0):
     return custom_ops_lib.split_qkv_norm_rope(
         qkv, q_gamma, k_gamma, cos, sin, num_q_heads, num_kv_heads, eps,
-        gqa_expand, layout_bnsd, kv_interleaved)
+        gqa_expand, layout_bnsd, kv_interleaved, rope_dim)
 
 
 def hc_pre_va_npu(

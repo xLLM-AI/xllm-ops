@@ -28,16 +28,20 @@ HALF_DIM = 64
 
 def split_qkv_norm_rope_torch(qkv, q_gamma, k_gamma, cos, sin, num_q_heads,
                               num_kv_heads, eps=1e-6, gqa_expand=False,
-                              layout_bnsd=False):
+                              layout_bnsd=False, rope_dim=None):
     """PyTorch reference for SplitQkvNormRope.
 
     Args:
         qkv: [B, S, stride] with q/k/v heads packed contiguously at row start.
         q_gamma/k_gamma: [D] RMSNorm gamma for q/k heads. D is derived from
             q_gamma (single source, same as host tiling).
-        cos/sin: [B, S, rope_stride], only the first D/2 entries are used
-            (NeoX half-split layout).
+        cos/sin: [B, S, rope_stride], only the first rope_dim/2 entries are
+            used for rotation (NeoX half-split layout).
         num_q_heads/num_kv_heads: head counts; v heads == kv heads.
+        rope_dim: None/0 = full-head rotation; otherwise only the first
+            rope_dim dims are rotated (rope_dim/2 per half, pair-wise with the
+            matching second-half chunk), the rest pass through after
+            RMSNorm*gamma.
     Returns:
         (q, k, v) in BSND [B,S,H*D] or BNSD [B,H,S,D].
     """
@@ -45,6 +49,7 @@ def split_qkv_norm_rope_torch(qkv, q_gamma, k_gamma, cos, sin, num_q_heads,
     b, s, _ = qkv.shape
     d = q_gamma.shape[-1]
     half = d // 2
+    rd = (d if rope_dim is None or rope_dim == 0 else rope_dim) // 2
     num_v_heads = num_kv_heads
     used = (num_q_heads + num_kv_heads + num_v_heads) * d
 
@@ -59,16 +64,25 @@ def split_qkv_norm_rope_torch(qkv, q_gamma, k_gamma, cos, sin, num_q_heads,
         var = t.pow(2).mean(dim=-1, keepdim=True)
         return t * torch.rsqrt(var + eps) * gamma.float().view(1, 1, 1, d)
 
-    def rope_half(t, c, sn):
-        t1 = t[..., :half]
-        t2 = t[..., half:]
-        return torch.cat([t1 * c - t2 * sn, t2 * c + t1 * sn], dim=-1)
+    def rope_neox(t, c, sn):
+        if rd == half:
+            t1 = t[..., :half]
+            t2 = t[..., half:]
+            return torch.cat([t1 * c - t2 * sn, t2 * c + t1 * sn], dim=-1)
+        # partial rope: rotate pair-wise first rd of each half, rest passthrough
+        t1 = t[..., :rd]
+        t2 = t[..., half:half + rd]
+        p1 = t[..., rd:half]
+        p2 = t[..., half + rd:]
+        r1 = t1 * c - t2 * sn
+        r2 = t2 * c + t1 * sn
+        return torch.cat([r1, p1, r2, p2], dim=-1)
 
-    c = cos[..., :half].float().unsqueeze(2)
-    sn = sin[..., :half].float().unsqueeze(2)
+    c = cos[..., :rd].float().unsqueeze(2)
+    sn = sin[..., :rd].float().unsqueeze(2)
 
-    q = rope_half(rms_norm(q, q_gamma), c, sn)
-    k = rope_half(rms_norm(k, k_gamma), c, sn)
+    q = rope_neox(rms_norm(q, q_gamma), c, sn)
+    k = rope_neox(rms_norm(k, k_gamma), c, sn)
 
     if gqa_expand and num_q_heads != num_kv_heads:
         rep = num_q_heads // num_kv_heads
@@ -340,25 +354,100 @@ def test_split_qkv_norm_rope_wide_heads(
         v_npu.cpu().float(), v_ref.float(), atol=0, rtol=0)
 
 
+# 部分 rope（Tier 3）：D=256 时仅旋转前 rope_dim=128 维，其余经 norm*gamma 直通。
+# head_dim=256、rope_dim=128 固定；变化 (batch, seq, nq, nkv, tail, gqa, bnsd, kv_int)
+# (batch, seq, nq, nkv, stride_tail, gqa_expand, layout_bnsd, kv_interleaved)
+PARTIAL_ROPE_CASES = [
+    (1, 512, 6, 2, 6, False, False, False),   # D=256 rope_dim=128 main
+    (1, 512, 6, 2, 6, True, False, False),    # + GQA inline expand
+    (1, 1, 6, 2, 6, False, False, False),     # single token
+    (1, 7, 6, 2, 6, False, False, False),     # tail tile
+    (1, 512, 6, 2, 6, False, True, False),    # BNSD
+    (1, 512, 6, 2, 6, False, False, True),    # kv_interleaved
+]
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "batch,seq,nq,nkv,tail,gqa_expand,layout_bnsd,kv_interleaved", PARTIAL_ROPE_CASES)
+def test_split_qkv_norm_rope_partial_rope(
+        batch, seq, nq, nkv, tail, gqa_expand, layout_bnsd, kv_interleaved,
+        dtype):
+    if not _get_device():
+        return
+
+    torch.manual_seed(20261106)
+    eps = 1e-6
+    head_dim = 256
+    rope_dim = 128
+    half_dim = head_dim // 2
+    rope_half = rope_dim // 2
+    stride = (nq + 2 * nkv) * head_dim + tail
+
+    qkv = (torch.randn(batch, seq, stride, dtype=torch.float32) * 0.5).to(dtype)
+    q_gamma = (1.0 + 0.1 * torch.randn(head_dim, dtype=torch.float32)).to(dtype)
+    k_gamma = (1.0 + 0.1 * torch.randn(head_dim, dtype=torch.float32)).to(dtype)
+
+    # inv_freq 按参与旋转的 rope_dim 生成（只取前 rope_half 项）
+    inv_freq = 1.0 / (10000.0**(torch.arange(
+        0, rope_dim, 2, dtype=torch.float32) / rope_dim))
+    pos = torch.arange(seq, dtype=torch.float32).view(1, seq, 1)
+    freqs = pos * inv_freq.view(1, 1, -1)
+    cos = torch.zeros(batch, seq, half_dim, dtype=torch.float32)
+    sin = torch.zeros(batch, seq, half_dim, dtype=torch.float32)
+    cos[..., :rope_half] = freqs.cos().expand(batch, seq, rope_half)
+    sin[..., :rope_half] = freqs.sin().expand(batch, seq, rope_half)
+    cos = cos.to(dtype)
+    sin = sin.to(dtype)
+
+    q_ref, k_ref, v_ref = split_qkv_norm_rope_torch(
+        qkv, q_gamma, k_gamma, cos, sin, nq, nkv, eps, gqa_expand, layout_bnsd,
+        rope_dim)
+    qkvi = _to_interleaved(qkv, nq, nkv, head_dim) if kv_interleaved else qkv
+
+    q_npu, k_npu, v_npu = custom_ops.split_qkv_norm_rope_npu(
+        qkvi.npu(), q_gamma.npu(), k_gamma.npu(), cos.npu(), sin.npu(),
+        nq, nkv, eps, gqa_expand, layout_bnsd, kv_interleaved, rope_dim)
+    torch.npu.synchronize()
+
+    if dtype == torch.float16:
+        atol = rtol = 2e-3
+    else:
+        atol = rtol = 2e-2
+
+    assert tuple(q_npu.shape) == tuple(q_ref.shape)
+    assert tuple(k_npu.shape) == tuple(k_ref.shape)
+    assert tuple(v_npu.shape) == tuple(v_ref.shape)
+    torch.testing.assert_close(
+        q_npu.cpu().float(), q_ref.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(
+        k_npu.cpu().float(), k_ref.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(
+        v_npu.cpu().float(), v_ref.float(), atol=0, rtol=0)
+
+
 # 拒绝路径：host 校验应返回参数错误而不是回绕/静默越界
 # (nq, nkv, batch, seq, rope_stride, eps, q_gamma_dim, k_gamma_dim, desc)
 # 注：epsilon 负值校验暂无法在 aclnn eager 路径覆盖——生成的
 # NnopbaseAddAttrWithDtype(kNnopbaseFloat) 会把 Float 属性槽写成 0，
 # tiling 读到的永远是 0（见文档"已知问题"）。验证代码保留，待框架修复后补用例。
 REJECT_CASES = [
-    (-1, 2, 1, 8, 64, 1e-6, 128, 128, "negative num_q_heads must not wrap to u32"),
-    (6, -2, 1, 8, 64, 1e-6, 128, 128, "negative num_kv_heads must not wrap to u32"),
-    (6, 2, 1, 8, 65, 1e-6, 128, 128, "rope_stride must be 16-aligned for LoadAlign"),
-    (6, 2, 1, 8, 64, 1e-6, 512, 512, "head_dim 512 outside support set {128,256}"),
-    (6, 2, 1, 8, 64, 1e-6, 64, 64, "head_dim 64 unsupported until Tier 2"),
-    (6, 2, 1, 8, 64, 1e-6, 128, 256, "k_gamma dim must match q_gamma"),
+    (-1, 2, 1, 8, 64, 1e-6, 128, 128, 0, "negative num_q_heads must not wrap to u32"),
+    (6, -2, 1, 8, 64, 1e-6, 128, 128, 0, "negative num_kv_heads must not wrap to u32"),
+    (6, 2, 1, 8, 65, 1e-6, 128, 128, 0, "rope_stride must be 16-aligned for LoadAlign"),
+    (6, 2, 1, 8, 64, 1e-6, 512, 512, 0, "head_dim 512 outside support set {128,256}"),
+    (6, 2, 1, 8, 64, 1e-6, 64, 64, 0, "head_dim 64 unsupported until Tier 2"),
+    (6, 2, 1, 8, 64, 1e-6, 128, 256, 0, "k_gamma dim must match q_gamma"),
+    (6, 2, 1, 8, 128, 1e-6, 256, 256, 192, "rope_dim must be a multiple of 128"),
+    (6, 2, 1, 8, 128, 1e-6, 256, 256, 512, "rope_dim must not exceed head_dim"),
 ]
 
 
 @pytest.mark.parametrize(
-    "nq,nkv,batch,seq,rope_stride,eps,q_gamma_dim,k_gamma_dim,desc", REJECT_CASES)
+    "nq,nkv,batch,seq,rope_stride,eps,q_gamma_dim,k_gamma_dim,rope_dim,desc", REJECT_CASES)
 def test_split_qkv_norm_rope_reject_invalid(
-        nq, nkv, batch, seq, rope_stride, eps, q_gamma_dim, k_gamma_dim, desc):
+        nq, nkv, batch, seq, rope_stride, eps, q_gamma_dim, k_gamma_dim,
+        rope_dim, desc):
     if not _get_device():
         return
 
@@ -374,5 +463,5 @@ def test_split_qkv_norm_rope_reject_invalid(
     with pytest.raises((RuntimeError, AssertionError)):
         custom_ops.split_qkv_norm_rope_npu(
             qkv.npu(), q_gamma.npu(), k_gamma.npu(), cos.npu(), sin.npu(),
-            nq, nkv, eps, True, False, False)
+            nq, nkv, eps, True, False, False, rope_dim)
         torch.npu.synchronize()

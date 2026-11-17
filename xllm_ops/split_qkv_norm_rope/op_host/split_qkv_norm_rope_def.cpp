@@ -83,6 +83,9 @@ public:
         this->Attr("gqa_expand").AttrType(OPTIONAL).Bool(false);
         this->Attr("layout_bnsd").AttrType(OPTIONAL).Bool(false);
         this->Attr("kv_interleaved").AttrType(OPTIONAL).Bool(false);
+        // rope_dim：参与 NeoX 旋转的维度数；0（缺省）= 全 head_dim 旋转。
+        // 仅前 rope_dim/2 维与对应后半配对旋转，其余维度经 RMSNorm*gamma 后原样直通。
+        this->Attr("rope_dim").AttrType(OPTIONAL).Int(0);
 
         // 仅 Ascend 950（DAV_3510）
         OpAICoreConfig a5Cfg;

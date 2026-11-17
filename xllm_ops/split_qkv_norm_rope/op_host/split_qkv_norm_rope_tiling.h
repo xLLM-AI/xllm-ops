@@ -58,6 +58,7 @@ TILING_DATA_FIELD_DEF(float, eps);
 TILING_DATA_FIELD_DEF(float, reciprocal);
 TILING_DATA_FIELD_DEF(uint32_t, flags);
 TILING_DATA_FIELD_DEF(uint32_t, blockDim);
+TILING_DATA_FIELD_DEF(uint32_t, ropeDim);  //参与 NeoX 旋转的维度数（=headDim 表示全旋转）
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(SplitQkvNormRope, SplitQkvNormRopeTilingData)

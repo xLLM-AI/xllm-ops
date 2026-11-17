@@ -38,6 +38,7 @@ constexpr size_t ATTR_EPSILON = 2;
 constexpr size_t ATTR_GQA_EXPAND = 3;
 constexpr size_t ATTR_LAYOUT_BNSD = 4;
 constexpr size_t ATTR_KV_INTERLEAVED = 5;
+constexpr size_t ATTR_ROPE_DIM = 6;
 
 inline uint32_t RoundUp(uint32_t value, uint32_t align)
 {
@@ -145,6 +146,17 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     const bool gqaExpand = (gqaPtr != nullptr) ? *gqaPtr : false;
     const bool layoutBNSD = (bnsdPtr != nullptr) ? *bnsdPtr : false;
     const bool kvInterleaved = (kvIntPtr != nullptr) ? *kvIntPtr : false;
+    // rope_dim：0/缺省 = 全 head_dim 旋转（与历史行为一致）；
+    // 非 0 时要求 <= head_dim 且 % 128 == 0（NeoX 半区按 64-lane pair 对齐）
+    const int64_t *ropeDimPtr = attrs->GetAttrPointer<int64_t>(ATTR_ROPE_DIM);
+    const int64_t ropeDimRaw = (ropeDimPtr != nullptr) ? *ropeDimPtr : 0;
+    OP_CHECK_IF(ropeDimRaw < 0 || ropeDimRaw > static_cast<int64_t>(headDim),
+                OP_LOGE(context, "rope_dim %ld out of range (0, %u].", ropeDimRaw, headDim),
+                return ge::GRAPH_FAILED);
+    const uint32_t ropeDim = (ropeDimRaw == 0) ? headDim : static_cast<uint32_t>(ropeDimRaw);
+    OP_CHECK_IF(ropeDim % 128 != 0,
+                OP_LOGE(context, "rope_dim %u must be a multiple of 128 (64-lane pair aligned).", ropeDim),
+                return ge::GRAPH_FAILED);
 
     const uint32_t numHeadV = numHeadK;  // v1：Nv == Nk
     const uint32_t headTotal = numHeadQ + numHeadK + numHeadV;
@@ -237,6 +249,7 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     }
     tilingData.set_flags(flags);
     tilingData.set_blockDim(blockDim);
+    tilingData.set_ropeDim(ropeDim);
 
     context->SetBlockDim(blockDim);
     context->SetTilingKey(SQNR_KEY_SINGLE);
@@ -247,9 +260,9 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     OP_CHECK_NULL_WITH_CONTEXT(context, workspace);
     workspace[0] = 0;
 
-    OP_LOGI(context, "tokens=%u blockDim=%u tokenPerCore=%u tile=%u lastCore=%u stride=%u pad=%u rope=%u heads=%u/%u D=%u gqa=%d bnsd=%d",
+    OP_LOGI(context, "tokens=%u blockDim=%u tokenPerCore=%u tile=%u lastCore=%u stride=%u pad=%u rope=%u heads=%u/%u D=%u ropeDim=%u gqa=%d bnsd=%d",
             totalTokens, blockDim, tokenPerCore, tokenTile, tilingData.get_lastBlockTokenNum(), qkvStride, padStride,
-            ropeStride, numHeadQ, numHeadK, headDim, static_cast<int32_t>(gqaExpand), static_cast<int32_t>(layoutBNSD));
+            ropeStride, numHeadQ, numHeadK, headDim, ropeDim, static_cast<int32_t>(gqaExpand), static_cast<int32_t>(layoutBNSD));
     return ge::GRAPH_SUCCESS;
 }
 
