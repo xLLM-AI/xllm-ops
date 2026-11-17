@@ -26,10 +26,14 @@ limitations under the License.
 #include "register/tilingdata_base.h"
 
 namespace optiling {
-// kernel VF 支持的 head_dim 集合（RoPE 64-lane 半区分对处理：half = D/2 必须是 64 的倍数）。
-// host 从 q_gamma 形状推导 D 并按此集合校验；更小头宽（D=64/96，半区不足 64 lane）留 Tier 2。
+// kernel VF 支持的 head_dim 集合：
+//   D ∈ {128, 256}：half = D/2 为多整 64-lane pair，走 UNPACK_B16 全量 mask 路径；
+//   D ∈ {64, 96}：half < 64 lane，走 HalfMasked 模板（UpdateMask 计数掩码 + 半区双窗口）。
+// host 从 q_gamma 形状推导 D 并按此集合校验。
 constexpr uint32_t SQNR_HEAD_DIM = 128;
 constexpr uint32_t SQNR_HEAD_DIM_256 = 256;
+constexpr uint32_t SQNR_HEAD_DIM_64 = 64;
+constexpr uint32_t SQNR_HEAD_DIM_96 = 96;
 constexpr uint32_t SQNR_TOKEN_TILE = 8;
 constexpr uint32_t SQNR_MAX_HEADS = 64;
 constexpr uint32_t SQNR_FLAG_GQA_EXPAND = 1u << 0;

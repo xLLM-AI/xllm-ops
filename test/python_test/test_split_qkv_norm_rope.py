@@ -130,6 +130,22 @@ CASES = [
     (1, 7, 6, 2, 6, 128, False, False, 256),    # D=256 tail tile
     (2, 64, 6, 2, 6, 128, False, False, 256),   # D=256 B > 1
     (1, 128, 8, 1, 0, 128, False, False, 256),  # D=256 Nk = Nv = 1
+    # --- D = 64（Tier 2：HalfMasked 计数掩码路径，half=32 单 masked pair）---
+    (1, 512, 6, 2, 6, 32, False, False, 64),   # D=64 main scenario
+    (1, 512, 6, 2, 6, 32, False, True, 64),    # D=64 BNSD
+    (1, 512, 6, 2, 6, 32, True, False, 64),    # D=64 GQA inline expand
+    (1, 1, 6, 2, 6, 32, False, False, 64),     # D=64 single token
+    (1, 7, 6, 2, 6, 32, False, False, 64),     # D=64 tail tile
+    (1, 64, 6, 2, 6, 64, False, False, 64),    # D=64 full-width rope table
+    (1, 128, 8, 1, 0, 32, False, False, 64),   # D=64 Nk = Nv = 1
+    # --- D = 96（Tier 2：HalfMasked，half=48，pass1 尾块 32）---
+    (1, 512, 6, 2, 6, 48, False, False, 96),   # D=96 main scenario
+    (1, 512, 6, 2, 6, 48, False, True, 96),    # D=96 BNSD
+    (1, 512, 6, 2, 6, 48, True, False, 96),    # D=96 GQA inline expand
+    (1, 1, 6, 2, 6, 48, False, False, 96),     # D=96 single token
+    (1, 7, 6, 2, 6, 48, False, False, 96),     # D=96 tail tile
+    (1, 96, 6, 2, 6, 96, False, False, 96),    # D=96 full-width rope table
+    (1, 128, 8, 1, 0, 48, False, False, 96),   # D=96 Nk = Nv = 1
 ]
 
 
@@ -219,6 +235,10 @@ INTERLEAVED_CASES = [
     (2, 64, 6, 2, 6, 64, False, True, 128),     # interleaved + BNSD + B > 1
     (1, 512, 6, 2, 6, 128, False, False, 256),  # D=256 interleaved main
     (1, 512, 6, 2, 6, 128, True, False, 256),   # D=256 interleaved + GQA expand
+    (1, 512, 6, 2, 6, 32, False, False, 64),   # D=64 interleaved main
+    (1, 512, 6, 2, 6, 32, True, False, 64),    # D=64 interleaved + GQA expand
+    (1, 512, 6, 2, 6, 48, False, False, 96),   # D=96 interleaved main
+    (1, 512, 6, 2, 6, 48, True, False, 96),    # D=96 interleaved + GQA expand
 ]
 
 
@@ -435,11 +455,13 @@ REJECT_CASES = [
     (-1, 2, 1, 8, 64, 1e-6, 128, 128, 0, "negative num_q_heads must not wrap to u32"),
     (6, -2, 1, 8, 64, 1e-6, 128, 128, 0, "negative num_kv_heads must not wrap to u32"),
     (6, 2, 1, 8, 65, 1e-6, 128, 128, 0, "rope_stride must be 16-aligned for LoadAlign"),
-    (6, 2, 1, 8, 64, 1e-6, 512, 512, 0, "head_dim 512 outside support set {128,256}"),
-    (6, 2, 1, 8, 64, 1e-6, 64, 64, 0, "head_dim 64 unsupported until Tier 2"),
+    (6, 2, 1, 8, 64, 1e-6, 512, 512, 0, "head_dim 512 outside support set {64,96,128,256}"),
+    (6, 2, 1, 8, 64, 1e-6, 72, 72, 0, "head_dim 72 outside support set {64,96,128,256}"),
+    (6, 2, 1, 8, 64, 1e-6, 192, 192, 0, "head_dim 192 outside support set {64,96,128,256}"),
     (6, 2, 1, 8, 64, 1e-6, 128, 256, 0, "k_gamma dim must match q_gamma"),
     (6, 2, 1, 8, 128, 1e-6, 256, 256, 192, "rope_dim must be a multiple of 128"),
     (6, 2, 1, 8, 128, 1e-6, 256, 256, 512, "rope_dim must not exceed head_dim"),
+    (6, 2, 1, 8, 32, 1e-6, 64, 64, 32, "rope_dim must equal head_dim for D<128"),
 ]
 
 

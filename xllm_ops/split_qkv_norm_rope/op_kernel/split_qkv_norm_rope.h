@@ -59,7 +59,7 @@ constexpr uint32_t kFlagKvInterleaved = 1u << 2;  // 1：输入行内 KV 按 hea
 //      RoPE 每半 1 次 Mul + 1 次 MulAddDst。
 //   5) 输出在寄存器内 Cast 成 T 后 StoreAlign DIST_PACK_B32 直写（pack-store），无整块 cast-out。
 // ---------------------------------------------------------------------------
-template <typename T>
+template <typename T, bool kHalfMasked>
 __simd_vf__ inline void SqnrNormRopeVfPack(
     __ubuf__ T *outT, __ubuf__ T *xb, __ubuf__ T *cosT, __ubuf__ T *sinT,
     __ubuf__ float *gammaQ, __ubuf__ float *gammaK, __ubuf__ float *sumsq,
@@ -97,6 +97,136 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     // 末段多出的 lane 只写回 sumsq，pass2 只按 (t,h) 单点广播读取，不回读这些 lane。
     constexpr uint16_t kSeg = 64;
     const uint16_t segs = static_cast<uint16_t>((tileRows * qkHeads + kSeg - 1) / kSeg);
+
+    if constexpr (kHalfMasked) {
+    // ==== HalfMasked 路径：D ∈ {64, 96}，halfDim < 64 lane ====
+    // 半区配对借 UpdateMask 计数掩码：前半/后半各自占一个 64-lane 寄存器的 [0,halfDim) lane，
+    // NeoX 旋转在两寄存器间完成（官方 arch35 HalfAlignVF 范式），无需任何 lane 重排。
+    // γ 布局（CopyInGamma 写入）：前半 [0,halfDim)，后半 [64,64+halfDim)；窗口外 lane 由掩码丢弃。
+    // D=64/96 下 rope_dim 仅可为 0（全 rope，host %128 约束），故无 passthrough 分支。
+
+    // ---- pass 1：sumsq（chunk0 全量 + 尾 chunk 计数掩码；D=96 时 c=1、tail=32）----
+    const uint16_t nChunksC = static_cast<uint16_t>((headDim + kSeg - 1) / kSeg);
+    uint32_t tailCnt = static_cast<uint32_t>(headDim - (nChunksC - 1) * kSeg);
+    MaskReg mTail = UpdateMask<float>(tailCnt);
+    for (uint16_t t = 0; t < tileRows; ++t) {
+        __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
+        for (uint16_t h = 0; h < numHeadQ; ++h) {
+            __ubuf__ T *src = row + static_cast<uint32_t>(h) * headDim;
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
+            Cast<float, T, AscendC::layoutZMrgZ>(acc, tv, mFull);
+            Mul(acc, acc, acc, mFull);
+            for (uint16_t c = 1; c < nChunksC; ++c) {
+                LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + static_cast<uint32_t>(c) * kSeg);
+                Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mTail);
+                // arch35 MulAddDst 仅支持 ZEROING（toolkit static_assert：mode ZEROING only），
+                // 带 mTail 会清掉 acc inactive lane——那里已是 chunk0 的真实平方和。改走官方
+                // layernorm_variance 同款 idiom：尾 chunk 掩码 Cast 落临时寄存器（layoutZMrgZ，
+                // inactive lane=0），再用全量掩码 MulAddDst 累加（inactive += 0，chunk0 保留）。
+                MulAddDst(acc, y2, y2, mFull);
+            }
+            ReduceSum(acc, acc, mFull);
+            StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(
+                sumsq + static_cast<uint32_t>(t) * qkHeads + h, acc, mOne);
+        }
+        for (uint16_t h = 0; h < numHeadK; ++h) {
+            __ubuf__ T *src = row + kvHeadBase + static_cast<uint32_t>(h) * kvHeadStep;
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
+            Cast<float, T, AscendC::layoutZMrgZ>(acc, tv, mFull);
+            Mul(acc, acc, acc, mFull);
+            for (uint16_t c = 1; c < nChunksC; ++c) {
+                LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + static_cast<uint32_t>(c) * kSeg);
+                Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mTail);
+                // 同上：全量掩码 MulAddDst 累加尾 chunk（inactive lane=0，chunk0 保留）
+                MulAddDst(acc, y2, y2, mFull);
+            }
+            ReduceSum(acc, acc, mFull);
+            StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(
+                sumsq + static_cast<uint32_t>(t) * qkHeads + numHeadQ + h, acc, mOne);
+        }
+    }
+    LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
+
+    // ---- 每 tile 的 scale 链（同全量路径）----
+    Duplicate(one, 1.0f, mFull);
+    for (uint16_t seg = 0; seg < segs; ++seg) {
+        __ubuf__ float *sp = sumsq + static_cast<uint32_t>(seg) * kSeg;
+        LoadAlign(acc, sp);
+        Muls(acc, acc, recip, mFull);
+        Adds(acc, acc, eps, mFull);
+        Sqrt(acc, acc, mFull);
+        Div(acc, one, acc, mFull);
+        StoreAlign(sp, acc, mFull);
+    }
+    LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
+
+    // ---- pass 2：norm + rope，单 masked pair；前半 [0,halfDim) 配后半 [halfDim,D) ----
+    uint32_t halfCnt = static_cast<uint32_t>(halfDim);  // 32 (D=64) / 48 (D=96)
+    MaskReg pregHalf = UpdateMask<float>(halfCnt);
+    for (uint16_t t = 0; t < tileRows; ++t) {
+        __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
+        __ubuf__ T *orow = outT + static_cast<uint32_t>(t) * outStride;
+        LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, cosT + static_cast<uint32_t>(t) * ropeStride);
+        Cast<float, T, AscendC::layoutZMrgZ>(cr, tv, pregHalf);
+        LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, sinT + static_cast<uint32_t>(t) * ropeStride);
+        Cast<float, T, AscendC::layoutZMrgZ>(sr, tv, pregHalf);
+        Muls(sn, sr, -1.0f, pregHalf);
+        // q 组：γq 折进 cos/sin
+        LoadAlign(gq1, gammaQ);
+        LoadAlign(gq2, gammaQ + 64);
+        Mul(ca, gq1, cr, pregHalf);
+        Mul(cc, gq1, sr, pregHalf);
+        Mul(cd, gq2, cr, pregHalf);
+        Mul(cb, gq2, sn, pregHalf);
+        for (uint16_t h = 0; h < numHeadQ; ++h) {
+            __ubuf__ T *src = row + static_cast<uint32_t>(h) * headDim;
+            __ubuf__ T *dst = orow + static_cast<uint32_t>(h) * headDim;
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(sg, sumsq + static_cast<uint32_t>(t) * qkHeads + h);
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
+            Cast<float, T, AscendC::layoutZMrgZ>(y1, tv, pregHalf);
+            Mul(y1, y1, sg, pregHalf);
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + halfDim);
+            Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, pregHalf);
+            Mul(y2, y2, sg, pregHalf);
+            Mul(t1, y1, ca, pregHalf);
+            MulAddDst(t1, y2, cb, pregHalf);
+            Mul(t2, y2, cd, pregHalf);
+            MulAddDst(t2, y1, cc, pregHalf);
+            Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t1, pregHalf);
+            StoreAlign<T, StoreDist::DIST_PACK_B32>(dst, pk, pregHalf);
+            Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t2, pregHalf);
+            StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + halfDim, pk, pregHalf);
+        }
+        // k 组：γk 折进 cos/sin（cr/sr/sn 同 token 复用）
+        LoadAlign(gk1, gammaK);
+        LoadAlign(gk2, gammaK + 64);
+        Mul(ca, gk1, cr, pregHalf);
+        Mul(cc, gk1, sr, pregHalf);
+        Mul(cd, gk2, cr, pregHalf);
+        Mul(cb, gk2, sn, pregHalf);
+        for (uint16_t h = 0; h < numHeadK; ++h) {
+            uint32_t hh = static_cast<uint32_t>(numHeadQ) + h;
+            __ubuf__ T *src = row + kvHeadBase + static_cast<uint32_t>(h) * kvHeadStep;
+            __ubuf__ T *dst = orow + hh * headDim;
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(sg, sumsq + static_cast<uint32_t>(t) * qkHeads + hh);
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
+            Cast<float, T, AscendC::layoutZMrgZ>(y1, tv, pregHalf);
+            Mul(y1, y1, sg, pregHalf);
+            LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + halfDim);
+            Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, pregHalf);
+            Mul(y2, y2, sg, pregHalf);
+            Mul(t1, y1, ca, pregHalf);
+            MulAddDst(t1, y2, cb, pregHalf);
+            Mul(t2, y2, cd, pregHalf);
+            MulAddDst(t2, y1, cc, pregHalf);
+            Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t1, pregHalf);
+            StoreAlign<T, StoreDist::DIST_PACK_B32>(dst, pk, pregHalf);
+            Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t2, pregHalf);
+            StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + halfDim, pk, pregHalf);
+        }
+    }
+    } else {
+    // ==== 全量路径：D ∈ {128, 256}（与 Tier1/Tier3 实现逐行一致）====
     // D 按 64-lane chunk 处理：pass1 累加 D/64 段；pass2 把 half 区切成 halfDim/64 个 chunk，
     // 其中前 ropeDim/2/64 个 chunk 做 NeoX 旋转配对，其余 chunk 经 norm*gamma 直通（部分 rope）
     const uint16_t nChunks = static_cast<uint16_t>(headDim / kSeg);
@@ -274,6 +404,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
             }
         }
     }
+    }  // else：全量路径（D ∈ {128, 256}）
 }
 
 
@@ -330,8 +461,11 @@ public:
         pipe_->InitBuffer(inGamma_, 2, headDim_ * sizeof(T));
         pipe_->InitBuffer(outTile_, 2, tileRows_ * numHeadTotal_ * headDim_ * sizeof(T));
 
-        pipe_->InitBuffer(bufGammaQ_, headDim_ * sizeof(float));
-        pipe_->InitBuffer(bufGammaK_, headDim_ * sizeof(float));
+        // HalfMasked（D=64/96，halfDim<64）时 γ 拆成 front@0 / back@64 两个 64-lane 窗口，buffer 放宽到 128 float；
+        // D=128/256 仍按 headDim 分配，与 Tier1 一致
+        const uint32_t gammaElems = (halfDim_ < 64) ? 128u : headDim_;
+        pipe_->InitBuffer(bufGammaQ_, gammaElems * sizeof(float));
+        pipe_->InitBuffer(bufGammaK_, gammaElems * sizeof(float));
         pipe_->InitBuffer(bufSum_, tileRows_ * kMaxHeads * sizeof(float));
 
         // 本核 token 区间与 tile 数（供三级流水使用）
@@ -382,8 +516,17 @@ private:
         gk = inGamma_.DeQue<T>();
         LocalTensor<float> gqf = bufGammaQ_.Get<float>();
         LocalTensor<float> gkf = bufGammaK_.Get<float>();
-        Cast(gqf, gq, RoundMode::CAST_NONE, headDim_);
-        Cast(gkf, gk, RoundMode::CAST_NONE, headDim_);
+        if (halfDim_ < 64) {
+            // HalfMasked：前半 γ 落 [0,halfDim)，后半 γ 落 [64,64+halfDim)；
+            // 两 64-lane 窗口内 halfDim 之后的 lane 由 VF 的 pregHalf 丢弃，无需清零
+            Cast(gqf, gq, RoundMode::CAST_NONE, halfDim_);
+            Cast(gqf[64], gq[halfDim_], RoundMode::CAST_NONE, halfDim_);
+            Cast(gkf, gk, RoundMode::CAST_NONE, halfDim_);
+            Cast(gkf[64], gk[halfDim_], RoundMode::CAST_NONE, halfDim_);
+        } else {
+            Cast(gqf, gq, RoundMode::CAST_NONE, headDim_);
+            Cast(gkf, gk, RoundMode::CAST_NONE, headDim_);
+        }
         inGamma_.FreeTensor(gq);
         inGamma_.FreeTensor(gk);
         PipeBarrier<PIPE_V>();
@@ -455,16 +598,30 @@ private:
         AscendC::LocalTensor<float> gqf = bufGammaQ_.Get<float>();
         AscendC::LocalTensor<float> gkf = bufGammaK_.Get<float>();
         // v 已由上面的拷贝完成；VF 读 xb/cb/sb，故三个队列在 VF 之后才释放。
-        SqnrNormRopeVfPack<T>((__ubuf__ T *)ob.GetPhyAddr(), (__ubuf__ T *)xb.GetPhyAddr(),
-            (__ubuf__ T *)cb.GetPhyAddr(), (__ubuf__ T *)sb.GetPhyAddr(),
-            (__ubuf__ float *)gqf.GetPhyAddr(), (__ubuf__ float *)gkf.GetPhyAddr(),
-            (__ubuf__ float *)sumL.GetPhyAddr(), static_cast<uint16_t>(numHeadQ_),
-            static_cast<uint16_t>(numHeadK_), static_cast<uint16_t>(padStride_),
-            static_cast<uint16_t>(rowElems), static_cast<uint16_t>(ropeStride_),
-            static_cast<uint16_t>(tileRows_),
-            static_cast<uint16_t>(kvInterleaved_ ? 2 * headDim_ : headDim_),
-            static_cast<uint16_t>(headDim_), static_cast<uint16_t>(halfDim_),
-            static_cast<uint16_t>(ropeDim_), eps_, recip_);
+        // D=64/96（halfDim<64）走 HalfMasked 模板（计数掩码半区配对）；D=128/256 走全量路径，零回退
+        if (halfDim_ < 64) {
+            SqnrNormRopeVfPack<T, true>((__ubuf__ T *)ob.GetPhyAddr(), (__ubuf__ T *)xb.GetPhyAddr(),
+                (__ubuf__ T *)cb.GetPhyAddr(), (__ubuf__ T *)sb.GetPhyAddr(),
+                (__ubuf__ float *)gqf.GetPhyAddr(), (__ubuf__ float *)gkf.GetPhyAddr(),
+                (__ubuf__ float *)sumL.GetPhyAddr(), static_cast<uint16_t>(numHeadQ_),
+                static_cast<uint16_t>(numHeadK_), static_cast<uint16_t>(padStride_),
+                static_cast<uint16_t>(rowElems), static_cast<uint16_t>(ropeStride_),
+                static_cast<uint16_t>(tileRows_),
+                static_cast<uint16_t>(kvInterleaved_ ? 2 * headDim_ : headDim_),
+                static_cast<uint16_t>(headDim_), static_cast<uint16_t>(halfDim_),
+                static_cast<uint16_t>(ropeDim_), eps_, recip_);
+        } else {
+            SqnrNormRopeVfPack<T, false>((__ubuf__ T *)ob.GetPhyAddr(), (__ubuf__ T *)xb.GetPhyAddr(),
+                (__ubuf__ T *)cb.GetPhyAddr(), (__ubuf__ T *)sb.GetPhyAddr(),
+                (__ubuf__ float *)gqf.GetPhyAddr(), (__ubuf__ float *)gkf.GetPhyAddr(),
+                (__ubuf__ float *)sumL.GetPhyAddr(), static_cast<uint16_t>(numHeadQ_),
+                static_cast<uint16_t>(numHeadK_), static_cast<uint16_t>(padStride_),
+                static_cast<uint16_t>(rowElems), static_cast<uint16_t>(ropeStride_),
+                static_cast<uint16_t>(tileRows_),
+                static_cast<uint16_t>(kvInterleaved_ ? 2 * headDim_ : headDim_),
+                static_cast<uint16_t>(headDim_), static_cast<uint16_t>(halfDim_),
+                static_cast<uint16_t>(ropeDim_), eps_, recip_);
+        }
         AscendC::PipeBarrier<PIPE_V>();
         inQkv_.FreeTensor(xb);
         inCos_.FreeTensor(cb);

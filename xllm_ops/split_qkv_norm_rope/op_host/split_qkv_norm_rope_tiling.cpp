@@ -53,7 +53,9 @@ uint64_t CalcUbNeed(uint32_t tile, uint32_t padStride, uint32_t ropeStride, uint
                     (static_cast<uint64_t>(padStride) * elemBytes +
                      static_cast<uint64_t>(ropeStride) * elemBytes * 2);   // inQkv/inCos/inSin ×2
     need += 2ull * tile * headTotal * headDim * elemBytes;                 // out ×2
-    need += 2ull * headDim * elemBytes + 2ull * headDim * 4;               // inGamma ×2 + gamma fp32 ×2
+    // gamma fp32：D=64/96 走 HalfMasked 模板，buffer 放宽到 128 float（半区双窗口布局）；其余按 D
+    const uint64_t gammaElems = (headDim / 2 < 64) ? 128ull : static_cast<uint64_t>(headDim);
+    need += 2ull * headDim * elemBytes + 2ull * gammaElems * 4;            // inGamma ×2 + gamma fp32 ×2
     need += static_cast<uint64_t>(tile) * SQNR_MAX_HEADS * 4;              // sumsq
     return need;
 }
@@ -105,11 +107,13 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
                         qGammaShape.GetDim(0), kGammaShape.GetDim(0)),
                 return ge::GRAPH_FAILED);
     const uint32_t headDim = static_cast<uint32_t>(qGammaShape.GetDim(0));
-    // Tier 1 支持集：D ∈ {128, 256}；VF 按 64-lane chunk/pair 处理，两档均为 half=多整 64-lane pair。
-    // D=64/96 需要半区不足 64 lane 的特殊布局（模板 + tilingKey），留 Tier 2。
-    OP_CHECK_IF(headDim != SQNR_HEAD_DIM && headDim != SQNR_HEAD_DIM_256,
-                OP_LOGE(context, "head_dim %u unsupported (derived from q_gamma), kernel supports D={%u,%u}.",
-                        headDim, SQNR_HEAD_DIM, SQNR_HEAD_DIM_256),
+    // Tier 2 支持集：D ∈ {64, 96, 128, 256}。
+    //   D=128/256：half 为整 64-lane pair 集，UNPACK_B16 全量 mask 路径；
+    //   D=64/96：half < 64 lane，HalfMasked 模板（UpdateMask 计数掩码，前/后半各自 64-lane 窗口）。
+    OP_CHECK_IF(headDim != SQNR_HEAD_DIM_64 && headDim != SQNR_HEAD_DIM_96 &&
+                    headDim != SQNR_HEAD_DIM && headDim != SQNR_HEAD_DIM_256,
+                OP_LOGE(context, "head_dim %u unsupported (derived from q_gamma), kernel supports D={%u,%u,%u,%u}.",
+                        headDim, SQNR_HEAD_DIM_64, SQNR_HEAD_DIM_96, SQNR_HEAD_DIM, SQNR_HEAD_DIM_256),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(static_cast<uint32_t>(kGammaShape.GetDim(0)) != headDim,
                 OP_LOGE(context, "k_gamma dim %ld != q_gamma dim %u.", kGammaShape.GetDim(0), headDim),
@@ -154,9 +158,19 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
                 OP_LOGE(context, "rope_dim %ld out of range (0, %u].", ropeDimRaw, headDim),
                 return ge::GRAPH_FAILED);
     const uint32_t ropeDim = (ropeDimRaw == 0) ? headDim : static_cast<uint32_t>(ropeDimRaw);
-    OP_CHECK_IF(ropeDim % 128 != 0,
-                OP_LOGE(context, "rope_dim %u must be a multiple of 128 (64-lane pair aligned).", ropeDim),
-                return ge::GRAPH_FAILED);
+    // 全量路径（D >= 128）：部分 rope 要求 rope_dim/2 为多整 64-lane pair → rope_dim % 128 == 0
+    // HalfMasked 路径（D = 64/96，halfDim < 64）：仅支持全头旋转（rope_dim == head_dim）
+    const uint32_t halfDim = headDim / 2;
+    if (halfDim < 64) {
+        OP_CHECK_IF(ropeDim != headDim,
+                    OP_LOGE(context, "rope_dim %u must equal head_dim %u for D<128 (partial rope unsupported on masked path).",
+                            ropeDim, headDim),
+                    return ge::GRAPH_FAILED);
+    } else {
+        OP_CHECK_IF(ropeDim % 128 != 0,
+                    OP_LOGE(context, "rope_dim %u must be a multiple of 128 (64-lane pair aligned).", ropeDim),
+                    return ge::GRAPH_FAILED);
+    }
 
     const uint32_t numHeadV = numHeadK;  // v1：Nv == Nk
     const uint32_t headTotal = numHeadQ + numHeadK + numHeadV;

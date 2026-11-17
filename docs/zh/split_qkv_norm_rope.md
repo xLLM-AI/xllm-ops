@@ -32,7 +32,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 | --- | --- |
 | `q, k, v = qkv.split(...)` | 输入行内前 `(Nq+2*Nk)*D` 列按 head 切分 |
 | `norm_q(x)` / `norm_k(x)` | `1/sqrt(mean(x^2)+eps) * gamma`，fp32 全链 |
-| `apply_rotary_neox` | `[x1*c - x2*s, x2*c + x1*s]`，`x1=x[0:64]`、`x2=x[64:128]` |
+| `apply_rotary_neox` | `[x1*c - x2*s, x2*c + x1*s]`，`x1=x[0:D/2]`、`x2=x[D/2:D]` |
 | `k.repeat_interleave(rep, dim=2)` | `gqa_expand=true` 时在写出阶段重复发 DMA |
 
 `gqa_expand` 是运行时开关：`false` 时 k/v 只写 `Nk` 个头（交给 FA 的原生 GQA），
@@ -42,8 +42,10 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 ```text
 B, S      = batch / sequence，均要求 > 0
-D         = head_dim，由 q_gamma 形状推导（单一来源），当前支持 {128, 256}；
-            VF 按 64-lane chunk/pair 处理：D=128 → 1 pair，D=256 → 2 pair；RoPE half = D/2
+D         = head_dim，由 q_gamma 形状推导（单一来源），当前支持 {64, 96, 128, 256}；
+            D >= 128：VF 按 64-lane chunk/pair 处理（D=128 → 1 pair，D=256 → 2 pair）；
+            D = 64/96：half < 64 lane，走 HalfMasked 模板（UpdateMask 计数掩码 + 半区双窗口）；
+            RoPE half = D/2
 Nq, Nk, Nv= q / k / v 头数；Nv 没有独立属性，恒等于 Nk
             Nq > 0、Nk > 0、Nq % Nk == 0（GQA 组必须整除）
             Nq + Nk <= 64（sumsq workspace 上限 kMaxHeads）
@@ -56,8 +58,9 @@ kv_interleaved = 行内 KV 布局开关：
 ropeStride= cos/sin 行跨度（元素），取值 [D/2, D] 且必须 16 对齐；只读前 rope_dim/2 维
             仅支持 NeoX 半分化 RoPE（每半区前 rope_dim/2 与对应后半配对）
 rope_dim   = 参与 NeoX 旋转的维度数（属性，attr#6），0（缺省）= 全 head_dim 旋转；
-            非 0 时要求 0 < rope_dim <= D 且 rope_dim % 128 == 0（64-lane pair 对齐）；
-            仅前 rope_dim/2 维旋转，其余经 RMSNorm*gamma 直通（部分 rope）
+            D >= 128 时非 0 取值要求 0 < rope_dim <= D 且 rope_dim % 128 == 0（64-lane pair 对齐），
+            仅前 rope_dim/2 维旋转，其余经 RMSNorm*gamma 直通（部分 rope）；
+            D = 64/96 时仅支持 0（= head_dim 全旋转，HalfMasked 路径无 passthrough 分支）
 dtype     = bf16 / fp16；五个输入与三个输出必须同 dtype
 rank      = qkv / cos / sin 均为 3 维
 B / S     = 均 > 0；空张量直接拒绝
@@ -70,13 +73,13 @@ workspace = 0，调用方不需要申请
 
 | 项 | 约束 | 违反时 |
 |---|---|---|
-| `D` | 从 `q_gamma` 形状推导，支持 `{128, 256}`（VF 64-lane chunk/pair 循环）；`D=64/96` 留 Tier 2 | `ACLNN_ERR_PARAM_INVALID` |
+| `D` | 从 `q_gamma` 形状推导，支持 `{64, 96, 128, 256}`（`D >= 128` 走 VF 64-lane chunk/pair 循环；`D = 64/96` 走 HalfMasked 计数掩码路径） | `ACLNN_ERR_PARAM_INVALID` |
 | `Nv` | `Nv ≡ Nk` | 无 `num_v_heads` 属性，按 `Nk` 处理 |
 | `Nq` / `Nk` | 均 `> 0`（按符号类型校验，负数不回绕），且 `Nq % Nk == 0`；各自 `<= 64` | `ACLNN_ERR_PARAM_INVALID` |
 | `Nq + Nk` | `<= 64` | `ACLNN_ERR_PARAM_INVALID` |
 | `stride` | `>= (Nq + 2*Nk) * D` | `ACLNN_ERR_PARAM_INVALID` |
 | `ropeStride` | `∈ [D/2, D]` 且为 16 的倍数 | `ACLNN_ERR_PARAM_INVALID` |
-| `rope_dim` | `0` 或 `∈ (0, D]` 且 `% 128 == 0` | `ACLNN_ERR_PARAM_INVALID` |
+| `rope_dim` | `0`；或 `D >= 128` 时 `∈ (0, D]` 且 `% 128 == 0`；`D = 64/96` 时仅 `0`（= `head_dim` 全旋转） | `ACLNN_ERR_PARAM_INVALID` |
 | `rank` | 3 维 | `GRAPH_FAILED` |
 | `dtype` | bf16 / fp16，且输入输出一致 | 参数错误 |
 | `B` / `S` | 均 `> 0` | `GRAPH_FAILED`（避免 tiling 除零） |
@@ -139,7 +142,7 @@ aclnnStatus aclnnSplitQkvNormRope(
 | `gqa_expand` | Bool | false | 仅在 `Nq % Nk == 0` 时有意义；`true` 时 k/v 输出 `Nq` 头 | k/v 是否扩张到 `Nq` 头 |
 | `layout_bnsd` | Bool | false | 只影响输出布局 | 输出 `[B,H,S,D]` / `[B,S,H*D]` |
 | `kv_interleaved` | Bool | false | 要求 `Nv == Nk`（当前恒成立）；数据必须与所选布局一致 | 输入行内 KV 是否按 head 交错 `[K_i,V_i]`（JoyOV2 `to_qkv` 的打包方式） |
-| `rope_dim` | Int | 0 | `0` 或 `rope_dim ∈ (0, D]` 且 `% 128 == 0`；`D=128` 时仅 `0/128`（等价全旋转） | 参与 NeoX 旋转的维度数，`0` = 全 `head_dim` 旋转；其余维度直通 |
+| `rope_dim` | Int | 0 | `0`；或 `D >= 128` 时 `rope_dim ∈ (0, D]` 且 `% 128 == 0`（`D=128` 时仅 `0/128`，等价全旋转）；`D = 64/96` 时仅 `0`（= `head_dim` 全旋转，无部分 rope） | 参与 NeoX 旋转的维度数，`0` = 全 `head_dim` 旋转；其余维度直通 |
 
 > 头数上限 `Nq + Nk <= 64` 来自 `sumsq` workspace 的容量（`kMaxHeads`）；
 > 更大的头数即使放开该常量，也会被 UB 预算拒绝。`tokenTile` 不在属性里暴露，
@@ -148,8 +151,9 @@ aclnnStatus aclnnSplitQkvNormRope(
 约束（host 侧校验，失败返回 `ACLNN_ERR_PARAM_INVALID`；完整清单见 “符号与形状”）：
 
 - `stride >= (Nq+2*Nk)*D`、`ropeStride ∈ [D/2, D]` 且 16 对齐、`Nq % Nk == 0`、`Nq+Nk <= 64`；
-- `D` 由 `q_gamma` 形状推导（单一来源），`q_gamma`/`k_gamma` rank-1 且维度一致；当前支持 `D ∈ {128, 256}`；
-- `rope_dim` 为 0 或满足 `0 < rope_dim <= D` 且 `% 128 == 0`（64-lane pair 对齐），否则参数错误；
+- `D` 由 `q_gamma` 形状推导（单一来源），`q_gamma`/`k_gamma` rank-1 且维度一致；当前支持 `D ∈ {64, 96, 128, 256}`；
+- `rope_dim` 为 0，或 `D >= 128` 时满足 `0 < rope_dim <= D` 且 `% 128 == 0`（64-lane pair 对齐）；
+  `D = 64/96` 时仅允许 `rope_dim == head_dim`（HalfMasked 路径只做全旋转），否则参数错误；
 - 头数按符号类型校验：负值在转 u32 前直接拒绝，避免回绕绕过后续检查；
 - `B > 0`、`S > 0`（空张量拒绝，避免 tiling 除零）；`epsilon` 有限且非负；
 - 输入输出 dtype 一致且为 bf16/fp16，`qkv`/`cos` 必须 3 维；
@@ -159,10 +163,11 @@ aclnnStatus aclnnSplitQkvNormRope(
 当前已知限制（尚未泛化）：
 
 - `Nv` 不能独立于 `Nk`（无 `num_v_heads` 属性），MLA 类非对称 KV 暂不支持；
-- RoPE 仅支持 NeoX 半分化一种形式；部分旋转经 `rope_dim` 属性支持（前 `rope_dim/2` 对配对旋转，其余直通），交错 rope 不支持；
-- `head_dim` 从 `q_gamma` 推导并校验；当前支持 `{128, 256}`（VF 按 64-lane chunk/pair 循环，
-  `D=256` 时 nPairs=2，pass1 累加 4 段、pass2 走 2 个 NeoX pair，D=128 路径指令数不变）；
-  `D=64/96` 半区不足 64 lane，需模板 + tilingKey，留 Tier 2；
+- RoPE 仅支持 NeoX 半分化一种形式；部分旋转经 `rope_dim` 属性支持（前 `rope_dim/2` 对配对旋转，其余直通，仅 `D >= 128`），交错 rope 不支持；
+- `head_dim` 从 `q_gamma` 推导并校验；当前支持 `{64, 96, 128, 256}`：
+  `D=256`（nPairs=2，pass1 累加 4 段、pass2 走 2 个 NeoX pair）与 `D=128` 路径指令数不变；
+  `D=64/96` 半区不足 64 lane，走编译期 `kHalfMasked` 模板实例（`UpdateMask` 计数掩码 +
+  前/后半各一 64-lane 窗口，官方 arch35 `HalfAlignVF` 范式），`D >= 128` 实例零回退；
 - dtype 只支持 2 字节（bf16/fp16），fp32 未支持；
 - 头数上限 `Nq+Nk <= 64`，更大头数受 `sumsq` workspace 与 UB 双重约束；
 - `kv_interleaved` 仅在 `Nv == Nk` 时有定义，两者互斥规则待 `Nv` 泛化时显式校验。
@@ -199,6 +204,7 @@ out[D/2:D/2+r] = y[D/2:D/2+r]*cos + y[0:r]*sin
 out[D/2+r:D] = y[D/2+r:D]
 ```
 `rope_dim = 0`（缺省）等价 `rope_dim = D`，走全旋转路径，与历史行为一致。
+部分 rope 仅在 `D >= 128` 时可用；`D = 64/96` 必须全旋转（host 已校验）。
 
 `v` 头不做 norm/rope，由一次多行 UB→UB `DataCopy` 原样搬进输出 tile（不经 fp32）。
 
@@ -266,6 +272,14 @@ tilingKey 只区分 dtype（`0 = bf16`、`1 = fp16`）。
   64-lane pair 走 NeoX 旋转（γ 折进 cos/sin），其余 `nPairs - nRopePairs` 个 pair 走
   passthrough（`y = x*scale*gamma` 直通写出）；全 rope 时 `nRopePairs == nPairs`，
   passthrough 循环不执行，指令路径与原实现完全一致。
+- **HalfMasked 路径（Tier 2，`D = 64/96`）**：编译期模板 `kHalfMasked` 分裂，`D >= 128` 实例
+  逐指令不变。半区配对借 `Reg::UpdateMask<float>(halfDim)` 计数掩码（arch3510 专属）：
+  前半/后半各占一个 64-lane 寄存器的 `[0,halfDim)` lane，NeoX 旋转在两寄存器间完成，
+  无 lane 重排、无 fp32 staging。γ 拆拷成双窗口（前半 `[0,halfDim)`、后半 `[64,64+halfDim)`，
+  buffer 放宽 128 float）。pass1 的尾 chunk（`D=96` 时 tailCnt=32）经掩码 `Cast` 落临时寄存器
+  （`layoutZMrgZ`，inactive lane=0），再用**全量掩码** `MulAddDst` 累加——arch35 `MulAddDst`
+  仅支持 `ZEROING`（masked 会清掉 dst inactive lane），此 idiom 与官方
+  `layernorm_variance` 一致。
 - **输出 pack-store**：`Cast<T,float,RndRSatNS>` + `StoreAlign<T, DIST_PACK_B32>`
   直接把 fp32 结果打包进输出 tile，无整趟 cast-out；目标行距用输出 tile 行距
   `numHeadTotal*128`，不是 q/k 行宽。
@@ -327,12 +341,14 @@ k `1.55e-2`、v `0`。
 
 ## 测试
 
-`test/python_test/test_split_qkv_norm_rope.py`，覆盖 35 组形状 × 2 种 dtype（共 70 条功能用例）
-加 8 条拒绝用例：主场景、BNSD、`gqa_expand`、无 tail、单 token、尾 tile、文本侧
+`test/python_test/test_split_qkv_norm_rope.py`，覆盖 53 组形状 × 2 种 dtype（共 106 条功能用例）
+加 10 条拒绝用例：主场景、BNSD、`gqa_expand`、无 tail、单 token、尾 tile、文本侧
 `[8,1,1]`/`[8,2,2]`、`B>1`、`ropeStride=128`、BNSD+gqa、KV 交错、宽头数（16/32/48 q heads）、
-部分 rope（`D=256, rope_dim=128` × 6 组）；参考实现用 torch 逐元素复算（含部分 rope 的
+`D ∈ {64, 96}`（HalfMasked 路径，各 7+2 组含 KV 交错）、部分 rope（`D=256, rope_dim=128` × 6 组）；
+参考实现用 torch 逐元素复算（含部分 rope 的
 旋转/直通拼接）；`v` 用 `atol=rtol=0` 校验纯拷贝语义。拒绝用例覆盖负头数、非 16 对齐
-`ropeStride`、`D` 超支持集、`k_gamma` 维度不一致、`rope_dim % 128 != 0`、`rope_dim > D`。
+`ropeStride`、`D` 超支持集（512/72/192）、`k_gamma` 维度不一致、`rope_dim % 128 != 0`、
+`rope_dim > D`、`D<128` 时 `rope_dim != head_dim`。
 
 端到端验证（编译算子包 → 安装 → 编译 python 扩展 → pytest）：
 
@@ -353,4 +369,4 @@ python3 setup.py build bdist_wheel && pip3 install --force-reinstall --no-deps d
 python3 -m pytest -q test_split_qkv_norm_rope.py
 ```
 
-上板结果（`Ascend950PR_9579`，单卡）：**78 passed**（70 功能 + 8 拒绝）。
+上板结果（`Ascend950PR_9579`，单卡）：**116 passed**（106 功能 + 10 拒绝）。
