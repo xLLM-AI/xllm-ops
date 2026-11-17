@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "split_qkv_norm_rope_tiling.h"
 
+#include <cmath>
 #include <cstdio>
 
 #include "register/op_def_registry.h"
@@ -80,6 +81,11 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     const uint32_t batch = static_cast<uint32_t>(qkvShape.GetDim(0));
     const uint32_t seqLen = static_cast<uint32_t>(qkvShape.GetDim(1));
     const uint32_t qkvStride = static_cast<uint32_t>(qkvShape.GetDim(2));
+    // B/S=0 时 totalTokens=0，后续 tokenPerCore 回算会除零；空张量对本算子无意义，直接拒绝
+    OP_CHECK_IF(qkvShape.GetDim(0) <= 0 || qkvShape.GetDim(1) <= 0,
+                OP_LOGE(context, "batch and seqLen must be positive, got B=%ld S=%ld.",
+                        qkvShape.GetDim(0), qkvShape.GetDim(1)),
+                return ge::GRAPH_FAILED);
     const uint32_t ropeStride = static_cast<uint32_t>(cosShape.GetDim(2));
 
     const gert::RuntimeAttrs *attrs = context->GetAttrs();
@@ -88,6 +94,17 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     const int64_t *nkPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_KV_HEADS);
     OP_CHECK_NULL_WITH_CONTEXT(context, nqPtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, nkPtr);
+    // 负数头数经 u32 转换会回绕成大正数，绕过后续所有校验；必须按原符号类型先拒
+    OP_CHECK_IF(*nqPtr <= 0 || *nkPtr <= 0,
+                OP_LOGE(context, "head num must be positive, got num_q_heads=%ld num_kv_heads=%ld.",
+                        *nqPtr, *nkPtr),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(*nqPtr > static_cast<int64_t>(SQNR_MAX_HEADS),
+                OP_LOGE(context, "num_q_heads=%ld > %u.", *nqPtr, SQNR_MAX_HEADS),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(*nkPtr > static_cast<int64_t>(SQNR_MAX_HEADS),
+                OP_LOGE(context, "num_kv_heads=%ld > %u.", *nkPtr, SQNR_MAX_HEADS),
+                return ge::GRAPH_FAILED);
     const uint32_t numHeadQ = static_cast<uint32_t>(*nqPtr);
     const uint32_t numHeadK = static_cast<uint32_t>(*nkPtr);
     const float *epsPtr = attrs->GetAttrPointer<float>(ATTR_EPSILON);
@@ -95,6 +112,10 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     const bool *bnsdPtr = attrs->GetAttrPointer<bool>(ATTR_LAYOUT_BNSD);
     const bool *kvIntPtr = attrs->GetAttrPointer<bool>(ATTR_KV_INTERLEAVED);
     const float eps = (epsPtr != nullptr) ? *epsPtr : 1e-6f;
+    // eps 负值会让 sqrt(sumsq/D + eps) 对小 norm 头出负数 -> NaN；非有限值直接污染 scale 链
+    OP_CHECK_IF(!std::isfinite(eps) || eps < 0.0f,
+                OP_LOGE(context, "epsilon must be finite and non-negative, got %f.", eps),
+                return ge::GRAPH_FAILED);
     const bool gqaExpand = (gqaPtr != nullptr) ? *gqaPtr : false;
     const bool layoutBNSD = (bnsdPtr != nullptr) ? *bnsdPtr : false;
     const bool kvInterleaved = (kvIntPtr != nullptr) ? *kvIntPtr : false;
@@ -102,8 +123,6 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     const uint32_t numHeadV = numHeadK;  // v1：Nv == Nk
     const uint32_t headTotal = numHeadQ + numHeadK + numHeadV;
 
-    OP_CHECK_IF(numHeadQ == 0 || numHeadK == 0, OP_LOGE(context, "head num must be positive."),
-                return ge::GRAPH_FAILED);
     OP_CHECK_IF(numHeadQ % numHeadK != 0, OP_LOGE(context, "num_q_heads %% num_kv_heads != 0."),
                 return ge::GRAPH_FAILED);
     const uint32_t qkHeads = numHeadQ + numHeadK;
@@ -112,8 +131,10 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     OP_CHECK_IF(qkvStride < headTotal * SQNR_HEAD_DIM,
                 OP_LOGE(context, "qkv stride %u < heads*D = %u.", qkvStride, headTotal * SQNR_HEAD_DIM),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(ropeStride < SQNR_HEAD_DIM / 2 || ropeStride > SQNR_HEAD_DIM,
-                OP_LOGE(context, "rope stride must be in [64,128], got %u.", ropeStride), return ge::GRAPH_FAILED);
+    // VF 对 cos/sin 行按 LoadAlign 逐 t 取数，行距 ropeStride*2 B 必须是 32 B 的倍数（即 ropeStride 16 对齐）
+    OP_CHECK_IF(ropeStride < SQNR_HEAD_DIM / 2 || ropeStride > SQNR_HEAD_DIM || ropeStride % 16 != 0,
+                OP_LOGE(context, "rope stride must be in [64,128] and 16-aligned, got %u.", ropeStride),
+                return ge::GRAPH_FAILED);
 
     SplitQkvNormRopeCompileInfo compileInfo;
     auto platformInfo = context->GetPlatformInfo();

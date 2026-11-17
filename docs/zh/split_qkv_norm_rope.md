@@ -52,10 +52,12 @@ kv_interleaved = 行内 KV 布局开关：
             false -> [Q | K0..K(Nk-1) | V0..V(Nk-1) | tail]（块状）
             true  -> [Q | K0 V0 | K1 V1 | ... | tail]（逐 kv head 交错）
             两种布局都要求 Q 区在前，gate 等附加列放在最后
-ropeStride= cos/sin 行跨度（元素），取值 [64, 128]；只读前 D/2 = 64 维
+ropeStride= cos/sin 行跨度（元素），取值 [64, 128] 且必须 16 对齐；只读前 D/2 = 64 维
             仅支持 NeoX 半分化 RoPE（前 64 维与后 64 维配对）
 dtype     = bf16 / fp16；五个输入与三个输出必须同 dtype
 rank      = qkv / cos / sin 均为 3 维
+B / S     = 均 > 0；空张量直接拒绝
+epsilon   = 有限且非负
 UB        = 单次占用 <= 253952 B；tokenTile 由 host 按预算从 8/4/2/1 选择
 workspace = 0，调用方不需要申请
 ```
@@ -66,18 +68,18 @@ workspace = 0，调用方不需要申请
 |---|---|---|
 | `D` | 固定 128 | 不支持其他头宽；host 未校验，会按 128 读 |
 | `Nv` | `Nv ≡ Nk` | 无 `num_v_heads` 属性，按 `Nk` 处理 |
-| `Nq` / `Nk` | 均 `> 0`，且 `Nq % Nk == 0` | `ACLNN_ERR_PARAM_INVALID` |
+| `Nq` / `Nk` | 均 `> 0`（按符号类型校验，负数不回绕），且 `Nq % Nk == 0`；各自 `<= 64` | `ACLNN_ERR_PARAM_INVALID` |
 | `Nq + Nk` | `<= 64` | `ACLNN_ERR_PARAM_INVALID` |
 | `stride` | `>= (Nq + 2*Nk) * 128` | `ACLNN_ERR_PARAM_INVALID` |
-| `ropeStride` | `∈ [64, 128]` | `ACLNN_ERR_PARAM_INVALID` |
+| `ropeStride` | `∈ [64, 128]` 且为 16 的倍数 | `ACLNN_ERR_PARAM_INVALID` |
 | `rank` | 3 维 | `GRAPH_FAILED` |
 | `dtype` | bf16 / fp16，且输入输出一致 | 参数错误 |
+| `B` / `S` | 均 `> 0` | `GRAPH_FAILED`（避免 tiling 除零） |
+| `epsilon` | 有限且非负 | `ACLNN_ERR_PARAM_INVALID` |
 | `UB` | `<= 253952 B` | `GRAPH_FAILED` |
 | `q_gamma` / `k_gamma` | 形状 `[128]` | **未校验**，越界读或脏值 |
 | `sin` | 形状与 `cos` 一致 | **未校验**，越界读 |
 | `cos` / `sin` 的 `B,S` | 与 `qkv` 一致 | **未校验**，按 `b*S+s` 索引会错位 |
-| `B` / `S` | `> 0` | **未校验**，`S = 0` 时 BNSD 路径除零 |
-| `epsilon` | 任意 float | **未校验**，无范围限制 |
 
 | 张量 | 形状 | dtype |
 | --- | --- | --- |
@@ -126,9 +128,9 @@ aclnnStatus aclnnSplitQkvNormRope(
 
 | 属性 | 类型 | 默认 | 取值约束 | 说明 |
 | --- | --- | --- | --- | --- |
-| `num_q_heads` | Int | 必填 | `> 0`；`Nq % num_kv_heads == 0`；`Nq + num_kv_heads <= 64` | `Nq` |
-| `num_kv_heads` | Int | 必填 | `> 0`；`Nv` 恒等于它 | `Nk`（`Nv = Nk`） |
-| `epsilon` | Float | 1e-6 | 无范围校验 | RMSNorm eps |
+| `num_q_heads` | Int | 必填 | `> 0`；`Nq % num_kv_heads == 0`；`Nq + num_kv_heads <= 64`；负数直接拒绝（不做 u32 转换） | `Nq` |
+| `num_kv_heads` | Int | 必填 | `> 0`；`Nv` 恒等于它；负数直接拒绝 | `Nk`（`Nv = Nk`） |
+| `epsilon` | Float | 1e-6 | 有限且非负 | RMSNorm eps |
 | `gqa_expand` | Bool | false | 仅在 `Nq % Nk == 0` 时有意义；`true` 时 k/v 输出 `Nq` 头 | k/v 是否扩张到 `Nq` 头 |
 | `layout_bnsd` | Bool | false | 只影响输出布局 | 输出 `[B,H,S,D]` / `[B,S,H*D]` |
 | `kv_interleaved` | Bool | false | 要求 `Nv == Nk`（当前恒成立）；数据必须与所选布局一致 | 输入行内 KV 是否按 head 交错 `[K_i,V_i]`（JoyOV2 `to_qkv` 的打包方式） |
@@ -139,7 +141,9 @@ aclnnStatus aclnnSplitQkvNormRope(
 
 约束（host 侧校验，失败返回 `ACLNN_ERR_PARAM_INVALID`；完整清单见 “符号与形状”）：
 
-- `stride >= (Nq+2*Nk)*D`、`ropeStride ∈ [64,128]`、`Nq % Nk == 0`、`Nq+Nk <= 64`；
+- `stride >= (Nq+2*Nk)*D`、`ropeStride ∈ [64,128]` 且 16 对齐、`Nq % Nk == 0`、`Nq+Nk <= 64`；
+- 头数按符号类型校验：负值在转 u32 前直接拒绝，避免回绕绕过后续检查；
+- `B > 0`、`S > 0`（空张量拒绝，避免 tiling 除零）；`epsilon` 有限且非负；
 - 输入输出 dtype 一致且为 bf16/fp16，`qkv`/`cos` 必须 3 维；
 - UB 需求 `<= 253952 B`；`tokenTile` 由 host 按 UB 预算从 `8/4/2/1` 自动选择
   （主场景 6/2 取 8，共 88,576 B）。
@@ -152,6 +156,17 @@ aclnnStatus aclnnSplitQkvNormRope(
 - dtype 只支持 2 字节（bf16/fp16），fp32 未支持；
 - 头数上限 `Nq+Nk <= 64`，更大头数受 `sumsq` workspace 与 UB 双重约束；
 - `kv_interleaved` 仅在 `Nv == Nk` 时有定义，两者互斥规则待 `Nv` 泛化时显式校验。
+
+已知问题（aclnn eager 路径，待框架修复）：
+
+- 生成的 aclnn 封装里 `NnopbaseAddAttrWithDtype(..., kNnopbaseFloat)` 会把 Float
+  类属性槽写成 0：tiling 读到的 `epsilon` 恒为 0，与调用方传入值不符。诊断证据：
+  attr 槽按声明序布局，int64/bool 槽均正确，仅 Float 槽值为 0；同时
+  `NnopbaseMatchArgs` 不把 Float 属性纳入命中比较，导致仅改 `epsilon` 的重复调用
+  复用上次 tiling。影响：kernel 实际按 `eps = 0` 计算 RMSNorm（而非默认 1e-6），
+  正常输入下 `sumsq/D` 远大于 1e-6，结果差异低于 bf16 容差故功能用例可通过；
+  但全零 q/k 头会因 `sqrt(0)` 后除零产生 NaN（`eps=1e-6` 本可避免）。host 侧的
+  `epsilon` 有限非负校验已保留，图模式等直接经 gert 的调用路径不受此问题影响。
 
 ## 算法
 

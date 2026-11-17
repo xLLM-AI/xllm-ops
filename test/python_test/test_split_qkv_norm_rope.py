@@ -319,3 +319,38 @@ def test_split_qkv_norm_rope_wide_heads(
         k_npu.cpu().float(), k_ref.float(), atol=atol, rtol=rtol)
     torch.testing.assert_close(
         v_npu.cpu().float(), v_ref.float(), atol=0, rtol=0)
+
+
+# 拒绝路径：host 校验应返回参数错误而不是回绕/静默越界
+# (nq, nkv, batch, seq, rope_stride, eps, desc)
+# 注：epsilon 负值校验暂无法在 aclnn eager 路径覆盖——生成的
+# NnopbaseAddAttrWithDtype(kNnopbaseFloat) 会把 Float 属性槽写成 0，
+# tiling 读到的永远是 0（见文档“已知问题”）。验证代码保留，待框架修复后补用例。
+REJECT_CASES = [
+    (-1, 2, 1, 8, 64, 1e-6, "negative num_q_heads must not wrap to u32"),
+    (6, -2, 1, 8, 64, 1e-6, "negative num_kv_heads must not wrap to u32"),
+    (6, 2, 1, 8, 65, 1e-6, "rope_stride must be 16-aligned for LoadAlign"),
+]
+
+
+@pytest.mark.parametrize(
+    "nq,nkv,batch,seq,rope_stride,eps,desc", REJECT_CASES)
+def test_split_qkv_norm_rope_reject_invalid(
+        nq, nkv, batch, seq, rope_stride, eps, desc):
+    if not _get_device():
+        return
+
+    torch.manual_seed(20261117)
+    dtype = torch.bfloat16
+    stride = (6 + 2 * 2) * HEAD_DIM
+    qkv = (torch.randn(batch, seq, stride, dtype=torch.float32) * 0.5).to(dtype)
+    q_gamma = torch.ones(HEAD_DIM, dtype=dtype)
+    k_gamma = torch.ones(HEAD_DIM, dtype=dtype)
+    cos = torch.zeros(batch, seq, rope_stride, dtype=dtype)
+    sin = torch.zeros(batch, seq, rope_stride, dtype=dtype)
+
+    with pytest.raises((RuntimeError, AssertionError)):
+        custom_ops.split_qkv_norm_rope_npu(
+            qkv.npu(), q_gamma.npu(), k_gamma.npu(), cos.npu(), sin.npu(),
+            nq, nkv, eps, True, False, False)
+        torch.npu.synchronize()
