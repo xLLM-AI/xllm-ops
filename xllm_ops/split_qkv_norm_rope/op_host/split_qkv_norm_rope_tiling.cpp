@@ -29,6 +29,8 @@ limitations under the License.
 namespace optiling {
 namespace {
 constexpr size_t IDX_QKV = 0;
+constexpr size_t IDX_Q_GAMMA = 1;
+constexpr size_t IDX_K_GAMMA = 2;
 constexpr size_t IDX_COS = 3;
 constexpr size_t ATTR_NUM_Q_HEADS = 0;
 constexpr size_t ATTR_NUM_KV_HEADS = 1;
@@ -42,15 +44,16 @@ inline uint32_t RoundUp(uint32_t value, uint32_t align)
     return (value + align - 1) / align * align;
 }
 
-// UB 需求（与 kernel 侧 InitBuffer 一致）
-uint64_t CalcUbNeed(uint32_t tile, uint32_t padStride, uint32_t ropeStride, uint32_t headTotal, uint32_t elemBytes)
+// UB 需求（与 kernel 侧 InitBuffer 一致）；headDim 由调用方传入（从 q_gamma 推导）
+uint64_t CalcUbNeed(uint32_t tile, uint32_t padStride, uint32_t ropeStride, uint32_t headTotal,
+                    uint32_t headDim, uint32_t elemBytes)
 {
     uint64_t need = static_cast<uint64_t>(tile) * 2 *
                     (static_cast<uint64_t>(padStride) * elemBytes +
                      static_cast<uint64_t>(ropeStride) * elemBytes * 2);   // inQkv/inCos/inSin ×2
-    need += 2ull * tile * headTotal * SQNR_HEAD_DIM * elemBytes;            // out ×2
-    need += 2ull * SQNR_HEAD_DIM * elemBytes + 2ull * SQNR_HEAD_DIM * 4;    // inGamma ×2 + gamma fp32 ×2
-    need += static_cast<uint64_t>(tile) * SQNR_MAX_HEADS * 4;               // sumsq
+    need += 2ull * tile * headTotal * headDim * elemBytes;                 // out ×2
+    need += 2ull * headDim * elemBytes + 2ull * headDim * 4;               // inGamma ×2 + gamma fp32 ×2
+    need += static_cast<uint64_t>(tile) * SQNR_MAX_HEADS * 4;              // sumsq
     return need;
 }
 }  // namespace
@@ -87,6 +90,27 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
                         qkvShape.GetDim(0), qkvShape.GetDim(1)),
                 return ge::GRAPH_FAILED);
     const uint32_t ropeStride = static_cast<uint32_t>(cosShape.GetDim(2));
+
+    // D 单一来源：从 q_gamma 形状推导（而不是在 stride 运算里隐含 128）；
+    // kernel VF 是 64-lane 半区硬分区，当前仅支持 D == SQNR_HEAD_DIM（Tier 1 起按支持集放开）
+    const gert::Shape qGammaShape = context->GetInputShape(IDX_Q_GAMMA)->GetStorageShape();
+    OP_CHECK_IF(qGammaShape.GetDimNum() != 1, OP_LOGE(context, "q_gamma must be rank-1 [D]."),
+                return ge::GRAPH_FAILED);
+    const gert::Shape kGammaShape = context->GetInputShape(IDX_K_GAMMA)->GetStorageShape();
+    OP_CHECK_IF(kGammaShape.GetDimNum() != 1, OP_LOGE(context, "k_gamma must be rank-1 [D]."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(qGammaShape.GetDim(0) <= 0 || kGammaShape.GetDim(0) <= 0,
+                OP_LOGE(context, "gamma dim must be positive, got q_gamma=%ld k_gamma=%ld.",
+                        qGammaShape.GetDim(0), kGammaShape.GetDim(0)),
+                return ge::GRAPH_FAILED);
+    const uint32_t headDim = static_cast<uint32_t>(qGammaShape.GetDim(0));
+    OP_CHECK_IF(headDim != SQNR_HEAD_DIM,
+                OP_LOGE(context, "head_dim %u unsupported (derived from q_gamma), kernel requires D=%u.",
+                        headDim, SQNR_HEAD_DIM),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(static_cast<uint32_t>(kGammaShape.GetDim(0)) != headDim,
+                OP_LOGE(context, "k_gamma dim %ld != q_gamma dim %u.", kGammaShape.GetDim(0), headDim),
+                return ge::GRAPH_FAILED);
 
     const gert::RuntimeAttrs *attrs = context->GetAttrs();
     OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
@@ -128,12 +152,13 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     const uint32_t qkHeads = numHeadQ + numHeadK;
     OP_CHECK_IF(qkHeads > SQNR_MAX_HEADS, OP_LOGE(context, "Nq+Nk=%u > %u.", qkHeads, SQNR_MAX_HEADS),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(qkvStride < headTotal * SQNR_HEAD_DIM,
-                OP_LOGE(context, "qkv stride %u < heads*D = %u.", qkvStride, headTotal * SQNR_HEAD_DIM),
+    OP_CHECK_IF(qkvStride < headTotal * headDim,
+                OP_LOGE(context, "qkv stride %u < heads*D = %u.", qkvStride, headTotal * headDim),
                 return ge::GRAPH_FAILED);
     // VF 对 cos/sin 行按 LoadAlign 逐 t 取数，行距 ropeStride*2 B 必须是 32 B 的倍数（即 ropeStride 16 对齐）
-    OP_CHECK_IF(ropeStride < SQNR_HEAD_DIM / 2 || ropeStride > SQNR_HEAD_DIM || ropeStride % 16 != 0,
-                OP_LOGE(context, "rope stride must be in [64,128] and 16-aligned, got %u.", ropeStride),
+    OP_CHECK_IF(ropeStride < headDim / 2 || ropeStride > headDim || ropeStride % 16 != 0,
+                OP_LOGE(context, "rope stride must be in [D/2, D] and 16-aligned, got %u (D=%u).",
+                        ropeStride, headDim),
                 return ge::GRAPH_FAILED);
 
     SplitQkvNormRopeCompileInfo compileInfo;
@@ -160,7 +185,7 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     // 按 UB 预算从大到小挑 tile 行数：行数越大越能摊薄每 tile 的固定开销
     uint32_t tokenTile = 0;
     for (uint32_t cand = SQNR_TOKEN_TILE; cand >= 1; cand >>= 1) {
-        if (CalcUbNeed(cand, padStride, ropeStride, headTotal, elemBytes) <= ubSize) {
+        if (CalcUbNeed(cand, padStride, ropeStride, headTotal, headDim, elemBytes) <= ubSize) {
             tokenTile = cand;
             break;
         }
@@ -188,7 +213,7 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     tilingData.set_numHeadQ(numHeadQ);
     tilingData.set_numHeadK(numHeadK);
     tilingData.set_numHeadV(numHeadV);
-    tilingData.set_headDim(SQNR_HEAD_DIM);
+    tilingData.set_headDim(headDim);
     tilingData.set_qkvStride(qkvStride);
     tilingData.set_padStride(padStride);
     tilingData.set_ropeStride(ropeStride);
@@ -197,7 +222,7 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     tilingData.set_tokenTile(tokenTile);
     tilingData.set_lastBlockTokenNum(totalTokens - tokenPerCore * (blockDim - 1));
     tilingData.set_eps(eps);
-    tilingData.set_reciprocal(1.0f / static_cast<float>(SQNR_HEAD_DIM));
+    tilingData.set_reciprocal(1.0f / static_cast<float>(headDim));
     uint32_t flags = 0;
     if (gqaExpand) {
         flags |= SQNR_FLAG_GQA_EXPAND;
@@ -220,9 +245,9 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     OP_CHECK_NULL_WITH_CONTEXT(context, workspace);
     workspace[0] = 0;
 
-    OP_LOGI(context, "tokens=%u blockDim=%u tokenPerCore=%u tile=%u lastCore=%u stride=%u pad=%u rope=%u heads=%u/%u gqa=%d bnsd=%d",
+    OP_LOGI(context, "tokens=%u blockDim=%u tokenPerCore=%u tile=%u lastCore=%u stride=%u pad=%u rope=%u heads=%u/%u D=%u gqa=%d bnsd=%d",
             totalTokens, blockDim, tokenPerCore, tokenTile, tilingData.get_lastBlockTokenNum(), qkvStride, padStride,
-            ropeStride, numHeadQ, numHeadK, static_cast<int32_t>(gqaExpand), static_cast<int32_t>(layoutBNSD));
+            ropeStride, numHeadQ, numHeadK, headDim, static_cast<int32_t>(gqaExpand), static_cast<int32_t>(layoutBNSD));
     return ge::GRAPH_SUCCESS;
 }
 

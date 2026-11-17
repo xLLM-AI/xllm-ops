@@ -42,7 +42,8 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 ```text
 B, S      = batch / sequence，均要求 > 0
-D         = head_dim，固定 128；RoPE 按 64-lane 半区处理，half = D/2 = 64
+D         = head_dim，由 q_gamma 形状推导（单一来源），当前仅支持 128；
+            RoPE 按 64-lane 半区处理，half = D/2 = 64
 Nq, Nk, Nv= q / k / v 头数；Nv 没有独立属性，恒等于 Nk
             Nq > 0、Nk > 0、Nq % Nk == 0（GQA 组必须整除）
             Nq + Nk <= 64（sumsq workspace 上限 kMaxHeads）
@@ -52,7 +53,7 @@ kv_interleaved = 行内 KV 布局开关：
             false -> [Q | K0..K(Nk-1) | V0..V(Nk-1) | tail]（块状）
             true  -> [Q | K0 V0 | K1 V1 | ... | tail]（逐 kv head 交错）
             两种布局都要求 Q 区在前，gate 等附加列放在最后
-ropeStride= cos/sin 行跨度（元素），取值 [64, 128] 且必须 16 对齐；只读前 D/2 = 64 维
+ropeStride= cos/sin 行跨度（元素），取值 [D/2, D] 且必须 16 对齐；只读前 D/2 = 64 维
             仅支持 NeoX 半分化 RoPE（前 64 维与后 64 维配对）
 dtype     = bf16 / fp16；五个输入与三个输出必须同 dtype
 rank      = qkv / cos / sin 均为 3 维
@@ -66,7 +67,7 @@ workspace = 0，调用方不需要申请
 
 | 项 | 约束 | 违反时 |
 |---|---|---|
-| `D` | 固定 128 | 不支持其他头宽；host 未校验，会按 128 读 |
+| `D` | 从 `q_gamma` 形状推导，当前仅支持 `128`（kernel VF 64-lane 半区硬分区） | `ACLNN_ERR_PARAM_INVALID` |
 | `Nv` | `Nv ≡ Nk` | 无 `num_v_heads` 属性，按 `Nk` 处理 |
 | `Nq` / `Nk` | 均 `> 0`（按符号类型校验，负数不回绕），且 `Nq % Nk == 0`；各自 `<= 64` | `ACLNN_ERR_PARAM_INVALID` |
 | `Nq + Nk` | `<= 64` | `ACLNN_ERR_PARAM_INVALID` |
@@ -77,7 +78,7 @@ workspace = 0，调用方不需要申请
 | `B` / `S` | 均 `> 0` | `GRAPH_FAILED`（避免 tiling 除零） |
 | `epsilon` | 有限且非负 | `ACLNN_ERR_PARAM_INVALID` |
 | `UB` | `<= 253952 B` | `GRAPH_FAILED` |
-| `q_gamma` / `k_gamma` | 形状 `[128]` | **未校验**，越界读或脏值 |
+| `q_gamma` / `k_gamma` | 形状 `[D]`（当前 `D=128`），rank-1 且两者一致 | `ACLNN_ERR_PARAM_INVALID` |
 | `sin` | 形状与 `cos` 一致 | **未校验**，越界读 |
 | `cos` / `sin` 的 `B,S` | 与 `qkv` 一致 | **未校验**，按 `b*S+s` 索引会错位 |
 
@@ -141,7 +142,8 @@ aclnnStatus aclnnSplitQkvNormRope(
 
 约束（host 侧校验，失败返回 `ACLNN_ERR_PARAM_INVALID`；完整清单见 “符号与形状”）：
 
-- `stride >= (Nq+2*Nk)*D`、`ropeStride ∈ [64,128]` 且 16 对齐、`Nq % Nk == 0`、`Nq+Nk <= 64`；
+- `stride >= (Nq+2*Nk)*D`、`ropeStride ∈ [D/2, D]` 且 16 对齐、`Nq % Nk == 0`、`Nq+Nk <= 64`；
+- `D` 由 `q_gamma` 形状推导（单一来源），`q_gamma`/`k_gamma` rank-1 且维度一致；当前仅支持 `D=128`；
 - 头数按符号类型校验：负值在转 u32 前直接拒绝，避免回绕绕过后续检查；
 - `B > 0`、`S > 0`（空张量拒绝，避免 tiling 除零）；`epsilon` 有限且非负；
 - 输入输出 dtype 一致且为 bf16/fp16，`qkv`/`cos` 必须 3 维；
@@ -152,7 +154,8 @@ aclnnStatus aclnnSplitQkvNormRope(
 
 - `Nv` 不能独立于 `Nk`（无 `num_v_heads` 属性），MLA 类非对称 KV 暂不支持；
 - RoPE 固定作用于整个 `head_dim`，且只有 NeoX 半分化一种形式（无部分 rope / 交错 rope）；
-- `head_dim` 固定 128，其他头宽需要重写 VF 的 64-lane 分区；
+- `head_dim` 从 `q_gamma` 推导并校验；当前仅支持 128，其他头宽需要重写 VF 的 64-lane 分区
+  （`D=256` 规划走 chunk 循环，低风险，见泛化路线 Tier 1）；
 - dtype 只支持 2 字节（bf16/fp16），fp32 未支持；
 - 头数上限 `Nq+Nk <= 64`，更大头数受 `sumsq` workspace 与 UB 双重约束；
 - `kv_interleaved` 仅在 `Nv == Nk` 时有定义，两者互斥规则待 `Nv` 泛化时显式校验。

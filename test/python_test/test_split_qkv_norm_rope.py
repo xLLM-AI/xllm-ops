@@ -322,21 +322,24 @@ def test_split_qkv_norm_rope_wide_heads(
 
 
 # 拒绝路径：host 校验应返回参数错误而不是回绕/静默越界
-# (nq, nkv, batch, seq, rope_stride, eps, desc)
+# (nq, nkv, batch, seq, rope_stride, eps, q_gamma_dim, k_gamma_dim, desc)
 # 注：epsilon 负值校验暂无法在 aclnn eager 路径覆盖——生成的
 # NnopbaseAddAttrWithDtype(kNnopbaseFloat) 会把 Float 属性槽写成 0，
-# tiling 读到的永远是 0（见文档“已知问题”）。验证代码保留，待框架修复后补用例。
+# tiling 读到的永远是 0（见文档"已知问题"）。验证代码保留，待框架修复后补用例。
 REJECT_CASES = [
-    (-1, 2, 1, 8, 64, 1e-6, "negative num_q_heads must not wrap to u32"),
-    (6, -2, 1, 8, 64, 1e-6, "negative num_kv_heads must not wrap to u32"),
-    (6, 2, 1, 8, 65, 1e-6, "rope_stride must be 16-aligned for LoadAlign"),
+    (-1, 2, 1, 8, 64, 1e-6, 128, 128, "negative num_q_heads must not wrap to u32"),
+    (6, -2, 1, 8, 64, 1e-6, 128, 128, "negative num_kv_heads must not wrap to u32"),
+    (6, 2, 1, 8, 65, 1e-6, 128, 128, "rope_stride must be 16-aligned for LoadAlign"),
+    (6, 2, 1, 8, 64, 1e-6, 256, 256, "head_dim 256 unsupported until Tier 1"),
+    (6, 2, 1, 8, 64, 1e-6, 64, 64, "head_dim 64 unsupported until Tier 1"),
+    (6, 2, 1, 8, 64, 1e-6, 128, 256, "k_gamma dim must match q_gamma"),
 ]
 
 
 @pytest.mark.parametrize(
-    "nq,nkv,batch,seq,rope_stride,eps,desc", REJECT_CASES)
+    "nq,nkv,batch,seq,rope_stride,eps,q_gamma_dim,k_gamma_dim,desc", REJECT_CASES)
 def test_split_qkv_norm_rope_reject_invalid(
-        nq, nkv, batch, seq, rope_stride, eps, desc):
+        nq, nkv, batch, seq, rope_stride, eps, q_gamma_dim, k_gamma_dim, desc):
     if not _get_device():
         return
 
@@ -344,8 +347,8 @@ def test_split_qkv_norm_rope_reject_invalid(
     dtype = torch.bfloat16
     stride = (6 + 2 * 2) * HEAD_DIM
     qkv = (torch.randn(batch, seq, stride, dtype=torch.float32) * 0.5).to(dtype)
-    q_gamma = torch.ones(HEAD_DIM, dtype=dtype)
-    k_gamma = torch.ones(HEAD_DIM, dtype=dtype)
+    q_gamma = torch.ones(q_gamma_dim, dtype=dtype)
+    k_gamma = torch.ones(k_gamma_dim, dtype=dtype)
     cos = torch.zeros(batch, seq, rope_stride, dtype=dtype)
     sin = torch.zeros(batch, seq, rope_stride, dtype=dtype)
 
