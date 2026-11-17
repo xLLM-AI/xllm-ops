@@ -57,7 +57,57 @@ extern "C" __global__ __aicore__ void hc_pre_va(GM_ADDR x,
     pipe.Destroy();
 
     TPipe pipeStage2;
-    HcPreVa::HcPreVaMembaseKSplitCorePart2<DTYPE_X> op2;
+    HcPreVa::HcPreVaMembaseKSplitCorePart2<DTYPE_X, false> op2;
+    op2.Init(x,
+             hc_scale,
+             hc_base,
+             y,
+             post,
+             comb_frag,
+             pre_mix,
+             pre,
+             userWs,
+             tilingData,
+             &pipeStage2);
+    op2.Process();
+
+    pipeStage2.Destroy();
+  } else if (TILING_KEY_IS(1)) {
+    GET_TILING_DATA_WITH_STRUCT(HcPreVaTilingData, tiling_data_in, tiling);
+    const HcPreVaTilingData* __restrict tilingData = &tiling_data_in;
+    HcPreVa::HcPreVaMembaseKSplitCorePart1<DTYPE_X> op;
+    op.Init(x, hc_fn, userWs, tilingData, &pipe);
+    op.Process();
+
+    pipe.Destroy();
+
+    TPipe pipeStage2;
+    HcPreVa::HcPreVaMembaseKSplitCorePart2<DTYPE_X, true> op2;
+    op2.Init(x,
+             hc_scale,
+             hc_base,
+             y,
+             post,
+             comb_frag,
+             pre_mix,
+             pre,
+             userWs,
+             tilingData,
+             &pipeStage2);
+    op2.Process();
+
+    pipeStage2.Destroy();
+  } else if (TILING_KEY_IS(2)) {
+    GET_TILING_DATA_WITH_STRUCT(HcPreVaTilingData, tiling_data_in, tiling);
+    const HcPreVaTilingData* __restrict tilingData = &tiling_data_in;
+    HcPreVa::HcPreVaMembaseKSplitCorePart1<DTYPE_X> op;
+    op.Init(x, hc_fn, userWs, tilingData, &pipe);
+    op.Process();
+
+    pipe.Destroy();
+
+    TPipe pipeStage2;
+    HcPreVa::HcPreVaMembaseKSplitCorePremixPart2<DTYPE_X> op2;
     op2.Init(x,
              hc_scale,
              hc_base,
