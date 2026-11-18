@@ -272,17 +272,23 @@ tilingKey 只区分 dtype（`0 = bf16`、`1 = fp16`）。
   64-lane pair 走 NeoX 旋转（γ 折进 cos/sin），其余 `nPairs - nRopePairs` 个 pair 走
   passthrough（`y = x*scale*gamma` 直通写出）；全 rope 时 `nRopePairs == nPairs`，
   passthrough 循环不执行，指令路径与原实现完全一致。
-- **HalfMasked 路径（Tier 2，`D = 64/96`）**：编译期模板 `kHalfMasked` 分裂，`D >= 128` 实例
-  逐指令不变。半区配对借 `Reg::UpdateMask<float>(halfDim)` 计数掩码（arch3510 专属）：
+- **HalfMasked 路径（Tier 2，`D = 64/96`）**：编译期模板 `kHalfMasked` 分裂，`D >= 128` 实例的
+  `vec` 指令流与基线等价（编译期展开后与 hardcode 版无差异）。半区配对借 `Reg::UpdateMask<float>(halfDim)` 计数掩码（arch3510 专属）：
   前半/后半各占一个 64-lane 寄存器的 `[0,halfDim)` lane，NeoX 旋转在两寄存器间完成，
   无 lane 重排、无 fp32 staging。γ 拆拷成双窗口（前半 `[0,halfDim)`、后半 `[64,64+halfDim)`，
   buffer 放宽 128 float）。pass1 的尾 chunk（`D=96` 时 tailCnt=32）经掩码 `Cast` 落临时寄存器
   （`layoutZMrgZ`，inactive lane=0），再用**全量掩码** `MulAddDst` 累加——arch35 `MulAddDst`
   仅支持 `ZEROING`（masked 会清掉 dst inactive lane），此 idiom 与官方
   `layernorm_variance` 一致。
+- **编译期 `(D, rope_dim)` 模板特化**：支持集闭环 `{64,96,128,256}`，VF 走
+  `SqnrNormRopeVfPack<T, bool kHalfMasked, uint16_t kD, uint16_t kRD>` 字面量实例化
+  （`D=64/96/128` 全 rope、`D=256` 分 `rope_dim=128/256` 两档），pass1/pass2 全部循环
+  trip count 编译期已知、完全展开，消除运行期循环计数与地址依赖；γ 每 tile 装载一次
+  （pair 外提）。`D=128` 全 rope 的 `vec` 指令流与 hardcode 基线（泛化前）等价，
+  `msprof op` A/B 实测无回退（见「性能」节）。
 - **输出 pack-store**：`Cast<T,float,RndRSatNS>` + `StoreAlign<T, DIST_PACK_B32>`
   直接把 fp32 结果打包进输出 tile，无整趟 cast-out；目标行距用输出 tile 行距
-  `numHeadTotal*128`，不是 q/k 行宽。
+  `numHeadTotal*D`，不是 q/k 行宽。
 - **v 直通**：一次多行 UB→UB `DataCopy` 完成，不经 fp32、不进 VF。
 - **三级流水**：`inQkv_/inCos_/inSin_/outTile_` 全部深度 2，
   循环体为「预取 tile k+1 → 计算 tile k → 写出 tile k-1」，
@@ -338,6 +344,26 @@ k `1.55e-2`、v `0`。
 
 向量流水（`vec`）是第一约束，`mte2`（GM→UB 搬入）第二。`gqa_expand` 的 k/v 三倍写出
 由三级流水覆盖，不构成瓶颈（写带宽已接近上限但已被隐藏），该用例的耗时与不扩张时相当。
+
+### 泛化回退校验（D=128 主场景，`msprof op`）
+
+Tier 1/2/3 泛化后用 `msprof op`（BlockDim=56 核、频点锁定 1650 MHz、NPU 2）做同窗口 A/B：
+基线为泛化前 Tier 0 最终版（commit `af38104`），当前为泛化后版本
+（VF 按 `(D, rope_dim)` 编译期模板化、γ 每 tile 装载一次），
+主场景 `S=12915`、`[6,2]`、stride 1286、bf16、10 次采集取中位：
+
+| 指标 | 基线（`af38104`） | 泛化后 | 变化 |
+| --- | ---: | ---: | ---: |
+| `Task Duration(us)` 中位 | 32.99 | **31.25** | **-5.3%** |
+| `Task Duration(us)` 最小 | 32.21 | 30.08 | -6.6% |
+| block0 `aiv_total_cycles` | 49,945 | 48,379 | -3.1% |
+| block0 `aiv_vec_time(us)` | 16.44 | 16.55 | +0.7% |
+| block0 `aiv_scalar_time(us)` | 11.70 | 12.66 | +8.2% |
+| block0 `aiv_mte2_time(us)` | 27.59 | 25.28 | -8.4% |
+
+结论：`vec` 指令流与基线持平（编译期展开后与 hardcode 版等价），泛化无回退且整体更快。
+注意此表频点与工具与「主场景」表（`msprof application`，频点漂移）不同，
+两组数字不可直接相减；只需保证比较在同工具、同频点、同窗口下进行。
 
 ## 测试
 

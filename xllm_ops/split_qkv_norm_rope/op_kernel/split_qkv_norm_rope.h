@@ -59,14 +59,20 @@ constexpr uint32_t kFlagKvInterleaved = 1u << 2;  // 1：输入行内 KV 按 hea
 //      RoPE 每半 1 次 Mul + 1 次 MulAddDst。
 //   5) 输出在寄存器内 Cast 成 T 后 StoreAlign DIST_PACK_B32 直写（pack-store），无整块 cast-out。
 // ---------------------------------------------------------------------------
-template <typename T, bool kHalfMasked>
+template <typename T, bool kHalfMasked, uint16_t kD, uint16_t kRD>
 __simd_vf__ inline void SqnrNormRopeVfPack(
     __ubuf__ T *outT, __ubuf__ T *xb, __ubuf__ T *cosT, __ubuf__ T *sinT,
     __ubuf__ float *gammaQ, __ubuf__ float *gammaK, __ubuf__ float *sumsq,
     uint16_t numHeadQ, uint16_t numHeadK, uint16_t xStride, uint16_t outStride, uint16_t ropeStride,
-    uint16_t tileRows, uint16_t kvHeadStep, uint16_t headDim, uint16_t halfDim, uint16_t ropeDim, float eps, float recip)
+    uint16_t tileRows, uint16_t kvHeadStep, float eps, float recip)
 {
     using namespace AscendC::Reg;
+    // kD/kRD 模板形参 → constexpr 局部：支持集闭环 {64,96,128,256}，VF 内所有循环
+    // （pass1 的 c、pass2 的 p 与 passthrough）trip count 编译期已知而完全展开，
+    // 消除运行期循环开销与寄存器地址依赖（D=128 全 rope 与 af38104 基线指令流等价）。
+    constexpr uint16_t headDim = kD;
+    constexpr uint16_t halfDim = static_cast<uint16_t>(kD / 2);
+    constexpr uint16_t ropeDim = kRD;
     RegTensor<float> y1;
     RegTensor<float> y2;
     RegTensor<float> t1;
@@ -163,6 +169,12 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     // ---- pass 2：norm + rope，单 masked pair；前半 [0,halfDim) 配后半 [halfDim,D) ----
     uint32_t halfCnt = static_cast<uint32_t>(halfDim);  // 32 (D=64) / 48 (D=96)
     MaskReg pregHalf = UpdateMask<float>(halfCnt);
+    // γ 每 VF 装载一次（布局：前半 [0,halfDim)、后半 [64,64+halfDim)，CopyInGamma 写入），
+    // 避免 token 循环内重复 LoadAlign（与全量路径同款外提）
+    LoadAlign(gq1, gammaQ);
+    LoadAlign(gq2, gammaQ + 64);
+    LoadAlign(gk1, gammaK);
+    LoadAlign(gk2, gammaK + 64);
     for (uint16_t t = 0; t < tileRows; ++t) {
         __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
         __ubuf__ T *orow = outT + static_cast<uint32_t>(t) * outStride;
@@ -171,9 +183,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
         LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, sinT + static_cast<uint32_t>(t) * ropeStride);
         Cast<float, T, AscendC::layoutZMrgZ>(sr, tv, pregHalf);
         Muls(sn, sr, -1.0f, pregHalf);
-        // q 组：γq 折进 cos/sin
-        LoadAlign(gq1, gammaQ);
-        LoadAlign(gq2, gammaQ + 64);
+        // q 组常量（γq 已 tile 外装载，折进 cos/sin）
         Mul(ca, gq1, cr, pregHalf);
         Mul(cc, gq1, sr, pregHalf);
         Mul(cd, gq2, cr, pregHalf);
@@ -197,9 +207,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
             Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t2, pregHalf);
             StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + halfDim, pk, pregHalf);
         }
-        // k 组：γk 折进 cos/sin（cr/sr/sn 同 token 复用）
-        LoadAlign(gk1, gammaK);
-        LoadAlign(gk2, gammaK + 64);
+        // k 组常量（γk 已 tile 外装载；cr/sr/sn 同 token 复用）
         Mul(ca, gk1, cr, pregHalf);
         Mul(cc, gk1, sr, pregHalf);
         Mul(cd, gk2, cr, pregHalf);
@@ -283,13 +291,15 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
 
     // pass 2：norm + rope，结果直接 pack 成 T 写进输出 tile
-    for (uint16_t t = 0; t < tileRows; ++t) {
-        __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
-        __ubuf__ T *orow = outT + static_cast<uint32_t>(t) * outStride;
-        // q 组：γq 折进 cos/sin；逐 64-lane pair 处理（D=128 → nPairs=1，等价原 hardcode）
-        for (uint16_t p = 0; p < nRopePairs; ++p) {
-            LoadAlign(gq1, gammaQ + static_cast<uint32_t>(p) * kSeg);
-            LoadAlign(gq2, gammaQ + halfDim + static_cast<uint32_t>(p) * kSeg);
+    // γ 每 VF 每对只装载一次（pair 外提，t 循环内仅重算依赖 token 的 cos/sin 与常量）——
+    // D=128 全 rope 时与 af38104 基线指令流等价（γ Load 4 次/tile、cos/sin Load 2 次/token）。
+    // q 组：γq 折进 cos/sin；逐 64-lane pair 处理（D=128 → nPairs=1，等价原 hardcode）
+    for (uint16_t p = 0; p < nRopePairs; ++p) {
+        LoadAlign(gq1, gammaQ + static_cast<uint32_t>(p) * kSeg);
+        LoadAlign(gq2, gammaQ + halfDim + static_cast<uint32_t>(p) * kSeg);
+        for (uint16_t t = 0; t < tileRows; ++t) {
+            __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
+            __ubuf__ T *orow = outT + static_cast<uint32_t>(t) * outStride;
             LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, cosT + static_cast<uint32_t>(t) * ropeStride + static_cast<uint32_t>(p) * kSeg);
             Cast<float, T, AscendC::layoutZMrgZ>(cr, tv, mFull);
             LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, sinT + static_cast<uint32_t>(t) * ropeStride + static_cast<uint32_t>(p) * kSeg);
@@ -319,12 +329,16 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
                 StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + halfDim + static_cast<uint32_t>(p) * kSeg, pk, mFull);
             }
         }
+    }
 
-        // q 组 passthrough：未旋转的 half chunk 经 norm*γq 直通（部分 rope 时生效；
-        // 全 rope 时 nRopePairs==nPairs，本循环不执行，路径与原实现完全一致）
-        for (uint16_t p = nRopePairs; p < nPairs; ++p) {
-            LoadAlign(gq1, gammaQ + static_cast<uint32_t>(p) * kSeg);
-            LoadAlign(gq2, gammaQ + halfDim + static_cast<uint32_t>(p) * kSeg);
+    // q 组 passthrough：未旋转的 half chunk 经 norm*γq 直通（部分 rope 时生效；
+    // 全 rope 时 nRopePairs==nPairs，本循环不执行，路径与原实现完全一致）
+    for (uint16_t p = nRopePairs; p < nPairs; ++p) {
+        LoadAlign(gq1, gammaQ + static_cast<uint32_t>(p) * kSeg);
+        LoadAlign(gq2, gammaQ + halfDim + static_cast<uint32_t>(p) * kSeg);
+        for (uint16_t t = 0; t < tileRows; ++t) {
+            __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
+            __ubuf__ T *orow = outT + static_cast<uint32_t>(t) * outStride;
             for (uint16_t h = 0; h < numHeadQ; ++h) {
                 __ubuf__ T *src = row + static_cast<uint32_t>(h) * headDim;
                 __ubuf__ T *dst = orow + static_cast<uint32_t>(h) * headDim;
@@ -343,11 +357,15 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
                 StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + halfDim + static_cast<uint32_t>(p) * kSeg, pk, mFull);
             }
         }
+    }
 
-        // k 组：γk 折进 cos/sin
-        for (uint16_t p = 0; p < nRopePairs; ++p) {
-            LoadAlign(gk1, gammaK + static_cast<uint32_t>(p) * kSeg);
-            LoadAlign(gk2, gammaK + halfDim + static_cast<uint32_t>(p) * kSeg);
+    // k 组：γk 折进 cos/sin
+    for (uint16_t p = 0; p < nRopePairs; ++p) {
+        LoadAlign(gk1, gammaK + static_cast<uint32_t>(p) * kSeg);
+        LoadAlign(gk2, gammaK + halfDim + static_cast<uint32_t>(p) * kSeg);
+        for (uint16_t t = 0; t < tileRows; ++t) {
+            __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
+            __ubuf__ T *orow = outT + static_cast<uint32_t>(t) * outStride;
             LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, cosT + static_cast<uint32_t>(t) * ropeStride + static_cast<uint32_t>(p) * kSeg);
             Cast<float, T, AscendC::layoutZMrgZ>(cr, tv, mFull);
             LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, sinT + static_cast<uint32_t>(t) * ropeStride + static_cast<uint32_t>(p) * kSeg);
@@ -378,12 +396,16 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
                 StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + halfDim + static_cast<uint32_t>(p) * kSeg, pk, mFull);
             }
         }
+    }
 
-        // k 组 passthrough：未旋转的 half chunk 经 norm*γk 直通（部分 rope 时生效；
-        // 全 rope 时 nRopePairs==nPairs，本循环不执行，路径与原实现完全一致）
-        for (uint16_t p = nRopePairs; p < nPairs; ++p) {
-            LoadAlign(gk1, gammaK + static_cast<uint32_t>(p) * kSeg);
-            LoadAlign(gk2, gammaK + halfDim + static_cast<uint32_t>(p) * kSeg);
+    // k 组 passthrough：未旋转的 half chunk 经 norm*γk 直通（部分 rope 时生效；
+    // 全 rope 时 nRopePairs==nPairs，本循环不执行，路径与原实现完全一致）
+    for (uint16_t p = nRopePairs; p < nPairs; ++p) {
+        LoadAlign(gk1, gammaK + static_cast<uint32_t>(p) * kSeg);
+        LoadAlign(gk2, gammaK + halfDim + static_cast<uint32_t>(p) * kSeg);
+        for (uint16_t t = 0; t < tileRows; ++t) {
+            __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
+            __ubuf__ T *orow = outT + static_cast<uint32_t>(t) * outStride;
             for (uint16_t h = 0; h < numHeadK; ++h) {
                 uint32_t hh = static_cast<uint32_t>(numHeadQ) + h;
                 __ubuf__ T *src = row + kvHeadBase + static_cast<uint32_t>(h) * kvHeadStep;
@@ -598,30 +620,34 @@ private:
         AscendC::LocalTensor<float> gqf = bufGammaQ_.Get<float>();
         AscendC::LocalTensor<float> gkf = bufGammaK_.Get<float>();
         // v 已由上面的拷贝完成；VF 读 xb/cb/sb，故三个队列在 VF 之后才释放。
-        // D=64/96（halfDim<64）走 HalfMasked 模板（计数掩码半区配对）；D=128/256 走全量路径，零回退
-        if (halfDim_ < 64) {
-            SqnrNormRopeVfPack<T, true>((__ubuf__ T *)ob.GetPhyAddr(), (__ubuf__ T *)xb.GetPhyAddr(),
-                (__ubuf__ T *)cb.GetPhyAddr(), (__ubuf__ T *)sb.GetPhyAddr(),
-                (__ubuf__ float *)gqf.GetPhyAddr(), (__ubuf__ float *)gkf.GetPhyAddr(),
-                (__ubuf__ float *)sumL.GetPhyAddr(), static_cast<uint16_t>(numHeadQ_),
-                static_cast<uint16_t>(numHeadK_), static_cast<uint16_t>(padStride_),
-                static_cast<uint16_t>(rowElems), static_cast<uint16_t>(ropeStride_),
-                static_cast<uint16_t>(tileRows_),
-                static_cast<uint16_t>(kvInterleaved_ ? 2 * headDim_ : headDim_),
-                static_cast<uint16_t>(headDim_), static_cast<uint16_t>(halfDim_),
-                static_cast<uint16_t>(ropeDim_), eps_, recip_);
+        // 支持集闭环 → 按 (headDim, rope_dim) 字面量实例化（host 保证取值集合），
+        // VF 内所有循环编译期展开：D=64/96 HalfMasked；D=128 全 rope；
+        // D=256 全 rope 或部分 rope（rope_dim ∈ {128, 256}）。
+        const uint16_t hd = static_cast<uint16_t>(headDim_);
+        const uint16_t rd = static_cast<uint16_t>(ropeDim_);
+        const uint16_t kvStep = static_cast<uint16_t>(kvInterleaved_ ? 2 * headDim_ : headDim_);
+#define SQNR_VF_ARGS \
+    (__ubuf__ T *)ob.GetPhyAddr(), (__ubuf__ T *)xb.GetPhyAddr(), \
+    (__ubuf__ T *)cb.GetPhyAddr(), (__ubuf__ T *)sb.GetPhyAddr(), \
+    (__ubuf__ float *)gqf.GetPhyAddr(), (__ubuf__ float *)gkf.GetPhyAddr(), \
+    (__ubuf__ float *)sumL.GetPhyAddr(), static_cast<uint16_t>(numHeadQ_), \
+    static_cast<uint16_t>(numHeadK_), static_cast<uint16_t>(padStride_), \
+    static_cast<uint16_t>(rowElems), static_cast<uint16_t>(ropeStride_), \
+    static_cast<uint16_t>(tileRows_), kvStep, eps_, recip_
+        if (hd == 64) {
+            SqnrNormRopeVfPack<T, true, 64, 64>(SQNR_VF_ARGS);
+        } else if (hd == 96) {
+            SqnrNormRopeVfPack<T, true, 96, 96>(SQNR_VF_ARGS);
+        } else if (hd == 128) {
+            SqnrNormRopeVfPack<T, false, 128, 128>(SQNR_VF_ARGS);
+        } else if (hd == 256 && rd == 128) {
+            SqnrNormRopeVfPack<T, false, 256, 128>(SQNR_VF_ARGS);
+        } else if (hd == 256) {
+            SqnrNormRopeVfPack<T, false, 256, 256>(SQNR_VF_ARGS);
         } else {
-            SqnrNormRopeVfPack<T, false>((__ubuf__ T *)ob.GetPhyAddr(), (__ubuf__ T *)xb.GetPhyAddr(),
-                (__ubuf__ T *)cb.GetPhyAddr(), (__ubuf__ T *)sb.GetPhyAddr(),
-                (__ubuf__ float *)gqf.GetPhyAddr(), (__ubuf__ float *)gkf.GetPhyAddr(),
-                (__ubuf__ float *)sumL.GetPhyAddr(), static_cast<uint16_t>(numHeadQ_),
-                static_cast<uint16_t>(numHeadK_), static_cast<uint16_t>(padStride_),
-                static_cast<uint16_t>(rowElems), static_cast<uint16_t>(ropeStride_),
-                static_cast<uint16_t>(tileRows_),
-                static_cast<uint16_t>(kvInterleaved_ ? 2 * headDim_ : headDim_),
-                static_cast<uint16_t>(headDim_), static_cast<uint16_t>(halfDim_),
-                static_cast<uint16_t>(ropeDim_), eps_, recip_);
+            SqnrNormRopeVfPack<T, false, 128, 128>(SQNR_VF_ARGS);  // 不可达：host 已校验支持集
         }
+#undef SQNR_VF_ARGS
         AscendC::PipeBarrier<PIPE_V>();
         inQkv_.FreeTensor(xb);
         inCos_.FreeTensor(cb);
