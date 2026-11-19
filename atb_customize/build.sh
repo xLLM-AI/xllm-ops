@@ -71,7 +71,7 @@ function fn_load_nlohmann_json()
     fi
     cd $THIRD_PARTY_DIR
     # git clone --branch v3.11.3 --depth 1 https://github.com/nlohmann/json.git
-    git clone --branch v3.11.3 --depth 1 https://gitcode.com/GitHub_Trending/js/json.git
+    git clone --branch v3.12.0 --depth 1 https://gitcode.com/GitHub_Trending/js/json.git
     mv json nlohmannJson
 }
 
@@ -81,7 +81,7 @@ function fn_load_mki()
         return 0
     fi
     cd $THIRD_PARTY_DIR
-    git clone -b br_release_cann_9.0.0_20260928 --depth 1 https://gitcode.com/cann/ascend-boost-comm.git Mind-KernelInfra
+    git clone -b br_release_cann_9.2.0_20270309 --depth 1 https://gitcode.com/cann/ascend-boost-comm.git Mind-KernelInfra
 }
 
 function fn_load_atb()
@@ -92,7 +92,7 @@ function fn_load_atb()
     cd $THIRD_PARTY_DIR
     # Fork from https://gitcode.com/cann/ascend-transformer-boost.git,
     # Add customized ops release solution for XLLM.
-    git clone -b br_release_cann_9.0.0_20260928  --depth 1 https://gitcode.com/xLLM-AI/ascend-transformer-boost.git
+    git clone -b br_release_cann_9.2.0_20270309  --depth 1 https://gitcode.com/cann/ascend-transformer-boost.git
 }
 
 function fn_load_compiler()
