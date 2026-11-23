@@ -1075,6 +1075,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> split_qkv_norm_rope_impl_npu(
     int64_t rope_dim) {
   constexpr int64_t kHeadDimFallback = 128;
   const int64_t kHeadDim = q_gamma.dim() > 0 ? q_gamma.size(-1) : kHeadDimFallback;
+  // rank<2 时 std::vector::operator[] 会越界读（.vec() 已无 TORCH_CHECK），先校验
+  TORCH_CHECK(qkv.dim() == 3, "qkv must be rank-3 [B,S,stride], got rank ", qkv.dim());
   auto sizes = qkv.sizes().vec();
   const int64_t batch = sizes[0];
   const int64_t seq_len = sizes[1];
