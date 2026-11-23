@@ -298,6 +298,42 @@ tilingKey 只区分 dtype（`0 = bf16`、`1 = fp16`）。
   （主场景 tile=8 共 88,576 B，`tokenTile` 按预算自动下调）。
 - **布局与 GQA 均为运行期参数**：同一份二进制支持 BSND/BNSD、`gqa_expand` 0/1。
 
+### SqnrNormRopeVfPack（VF 入口）的参数与约束
+
+`SqnrNormRopeVfPack` 逐行做 QK-RMSNorm + 半分化 RoPE（只处理 q/k 头；
+v 由外层 UB→UB 直通拷贝，不经 VF）。参数布局：
+
+```text
+outT      : T 输出 tile，[kTokenTile, numHeadTotal*headDim]，行距 outStride
+xb        : T qkv tile，[kTokenTile, padStride]，行距 xStride
+cosT/sinT : T cos/sin，[kTokenTile, ropeStride]，只用前 halfDim 维（NeoX 半维）
+gammaQ/K  : fp32 [headDim]
+sumsq     : fp32 workspace，[kTokenTile, Nq+Nk]，行距 = Nq+Nk
+             （容量按 kMaxHeads 上界分配）
+```
+
+- `head_dim` 支持集 `{64, 96, 128, 256}`：`D >= 128` 时 VF 按 64-lane chunk 处理
+  （pass1 对 `D/64` 段累加 sumsq，pass2 对 `halfDim/64` 个 (前半,后半) pair 做 NeoX 旋转，
+  `D=128` 时各循环恰跑 1 次）；`D = 64/96` 走 `kHalfMasked` 模板（计数掩码 + 半区双窗口，
+  见上文 HalfMasked 路径）。
+- 固定处理 `kTokenTile` 行；末 tile 的脏行不会被拷出。
+
+实现约束（当前实现）：
+
+1. q/k 与 cos/sin 全部用 `LoadAlign<T, DIST_UNPACK_B16>` 拆到 32 位 lane，
+   紧跟一条寄存器内 `Cast<float, T, layoutZMrgZ>`；无整 tile 的 cast-in 预处理
+   与 fp32 tile 副本（gamma 仍是 fp32）。
+2. γ 折进 cos/sin（`a=γ1·cos、c=γ1·sin、d=γ2·cos、b=-γ2·sin`）；折进后的 4 个常量
+   无法在运行期选择（VF 内禁止运行期分支、寄存器不可运行期索引），故 q 组/k 组循环体
+   各实例化一次，仍在同一 `__simd_vf__`、同一寄存器预算内。
+3. UB 行距必须 32 B 对齐，否则 `LoadAlign`/`StoreAlign` 读错位（`padStride` 的由来）。
+4. pass1 每 `(t,h)`：两半各一次取数+Cast，`Mul` 起手 + 一次 `MulAddDst` 累加 +
+   `ReduceSum` + 单元素写回；scale 链每 tile 一次（segs 段 64-lane，
+   `Muls/Adds/Sqrt/Div`），per-head 只留 1 次 `DIST_BRC` 广播；
+   RoPE 每半 1 次 `Mul` + 1 次 `MulAddDst`。
+5. 输出在寄存器内 `Cast` 成 `T` 后 `StoreAlign DIST_PACK_B32` 直写（pack-store），
+   无整块 cast-out。
+
 ## 精度
 
 fp32 中间量、bf16/fp16 输入输出，判据按 dtype：
