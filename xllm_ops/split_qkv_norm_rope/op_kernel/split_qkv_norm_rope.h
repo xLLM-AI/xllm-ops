@@ -15,7 +15,7 @@ limitations under the License.
 
 /*!
  * \file split_qkv_norm_rope.h
- * \brief SplitQKV + QK-RMSNorm + RoPE 融合算子的 kernel 实现（Ascend 950 / AIV）。
+ * \brief Fused SplitQKV + QK-RMSNorm + RoPE kernel (Ascend 950 / AIV).
  */
 
 #ifndef SPLIT_QKV_NORM_ROPE_KERNEL_H_
@@ -26,15 +26,14 @@ limitations under the License.
 namespace kernels {
 using namespace AscendC;
 
-constexpr uint32_t kHeadDim = 128;              // head_dim 默认值；运行期实际 D 从 tiling 读入
-constexpr uint32_t kHalfDim = kHeadDim / 2;     // 64，RoPE half-split 分界（仅作 VF 注释参照，不再硬引用）
-constexpr uint32_t kMaxHeads = 64;              // sumsq UB 上界：Nq+Nk <= kMaxHeads
-constexpr uint32_t kTokenTile = 8;              // 默认每 tile 行数；host 会按 UB 预算从 8/4/2/1 里选
-// 每 tile 的 sumsq 个数 = kTokenTile × (Nq+Nk)，scale 链按 64 lane 向上取整分段
+constexpr uint32_t kHeadDim = 128;           // default D; runtime D from tiling
+constexpr uint32_t kHalfDim = kHeadDim / 2;
+constexpr uint32_t kMaxHeads = 64;           // Nq+Nk upper bound (sumsq buffer)
+constexpr uint32_t kTokenTile = 8;           // default tile rows; host picks 8/4/2/1 by UB budget
 
-constexpr uint32_t kFlagGqaExpand = 1u << 0;    // 1：k/v 扩张到 Nq 头
-constexpr uint32_t kFlagLayoutBNSD = 1u << 1;   // 1：[B,N,S,D]；0：[B,S,N*D]
-constexpr uint32_t kFlagKvInterleaved = 1u << 2;  // 1：输入行内 KV 按 head 交错 [K_i,V_i]；0：[全部 K | 全部 V]
+constexpr uint32_t kFlagGqaExpand = 1u << 0;       // expand k/v to Nq heads
+constexpr uint32_t kFlagLayoutBNSD = 1u << 1;      // output [B,N,S,D]; else [B,S,N*D]
+constexpr uint32_t kFlagKvInterleaved = 1u << 2;   // input KV per-head [K_i,V_i]; else [K|V]
 
 template <typename T, bool kHalfMasked, uint16_t kD, uint16_t kRD>
 __simd_vf__ inline void SqnrNormRopeVfPack(
@@ -44,9 +43,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     uint16_t tileRows, uint16_t kvHeadStep, float eps, float recip)
 {
     using namespace AscendC::Reg;
-    // kD/kRD 模板形参 → constexpr 局部：支持集闭环 {64,96,128,256}，VF 内所有循环
-    // （pass1 的 c、pass2 的 p 与 passthrough）trip count 编译期已知而完全展开，
-    // 消除运行期循环开销与寄存器地址依赖（D=128 全 rope 与 af38104 基线指令流等价）。
+    // (kD, kRD) template params give compile-time loop trip counts; fully unrolled.
     constexpr uint16_t headDim = kD;
     constexpr uint16_t halfDim = static_cast<uint16_t>(kD / 2);
     constexpr uint16_t ropeDim = kRD;
@@ -74,21 +71,19 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     MaskReg mOne = CreateMask<float, MaskPattern::VL1>();
 
     const uint16_t qkHeads = static_cast<uint16_t>(numHeadQ + numHeadK);
-    // 输入行内 KV 区起点（k/v 区）；q 头从行首按 D 连续，k 头按 kvHeadStep 步进
+    // KV region base; q heads contiguous from row start, k heads stride by kvHeadStep
     const uint32_t kvHeadBase = static_cast<uint32_t>(numHeadQ) * headDim;
-    // sumsq 段数：每段 64 lane，向上取整覆盖 tileRows*(Nq+Nk) 个有效元素；
-    // 末段多出的 lane 只写回 sumsq，pass2 只按 (t,h) 单点广播读取，不回读这些 lane。
+    // scale segments: ceil(tileRows*(Nq+Nk)/64)
     constexpr uint16_t kSeg = 64;
     const uint16_t segs = static_cast<uint16_t>((tileRows * qkHeads + kSeg - 1) / kSeg);
 
     if constexpr (kHalfMasked) {
-    // ==== HalfMasked 路径：D ∈ {64, 96}，halfDim < 64 lane ====
-    // 半区配对借 UpdateMask 计数掩码：前半/后半各自占一个 64-lane 寄存器的 [0,halfDim) lane，
-    // NeoX 旋转在两寄存器间完成（官方 arch35 HalfAlignVF 范式），无需任何 lane 重排。
-    // γ 布局（CopyInGamma 写入）：前半 [0,halfDim)，后半 [64,64+halfDim)；窗口外 lane 由掩码丢弃。
-    // D=64/96 下 rope_dim 仅可为 0（全 rope，host %128 约束），故无 passthrough 分支。
+    // ==== HalfMasked path: D in {64,96}, halfDim < 64 lanes ====
+    // Rotate across two 64-lane registers via UpdateMask count mask (arch35 HalfAlignVF):
+    // first half [0,halfDim), second half [64,64+halfDim) (gamma layout from CopyInGamma).
+    // No passthrough: rope_dim is always 0 for D<128 (host-validated).
 
-    // ---- pass 1：sumsq（chunk0 全量 + 尾 chunk 计数掩码；D=96 时 c=1、tail=32）----
+    // ---- pass 1: sumsq (tail chunk uses count mask; D=96 -> tail=32) ----
     const uint16_t nChunksC = static_cast<uint16_t>((headDim + kSeg - 1) / kSeg);
     uint32_t tailCnt = static_cast<uint32_t>(headDim - (nChunksC - 1) * kSeg);
     MaskReg mTail = UpdateMask<float>(tailCnt);
@@ -102,10 +97,8 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
             for (uint16_t c = 1; c < nChunksC; ++c) {
                 LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + static_cast<uint32_t>(c) * kSeg);
                 Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mTail);
-                // arch35 MulAddDst 仅支持 ZEROING（toolkit static_assert：mode ZEROING only），
-                // 带 mTail 会清掉 acc inactive lane——那里已是 chunk0 的真实平方和。改走官方
-                // layernorm_variance 同款 idiom：尾 chunk 掩码 Cast 落临时寄存器（layoutZMrgZ，
-                // inactive lane=0），再用全量掩码 MulAddDst 累加（inactive += 0，chunk0 保留）。
+                // arch35 MulAddDst: ZEROING only. Masked Cast (layoutZMrgZ, inactive=0) then
+                // full-mask MulAddDst keeps chunk0 sums in inactive lanes.
                 MulAddDst(acc, y2, y2, mFull);
             }
             ReduceSum(acc, acc, mFull);
@@ -120,7 +113,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
             for (uint16_t c = 1; c < nChunksC; ++c) {
                 LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + static_cast<uint32_t>(c) * kSeg);
                 Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mTail);
-                // 同上：全量掩码 MulAddDst 累加尾 chunk（inactive lane=0，chunk0 保留）
+                // same: full-mask MulAddDst keeps chunk0 in inactive lanes
                 MulAddDst(acc, y2, y2, mFull);
             }
             ReduceSum(acc, acc, mFull);
@@ -130,7 +123,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     }
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
 
-    // ---- 每 tile 的 scale 链（同全量路径）----
+    // ---- per-tile scale chain ----
     Duplicate(one, 1.0f, mFull);
     for (uint16_t seg = 0; seg < segs; ++seg) {
         __ubuf__ float *sp = sumsq + static_cast<uint32_t>(seg) * kSeg;
@@ -143,11 +136,10 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     }
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
 
-    // ---- pass 2：norm + rope，单 masked pair；前半 [0,halfDim) 配后半 [halfDim,D) ----
+    // ---- pass 2: norm + rope, one masked pair per half ----
     uint32_t halfCnt = static_cast<uint32_t>(halfDim);  // 32 (D=64) / 48 (D=96)
     MaskReg pregHalf = UpdateMask<float>(halfCnt);
-    // γ 每 VF 装载一次（布局：前半 [0,halfDim)、后半 [64,64+halfDim)，CopyInGamma 写入），
-    // 避免 token 循环内重复 LoadAlign（与全量路径同款外提）
+    // gamma hoisted out of token loop (front [0,halfDim), back [64,64+halfDim))
     LoadAlign(gq1, gammaQ);
     LoadAlign(gq2, gammaQ + 64);
     LoadAlign(gk1, gammaK);
@@ -160,7 +152,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
         LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, sinT + static_cast<uint32_t>(t) * ropeStride);
         Cast<float, T, AscendC::layoutZMrgZ>(sr, tv, pregHalf);
         Muls(sn, sr, -1.0f, pregHalf);
-        // q 组常量（γq 已 tile 外装载，折进 cos/sin）
+        // q constants (gamma folded into cos/sin)
         Mul(ca, gq1, cr, pregHalf);
         Mul(cc, gq1, sr, pregHalf);
         Mul(cd, gq2, cr, pregHalf);
@@ -184,7 +176,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
             Cast<T, float, AscendC::LayoutZMrgZRndRSatNS>(pk, t2, pregHalf);
             StoreAlign<T, StoreDist::DIST_PACK_B32>(dst + halfDim, pk, pregHalf);
         }
-        // k 组常量（γk 已 tile 外装载；cr/sr/sn 同 token 复用）
+        // k constants (gamma folded; reuses cos/sin)
         Mul(ca, gk1, cr, pregHalf);
         Mul(cc, gk1, sr, pregHalf);
         Mul(cd, gk2, cr, pregHalf);
@@ -211,14 +203,14 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
         }
     }
     } else {
-    // ==== 全量路径：D ∈ {128, 256}（与 Tier1/Tier3 实现逐行一致）====
-    // D 按 64-lane chunk 处理：pass1 累加 D/64 段；pass2 把 half 区切成 halfDim/64 个 chunk，
-    // 其中前 ropeDim/2/64 个 chunk 做 NeoX 旋转配对，其余 chunk 经 norm*gamma 直通（部分 rope）
+    // ==== Full path: D in {128,256} ====
+    // 64-lane chunks: pass1 accumulates D/64 chunks; pass2 splits each half into
+    // halfDim/64 pairs, first ropeDim/2/64 rotated, rest pass through.
     const uint16_t nChunks = static_cast<uint16_t>(headDim / kSeg);
     const uint16_t nPairs = static_cast<uint16_t>(halfDim / kSeg);
     const uint16_t nRopePairs = static_cast<uint16_t>(ropeDim / 2 / kSeg);
 
-    // pass 1：每 (token, head) 的 sumsq（q/k 直接从 T 载入）
+    // pass 1: sumsq per (token, head)
     for (uint16_t t = 0; t < tileRows; ++t) {
         __ubuf__ T *row = xb + static_cast<uint32_t>(t) * xStride;
         for (uint16_t h = 0; h < numHeadQ; ++h) {
@@ -226,7 +218,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
             LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
             Cast<float, T, AscendC::layoutZMrgZ>(y1, tv, mFull);
             Mul(acc, y1, y1, mFull);
-            // 余下 64-lane 段继续累加；D=128 时循环体恰跑 1 次（等价原 hardcode）
+            // D=128: loop runs once
             for (uint16_t c = 1; c < nChunks; ++c) {
                 LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src + static_cast<uint32_t>(c) * kSeg);
                 Cast<float, T, AscendC::layoutZMrgZ>(y2, tv, mFull);
@@ -236,7 +228,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
             StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(
                 sumsq + static_cast<uint32_t>(t) * qkHeads + h, acc, mOne);
         }
-        // k 头：块状布局 kvHeadStep = D（= 连续），KV 交错布局 kvHeadStep = 2D（跨过 v）
+        // k heads: kvHeadStep = D (blocked) or 2D (interleaved, skip v)
         for (uint16_t h = 0; h < numHeadK; ++h) {
             __ubuf__ T *src = row + kvHeadBase + static_cast<uint32_t>(h) * kvHeadStep;
             LoadAlign<T, LoadDist::DIST_UNPACK_B16>(tv, src);
@@ -254,7 +246,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     }
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
 
-    // 每 tile 的 scale 链：segs 段 × 64 lane，原地写回
+    // per-tile scale chain, in-place
     Duplicate(one, 1.0f, mFull);
     for (uint16_t seg = 0; seg < segs; ++seg) {
         __ubuf__ float *sp = sumsq + static_cast<uint32_t>(seg) * kSeg;
@@ -267,10 +259,9 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
     }
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
 
-    // pass 2：norm + rope，结果直接 pack 成 T 写进输出 tile
-    // γ 每 VF 每对只装载一次（pair 外提，t 循环内仅重算依赖 token 的 cos/sin 与常量）——
-    // D=128 全 rope 时与 af38104 基线指令流等价（γ Load 4 次/tile、cos/sin Load 2 次/token）。
-    // q 组：γq 折进 cos/sin；逐 64-lane pair 处理（D=128 → nPairs=1，等价原 hardcode）
+    // pass 2: norm + rope, pack-cast into T on store
+    // gamma hoisted per pair (out of t loop); D=128 full-rope matches baseline stream.
+    // q group: gamma folded into cos/sin; per 64-lane pair (D=128 -> nPairs=1)
     for (uint16_t p = 0; p < nRopePairs; ++p) {
         LoadAlign(gq1, gammaQ + static_cast<uint32_t>(p) * kSeg);
         LoadAlign(gq2, gammaQ + halfDim + static_cast<uint32_t>(p) * kSeg);
@@ -308,8 +299,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
         }
     }
 
-    // q 组 passthrough：未旋转的 half chunk 经 norm*γq 直通（部分 rope 时生效；
-    // 全 rope 时 nRopePairs==nPairs，本循环不执行，路径与原实现完全一致）
+    // q passthrough: unrotated chunks = norm*gamma (skipped when full rope)
     for (uint16_t p = nRopePairs; p < nPairs; ++p) {
         LoadAlign(gq1, gammaQ + static_cast<uint32_t>(p) * kSeg);
         LoadAlign(gq2, gammaQ + halfDim + static_cast<uint32_t>(p) * kSeg);
@@ -336,7 +326,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
         }
     }
 
-    // k 组：γk 折进 cos/sin
+    // k group: gamma folded into cos/sin
     for (uint16_t p = 0; p < nRopePairs; ++p) {
         LoadAlign(gk1, gammaK + static_cast<uint32_t>(p) * kSeg);
         LoadAlign(gk2, gammaK + halfDim + static_cast<uint32_t>(p) * kSeg);
@@ -375,8 +365,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
         }
     }
 
-    // k 组 passthrough：未旋转的 half chunk 经 norm*γk 直通（部分 rope 时生效；
-    // 全 rope 时 nRopePairs==nPairs，本循环不执行，路径与原实现完全一致）
+    // k passthrough: unrotated chunks = norm*gamma (skipped when full rope)
     for (uint16_t p = nRopePairs; p < nPairs; ++p) {
         LoadAlign(gk1, gammaK + static_cast<uint32_t>(p) * kSeg);
         LoadAlign(gk2, gammaK + halfDim + static_cast<uint32_t>(p) * kSeg);
@@ -403,9 +392,8 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
             }
         }
     }
-    }  // else：全量路径（D ∈ {128, 256}）
+    }  // full path (D in {128,256})
 }
-
 
 template <typename T>
 class KernelSplitQkvNormRope {
@@ -434,7 +422,7 @@ public:
         eps_ = tiling->eps;
         recip_ = tiling->reciprocal;
         ropeDim_ = tiling->ropeDim;
-        if (ropeDim_ == 0 || ropeDim_ > headDim_) {  // 缺省/异常回退：全 rope（与历史行为一致）
+        if (ropeDim_ == 0 || ropeDim_ > headDim_) {  // default/invalid: full rope
             ropeDim_ = headDim_;
         }
 
@@ -444,7 +432,7 @@ public:
         kvOutHeads_ = gqaExpand_ ? numHeadQ_ : numHeadK_;
         gqaGroup_ = (numHeadK_ == 0) ? 1 : (numHeadQ_ / numHeadK_);
 
-        // 全局偏移按 u64 计算：B*S*stride 超 2^32 元素时 u32 乘法会回绕
+        // u64 offsets: B*S*stride can exceed 2^32 elements
         qkvGm_.SetGlobalBuffer((__gm__ T *)qkv, static_cast<uint64_t>(tiling->totalTokens) * qkvStride_);
         cosGm_.SetGlobalBuffer((__gm__ T *)cosGm, static_cast<uint64_t>(tiling->totalTokens) * ropeStride_);
         sinGm_.SetGlobalBuffer((__gm__ T *)sinGm, static_cast<uint64_t>(tiling->totalTokens) * ropeStride_);
@@ -457,34 +445,31 @@ public:
         vGm_.SetGlobalBuffer(
             (__gm__ T *)vOut, static_cast<uint64_t>(tiling->totalTokens) * kvOutHeads_ * headDim_);
 
-        // 深度 2：支持「下一个 tile 预取」+「上一个 tile 延后写出」
+        // depth 2: prefetch next tile, defer writeout of previous
         pipe_->InitBuffer(inQkv_, 2, tileRows_ * padStride_ * sizeof(T));
         pipe_->InitBuffer(inCos_, 2, tileRows_ * ropeStride_ * sizeof(T));
         pipe_->InitBuffer(inSin_, 2, tileRows_ * ropeStride_ * sizeof(T));
         pipe_->InitBuffer(inGamma_, 2, headDim_ * sizeof(T));
         pipe_->InitBuffer(outTile_, 2, tileRows_ * numHeadTotal_ * headDim_ * sizeof(T));
 
-        // HalfMasked（D=64/96，halfDim<64）时 γ 拆成 front@0 / back@64 两个 64-lane 窗口，buffer 放宽到 128 float；
-        // D=128/256 仍按 headDim 分配，与 Tier1 一致
+        // D=64/96 (halfDim<64): gamma split front@0/back@64, buffer widened to 128 floats
         const uint32_t gammaElems = (halfDim_ < 64) ? 128u : headDim_;
         pipe_->InitBuffer(bufGammaQ_, gammaElems * sizeof(float));
         pipe_->InitBuffer(bufGammaK_, gammaElems * sizeof(float));
         pipe_->InitBuffer(bufSum_, tileRows_ * kMaxHeads * sizeof(float));
 
-        // 本核 token 区间与 tile 数（供三级流水使用）
+        // per-core token range
         const uint32_t blockIdx = AscendC::GetBlockIdx();
         blkStart_ = blockIdx * tokenPerCore_;
         blkTokens_ = (blockIdx == blockDim_ - 1) ? lastBlkTokens_ : tokenPerCore_;
         tileNum_ = (blkTokens_ + tileRows_ - 1) / tileRows_;
-
-        // 只有一条路径：sumsq 段数按 ceil(tileRows*(Nq+Nk)/64) 运行期算，任意 Nq+Nk <= kMaxHeads 均可覆盖。
     }
 
     __aicore__ inline void Process()
     {
         CopyInGamma();
 
-        // 三级流水：先发下一个 tile 的 DMA，再算当前 tile，最后补上一个 tile 的写出
+        // 3-stage pipeline: prefetch k+1, compute k, writeout k-1
         CopyInTile(0);
         for (uint32_t k = 0; k < tileNum_; ++k) {
             if (k + 1 < tileNum_) {
@@ -520,8 +505,7 @@ private:
         LocalTensor<float> gqf = bufGammaQ_.Get<float>();
         LocalTensor<float> gkf = bufGammaK_.Get<float>();
         if (halfDim_ < 64) {
-            // HalfMasked：前半 γ 落 [0,halfDim)，后半 γ 落 [64,64+halfDim)；
-            // 两 64-lane 窗口内 halfDim 之后的 lane 由 VF 的 pregHalf 丢弃，无需清零
+            // D=64/96: front half [0,halfDim), back half [64,64+halfDim); excess lanes dropped by mask
             Cast(gqf, gq, RoundMode::CAST_NONE, halfDim_);
             Cast(gqf[64], gq[halfDim_], RoundMode::CAST_NONE, halfDim_);
             Cast(gkf, gk, RoundMode::CAST_NONE, halfDim_);
@@ -535,14 +519,14 @@ private:
         PipeBarrier<PIPE_V>();
     }
 
-    // 只发 DMA，不等：深度 2 的队列允许它和上一个 tile 的计算并行
+    // issue DMA without waiting; depth-2 queues overlap with compute of previous tile
     __aicore__ inline void CopyInTile(uint32_t k)
     {
         const uint32_t t0 = blkStart_ + k * tileRows_;
         const uint32_t nTok = TileTokens(k);
         DataCopyPadExtParams<T> pad{false, 0, 0, 0};
 
-        // 每 token 一行单独搬：GM 行距（qkvStride_*sizeof(T)）不保证 32B 对齐，UB 侧落到 32B 对齐的 padStride 行距
+        // per-token rows: GM row stride may be unaligned; UB lands on 32B-aligned padStride
         LocalTensor<T> xb = inQkv_.AllocTensor<T>();
         for (uint32_t t = 0; t < nTok; ++t) {
             DataCopyPad(xb[t * padStride_], qkvGm_[static_cast<uint64_t>(t0 + t) * qkvStride_],
@@ -567,16 +551,15 @@ private:
         LocalTensor<T> cb = inCos_.DeQue<T>();
         LocalTensor<T> sb = inSin_.DeQue<T>();
 
-        // ---- 输出 tile 分配（pack-store 直写目标）----
+        // output tile (pack-store target)
         AscendC::LocalTensor<T> ob = outTile_.AllocTensor<T>();
         const uint32_t rowElems = numHeadTotal_ * headDim_;
         const uint32_t qkElems = (numHeadQ_ + numHeadK_) * headDim_;
         const uint32_t vElems = numHeadV_ * headDim_;
 
-        // ---- v 直通：UB→UB 拷贝，原样 T，不经 fp32 ----
-        //   块状布局一次多行搬完；KV 交错布局下 v 头间隔 2D，按 head 逐个搬
+        // v pass-through: UB->UB copy, no fp32 (blocked: one shot; interleaved: per head)
         if (!kvInterleaved_) {
-            //   UB 侧 blockLen/srcGap/dstGap 单位均为 32B 块
+            // UB-side blockLen/srcGap/dstGap in 32B blocks
             AscendC::DataCopyParams vParams{
                 static_cast<uint16_t>(tileRows_),
                 static_cast<uint16_t>(vElems * sizeof(T) / 32),
@@ -596,14 +579,13 @@ private:
             }
         }
 
-        // ---- norm + rope (VF)：q/k 与 cos/sin 直接从 T 载入，无 cast-in ----
+        // norm + rope VF: load q/k/cos/sin directly from T, no cast-in
         AscendC::LocalTensor<float> sumL = bufSum_.Get<float>();
         AscendC::LocalTensor<float> gqf = bufGammaQ_.Get<float>();
         AscendC::LocalTensor<float> gkf = bufGammaK_.Get<float>();
-        // v 已由上面的拷贝完成；VF 读 xb/cb/sb，故三个队列在 VF 之后才释放。
-        // 支持集闭环 → 按 (headDim, rope_dim) 字面量实例化（host 保证取值集合），
-        // VF 内所有循环编译期展开：D=64/96 HalfMasked；D=128 全 rope；
-        // D=256 全 rope 或部分 rope（rope_dim ∈ {128, 256}）。
+        // v copy done; VF reads xb/cb/sb, so queues freed after VF.
+        // Instantiate per (D, rope_dim) literal: D=64/96 HalfMasked, D=128 full rope,
+        // D=256 full or partial rope (rope_dim in {128,256}).
         const uint16_t hd = static_cast<uint16_t>(headDim_);
         const uint16_t rd = static_cast<uint16_t>(ropeDim_);
         const uint16_t kvStep = static_cast<uint16_t>(kvInterleaved_ ? 2 * headDim_ : headDim_);
@@ -626,7 +608,7 @@ private:
         } else if (hd == 256) {
             SqnrNormRopeVfPack<T, false, 256, 256>(SQNR_VF_ARGS);
         } else {
-            SqnrNormRopeVfPack<T, false, 128, 128>(SQNR_VF_ARGS);  // 不可达：host 已校验支持集
+            SqnrNormRopeVfPack<T, false, 128, 128>(SQNR_VF_ARGS);  // unreachable: host validates support set
         }
 #undef SQNR_VF_ARGS
         AscendC::PipeBarrier<PIPE_V>();
@@ -655,7 +637,7 @@ private:
         outTile_.FreeTensor(ob);
     }
 
-    // [B,S,H*D]：q/k/v 行内 head 连续
+    // [B,S,H*D]: heads contiguous per row
     __aicore__ inline void CopyOutBshd(const GlobalTensor<T> &gm, const LocalTensor<T> &src,
                                       uint32_t t0, uint32_t nTok, uint32_t srcHeadBase, uint32_t dstHeads,
                                       uint32_t srcHeads)
@@ -668,7 +650,7 @@ private:
                 DataCopyExtParams{static_cast<uint16_t>(nTok), segBytes,
                     (rowElems * elemBytes - segBytes) / 32, 0, 0});
         } else {
-            // GQA 扩张：dest 每 token 行内 head 之间不连续（跨 dstHeads*D），dstStride 单位是字节
+            // GQA expand: dest heads discontiguous per row; dstStride in bytes
             uint32_t headBytes = headDim_ * elemBytes;
             uint32_t srcStride = (rowElems - headDim_) * elemBytes / 32;
             uint32_t dstStride = (dstHeads - 1) * headDim_ * elemBytes;
@@ -681,7 +663,7 @@ private:
         }
     }
 
-    // [B,N,S,D]：同 head 内沿 S 连续，跨 batch 边界时拆段
+    // [B,N,S,D]: S contiguous within a head; split at batch boundary
     __aicore__ inline void CopyOutBnsd(const GlobalTensor<T> &gm, const LocalTensor<T> &src,
                                       uint32_t t0, uint32_t nTok, uint32_t srcHeadBase, uint32_t dstHeads,
                                       uint32_t srcHeads)
@@ -690,7 +672,7 @@ private:
         const uint32_t elemBytes = sizeof(T);
         const uint32_t headBytes = headDim_ * elemBytes;
         const uint32_t srcStride = (rowElems - headDim_) * elemBytes / 32;
-        const uint32_t dstStride = 0;  // BNSD 下同一 head 内 token 相邻，落盘连续
+        const uint32_t dstStride = 0;  // tokens adjacent within a head
 
         uint32_t done = 0;
         while (done < nTok) {
@@ -742,7 +724,7 @@ private:
     uint32_t numHeadTotal_ = 0;
     uint32_t headDim_ = kHeadDim;
     uint32_t halfDim_ = kHalfDim;
-    uint32_t ropeDim_ = kHeadDim;  //0/缺省 = 全 head_dim 旋转
+    uint32_t ropeDim_ = kHeadDim;  // 0/default = full head_dim rotation
     uint32_t qkvStride_ = 0;
     uint32_t padStride_ = 0;
     uint32_t ropeStride_ = 0;
