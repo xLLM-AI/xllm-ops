@@ -451,9 +451,12 @@ def test_split_qkv_norm_rope_partial_rope(
 # 注：epsilon 负值校验暂无法在 aclnn eager 路径覆盖——生成的
 # NnopbaseAddAttrWithDtype(kNnopbaseFloat) 会把 Float 属性槽写成 0，
 # tiling 读到的永远是 0（见文档"已知问题"）。验证代码保留，待框架修复后补用例。
+# 注：负头数两条用例在 eager 路径由 torch 的 at::empty 负维校验先行拒绝
+# （Negative dimensions are not supported），不会触达 tiling 的 int64 守卫；
+# 守卫作为图模式/非 eager 入口的纵深防御保留。
 REJECT_CASES = [
-    (-1, 2, 1, 8, 64, 1e-6, 128, 128, 0, "negative num_q_heads must not wrap to u32"),
-    (6, -2, 1, 8, 64, 1e-6, 128, 128, 0, "negative num_kv_heads must not wrap to u32"),
+    (-1, 2, 1, 8, 64, 1e-6, 128, 128, 0, "negative num_q_heads rejected (torch shape check before tiling)"),
+    (6, -2, 1, 8, 64, 1e-6, 128, 128, 0, "negative num_kv_heads rejected (torch shape check before tiling)"),
     (6, 2, 1, 8, 65, 1e-6, 128, 128, 0, "rope_stride must be 16-aligned for LoadAlign"),
     (6, 2, 1, 8, 64, 1e-6, 512, 512, 0, "head_dim 512 outside support set {64,96,128,256}"),
     (6, 2, 1, 8, 64, 1e-6, 72, 72, 0, "head_dim 72 outside support set {64,96,128,256}"),

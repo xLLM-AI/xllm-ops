@@ -467,14 +467,18 @@ public:
         kvOutHeads_ = gqaExpand_ ? numHeadQ_ : numHeadK_;
         gqaGroup_ = (numHeadK_ == 0) ? 1 : (numHeadQ_ / numHeadK_);
 
-        qkvGm_.SetGlobalBuffer((__gm__ T *)qkv, tiling->totalTokens * qkvStride_);
-        cosGm_.SetGlobalBuffer((__gm__ T *)cosGm, tiling->totalTokens * ropeStride_);
-        sinGm_.SetGlobalBuffer((__gm__ T *)sinGm, tiling->totalTokens * ropeStride_);
+        // 全局偏移按 u64 计算：B*S*stride 超 2^32 元素时 u32 乘法会回绕
+        qkvGm_.SetGlobalBuffer((__gm__ T *)qkv, static_cast<uint64_t>(tiling->totalTokens) * qkvStride_);
+        cosGm_.SetGlobalBuffer((__gm__ T *)cosGm, static_cast<uint64_t>(tiling->totalTokens) * ropeStride_);
+        sinGm_.SetGlobalBuffer((__gm__ T *)sinGm, static_cast<uint64_t>(tiling->totalTokens) * ropeStride_);
         gammaQGm_.SetGlobalBuffer((__gm__ T *)qGamma, headDim_);
         gammaKGm_.SetGlobalBuffer((__gm__ T *)kGamma, headDim_);
-        qGm_.SetGlobalBuffer((__gm__ T *)qOut, tiling->totalTokens * numHeadQ_ * headDim_);
-        kGm_.SetGlobalBuffer((__gm__ T *)kOut, tiling->totalTokens * kvOutHeads_ * headDim_);
-        vGm_.SetGlobalBuffer((__gm__ T *)vOut, tiling->totalTokens * kvOutHeads_ * headDim_);
+        qGm_.SetGlobalBuffer(
+            (__gm__ T *)qOut, static_cast<uint64_t>(tiling->totalTokens) * numHeadQ_ * headDim_);
+        kGm_.SetGlobalBuffer(
+            (__gm__ T *)kOut, static_cast<uint64_t>(tiling->totalTokens) * kvOutHeads_ * headDim_);
+        vGm_.SetGlobalBuffer(
+            (__gm__ T *)vOut, static_cast<uint64_t>(tiling->totalTokens) * kvOutHeads_ * headDim_);
 
         // 深度 2：支持「下一个 tile 预取」+「上一个 tile 延后写出」
         pipe_->InitBuffer(inQkv_, 2, tileRows_ * padStride_ * sizeof(T));
@@ -564,18 +568,18 @@ private:
         // 每 token 一行单独搬：GM 行距（qkvStride_*sizeof(T)）不保证 32B 对齐，UB 侧落到 32B 对齐的 padStride 行距
         LocalTensor<T> xb = inQkv_.AllocTensor<T>();
         for (uint32_t t = 0; t < nTok; ++t) {
-            DataCopyPad(xb[t * padStride_], qkvGm_[(t0 + t) * qkvStride_],
+            DataCopyPad(xb[t * padStride_], qkvGm_[static_cast<uint64_t>(t0 + t) * qkvStride_],
                 DataCopyExtParams{1, static_cast<uint32_t>(qkvStride_ * sizeof(T)), 0, 0, 0}, pad);
         }
         inQkv_.EnQue(xb);
 
         LocalTensor<T> cb = inCos_.AllocTensor<T>();
-        DataCopyPad(cb, cosGm_[t0 * ropeStride_],
+        DataCopyPad(cb, cosGm_[static_cast<uint64_t>(t0) * ropeStride_],
             DataCopyExtParams{1, static_cast<uint32_t>(nTok * ropeStride_ * sizeof(T)), 0, 0, 0}, pad);
         inCos_.EnQue(cb);
 
         LocalTensor<T> sb = inSin_.AllocTensor<T>();
-        DataCopyPad(sb, sinGm_[t0 * ropeStride_],
+        DataCopyPad(sb, sinGm_[static_cast<uint64_t>(t0) * ropeStride_],
             DataCopyExtParams{1, static_cast<uint32_t>(nTok * ropeStride_ * sizeof(T)), 0, 0, 0}, pad);
         inSin_.EnQue(sb);
     }
@@ -683,7 +687,7 @@ private:
         const uint32_t elemBytes = sizeof(T);
         if (dstHeads == srcHeads) {
             uint32_t segBytes = dstHeads * headDim_ * elemBytes;
-            DataCopyPad(gm[t0 * dstHeads * headDim_], src[srcHeadBase * headDim_],
+            DataCopyPad(gm[static_cast<uint64_t>(t0) * dstHeads * headDim_], src[srcHeadBase * headDim_],
                 DataCopyExtParams{static_cast<uint16_t>(nTok), segBytes,
                     (rowElems * elemBytes - segBytes) / 32, 0, 0});
         } else {
@@ -693,7 +697,8 @@ private:
             uint32_t dstStride = (dstHeads - 1) * headDim_ * elemBytes;
             for (uint32_t h = 0; h < dstHeads; ++h) {
                 uint32_t sh = h / gqaGroup_;
-                DataCopyPad(gm[(t0 * dstHeads + h) * headDim_], src[(srcHeadBase + sh) * headDim_],
+                DataCopyPad(gm[(static_cast<uint64_t>(t0) * dstHeads + h) * headDim_],
+                    src[(srcHeadBase + sh) * headDim_],
                     DataCopyExtParams{static_cast<uint16_t>(nTok), headBytes, srcStride, dstStride, 0});
             }
         }
@@ -721,9 +726,9 @@ private:
             }
             for (uint32_t h = 0; h < dstHeads; ++h) {
                 uint32_t sh = (dstHeads == srcHeads) ? h : (h / gqaGroup_);
-                uint32_t dstOff = static_cast<uint32_t>(
+                const uint64_t dstOff =
                     (static_cast<uint64_t>(b) * dstHeads + h) * seqLen_ * headDim_ +
-                    static_cast<uint64_t>(s) * headDim_);
+                    static_cast<uint64_t>(s) * headDim_;
                 DataCopyPad(gm[dstOff], src[done * rowElems + (srcHeadBase + sh) * headDim_],
                     DataCopyExtParams{static_cast<uint16_t>(rows), headBytes, srcStride, dstStride, 0});
             }
