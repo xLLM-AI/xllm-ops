@@ -1,0 +1,287 @@
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://gitcode.com/xLLM-AI/xllm_ops/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+/*!
+ * \file split_qkv_norm_rope_tiling.cpp
+ * \brief SplitQkvNormRope host 侧 tiling。
+ */
+
+#include "split_qkv_norm_rope_tiling.h"
+
+#include <cmath>
+#include <cstdio>
+
+#include "register/op_def_registry.h"
+#include "tiling/platform/platform_ascendc.h"
+
+namespace optiling {
+namespace {
+constexpr size_t IDX_QKV = 0;
+constexpr size_t IDX_Q_GAMMA = 1;
+constexpr size_t IDX_K_GAMMA = 2;
+constexpr size_t IDX_COS = 3;
+constexpr size_t ATTR_NUM_Q_HEADS = 0;
+constexpr size_t ATTR_NUM_KV_HEADS = 1;
+constexpr size_t ATTR_EPSILON = 2;
+constexpr size_t ATTR_GQA_EXPAND = 3;
+constexpr size_t ATTR_LAYOUT_BNSD = 4;
+constexpr size_t ATTR_KV_INTERLEAVED = 5;
+constexpr size_t ATTR_ROPE_DIM = 6;
+
+inline uint32_t RoundUp(uint32_t value, uint32_t align)
+{
+    return (value + align - 1) / align * align;
+}
+
+// UB 需求（与 kernel 侧 InitBuffer 一致）；headDim 由调用方传入（从 q_gamma 推导）
+uint64_t CalcUbNeed(uint32_t tile, uint32_t padStride, uint32_t ropeStride, uint32_t headTotal,
+                    uint32_t headDim, uint32_t elemBytes)
+{
+    uint64_t need = static_cast<uint64_t>(tile) * 2 *
+                    (static_cast<uint64_t>(padStride) * elemBytes +
+                     static_cast<uint64_t>(ropeStride) * elemBytes * 2);   // inQkv/inCos/inSin ×2
+    need += 2ull * tile * headTotal * headDim * elemBytes;                 // out ×2
+    // gamma fp32：D=64/96 走 HalfMasked 模板，buffer 放宽到 128 float（半区双窗口布局）；其余按 D
+    const uint64_t gammaElems = (headDim / 2 < 64) ? 128ull : static_cast<uint64_t>(headDim);
+    need += 2ull * headDim * elemBytes + 2ull * gammaElems * 4;            // inGamma ×2 + gamma fp32 ×2
+    need += static_cast<uint64_t>(tile) * SQNR_MAX_HEADS * 4;              // sumsq
+    return need;
+}
+}  // namespace
+
+static ge::graphStatus TilingPrepare4SplitQkvNormRope(gert::TilingParseContext *context)
+{
+    auto compileInfo = context->GetCompiledInfo<SplitQkvNormRopeCompileInfo>();
+    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    auto platformInfo = context->GetPlatformInfo();
+    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
+    compileInfo->totalCoreNum = ascendcPlatform.GetCoreNumAiv();
+    ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo->totalUbSize);
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
+{
+    const gert::Shape qkvShape = context->GetInputShape(IDX_QKV)->GetStorageShape();
+    const gert::CompileTimeTensorDesc *qkvDesc = context->GetInputDesc(IDX_QKV);
+    OP_CHECK_NULL_WITH_CONTEXT(context, qkvDesc);
+    OP_CHECK_IF(qkvShape.GetDimNum() != 3, OP_LOGE(context, "qkv must be [B,S,stride]."), return ge::GRAPH_FAILED);
+
+    const gert::Shape cosShape = context->GetInputShape(IDX_COS)->GetStorageShape();
+    OP_CHECK_IF(cosShape.GetDimNum() != 3, OP_LOGE(context, "cos must be [B,S,ropeStride]."),
+                return ge::GRAPH_FAILED);
+
+    const uint32_t batch = static_cast<uint32_t>(qkvShape.GetDim(0));
+    const uint32_t seqLen = static_cast<uint32_t>(qkvShape.GetDim(1));
+    const uint32_t qkvStride = static_cast<uint32_t>(qkvShape.GetDim(2));
+    // B/S=0 时 totalTokens=0，后续 tokenPerCore 回算会除零；空张量对本算子无意义，直接拒绝
+    OP_CHECK_IF(qkvShape.GetDim(0) <= 0 || qkvShape.GetDim(1) <= 0,
+                OP_LOGE(context, "batch and seqLen must be positive, got B=%ld S=%ld.",
+                        qkvShape.GetDim(0), qkvShape.GetDim(1)),
+                return ge::GRAPH_FAILED);
+    const uint32_t ropeStride = static_cast<uint32_t>(cosShape.GetDim(2));
+
+    // D 单一来源：从 q_gamma 形状推导（而不是在 stride 运算里隐含 128）；
+    // kernel VF 是 64-lane 半区硬分区，当前仅支持 D == SQNR_HEAD_DIM（Tier 1 起按支持集放开）
+    const gert::Shape qGammaShape = context->GetInputShape(IDX_Q_GAMMA)->GetStorageShape();
+    OP_CHECK_IF(qGammaShape.GetDimNum() != 1, OP_LOGE(context, "q_gamma must be rank-1 [D]."),
+                return ge::GRAPH_FAILED);
+    const gert::Shape kGammaShape = context->GetInputShape(IDX_K_GAMMA)->GetStorageShape();
+    OP_CHECK_IF(kGammaShape.GetDimNum() != 1, OP_LOGE(context, "k_gamma must be rank-1 [D]."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(qGammaShape.GetDim(0) <= 0 || kGammaShape.GetDim(0) <= 0,
+                OP_LOGE(context, "gamma dim must be positive, got q_gamma=%ld k_gamma=%ld.",
+                        qGammaShape.GetDim(0), kGammaShape.GetDim(0)),
+                return ge::GRAPH_FAILED);
+    const uint32_t headDim = static_cast<uint32_t>(qGammaShape.GetDim(0));
+    // Tier 2 支持集：D ∈ {64, 96, 128, 256}。
+    //   D=128/256：half 为整 64-lane pair 集，UNPACK_B16 全量 mask 路径；
+    //   D=64/96：half < 64 lane，HalfMasked 模板（UpdateMask 计数掩码，前/后半各自 64-lane 窗口）。
+    OP_CHECK_IF(headDim != SQNR_HEAD_DIM_64 && headDim != SQNR_HEAD_DIM_96 &&
+                    headDim != SQNR_HEAD_DIM && headDim != SQNR_HEAD_DIM_256,
+                OP_LOGE(context, "head_dim %u unsupported (derived from q_gamma), kernel supports D={%u,%u,%u,%u}.",
+                        headDim, SQNR_HEAD_DIM_64, SQNR_HEAD_DIM_96, SQNR_HEAD_DIM, SQNR_HEAD_DIM_256),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(static_cast<uint32_t>(kGammaShape.GetDim(0)) != headDim,
+                OP_LOGE(context, "k_gamma dim %ld != q_gamma dim %u.", kGammaShape.GetDim(0), headDim),
+                return ge::GRAPH_FAILED);
+
+    const gert::RuntimeAttrs *attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    const int64_t *nqPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_Q_HEADS);
+    const int64_t *nkPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_KV_HEADS);
+    OP_CHECK_NULL_WITH_CONTEXT(context, nqPtr);
+    OP_CHECK_NULL_WITH_CONTEXT(context, nkPtr);
+    // 负数头数经 u32 转换会回绕成大正数，绕过后续所有校验；必须按原符号类型先拒
+    OP_CHECK_IF(*nqPtr <= 0 || *nkPtr <= 0,
+                OP_LOGE(context, "head num must be positive, got num_q_heads=%ld num_kv_heads=%ld.",
+                        *nqPtr, *nkPtr),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(*nqPtr > static_cast<int64_t>(SQNR_MAX_HEADS),
+                OP_LOGE(context, "num_q_heads=%ld > %u.", *nqPtr, SQNR_MAX_HEADS),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(*nkPtr > static_cast<int64_t>(SQNR_MAX_HEADS),
+                OP_LOGE(context, "num_kv_heads=%ld > %u.", *nkPtr, SQNR_MAX_HEADS),
+                return ge::GRAPH_FAILED);
+    const uint32_t numHeadQ = static_cast<uint32_t>(*nqPtr);
+    const uint32_t numHeadK = static_cast<uint32_t>(*nkPtr);
+    const float *epsPtr = attrs->GetAttrPointer<float>(ATTR_EPSILON);
+    const bool *gqaPtr = attrs->GetAttrPointer<bool>(ATTR_GQA_EXPAND);
+    const bool *bnsdPtr = attrs->GetAttrPointer<bool>(ATTR_LAYOUT_BNSD);
+    const bool *kvIntPtr = attrs->GetAttrPointer<bool>(ATTR_KV_INTERLEAVED);
+    const float eps = (epsPtr != nullptr) ? *epsPtr : 1e-6f;
+    // eps 负值会让 sqrt(sumsq/D + eps) 对小 norm 头出负数 -> NaN；非有限值直接污染 scale 链
+    OP_CHECK_IF(!std::isfinite(eps) || eps < 0.0f,
+                OP_LOGE(context, "epsilon must be finite and non-negative, got %f.", eps),
+                return ge::GRAPH_FAILED);
+    const bool gqaExpand = (gqaPtr != nullptr) ? *gqaPtr : false;
+    const bool layoutBNSD = (bnsdPtr != nullptr) ? *bnsdPtr : false;
+    const bool kvInterleaved = (kvIntPtr != nullptr) ? *kvIntPtr : false;
+    // rope_dim：0/缺省 = 全 head_dim 旋转（与历史行为一致）；
+    // 非 0 时要求 <= head_dim 且 % 128 == 0（NeoX 半区按 64-lane pair 对齐）
+    const int64_t *ropeDimPtr = attrs->GetAttrPointer<int64_t>(ATTR_ROPE_DIM);
+    const int64_t ropeDimRaw = (ropeDimPtr != nullptr) ? *ropeDimPtr : 0;
+    OP_CHECK_IF(ropeDimRaw < 0 || ropeDimRaw > static_cast<int64_t>(headDim),
+                OP_LOGE(context, "rope_dim %ld out of range (0, %u].", ropeDimRaw, headDim),
+                return ge::GRAPH_FAILED);
+    const uint32_t ropeDim = (ropeDimRaw == 0) ? headDim : static_cast<uint32_t>(ropeDimRaw);
+    // 全量路径（D >= 128）：部分 rope 要求 rope_dim/2 为多整 64-lane pair → rope_dim % 128 == 0
+    // HalfMasked 路径（D = 64/96，halfDim < 64）：仅支持全头旋转（rope_dim == head_dim）
+    const uint32_t halfDim = headDim / 2;
+    if (halfDim < 64) {
+        OP_CHECK_IF(ropeDim != headDim,
+                    OP_LOGE(context, "rope_dim %u must equal head_dim %u for D<128 (partial rope unsupported on masked path).",
+                            ropeDim, headDim),
+                    return ge::GRAPH_FAILED);
+    } else {
+        OP_CHECK_IF(ropeDim % 128 != 0,
+                    OP_LOGE(context, "rope_dim %u must be a multiple of 128 (64-lane pair aligned).", ropeDim),
+                    return ge::GRAPH_FAILED);
+    }
+
+    const uint32_t numHeadV = numHeadK;  // v1：Nv == Nk
+    const uint32_t headTotal = numHeadQ + numHeadK + numHeadV;
+
+    OP_CHECK_IF(numHeadQ % numHeadK != 0, OP_LOGE(context, "num_q_heads %% num_kv_heads != 0."),
+                return ge::GRAPH_FAILED);
+    const uint32_t qkHeads = numHeadQ + numHeadK;
+    OP_CHECK_IF(qkHeads > SQNR_MAX_HEADS, OP_LOGE(context, "Nq+Nk=%u > %u.", qkHeads, SQNR_MAX_HEADS),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(qkvStride < headTotal * headDim,
+                OP_LOGE(context, "qkv stride %u < heads*D = %u.", qkvStride, headTotal * headDim),
+                return ge::GRAPH_FAILED);
+    // VF 对 cos/sin 行按 LoadAlign 逐 t 取数，行距 ropeStride*2 B 必须是 32 B 的倍数（即 ropeStride 16 对齐）
+    OP_CHECK_IF(ropeStride < headDim / 2 || ropeStride > headDim || ropeStride % 16 != 0,
+                OP_LOGE(context, "rope stride must be in [D/2, D] and 16-aligned, got %u (D=%u).",
+                        ropeStride, headDim),
+                return ge::GRAPH_FAILED);
+
+    SplitQkvNormRopeCompileInfo compileInfo;
+    auto platformInfo = context->GetPlatformInfo();
+    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
+    const uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
+    uint64_t ubSize = 0;
+    ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+    (void)compileInfo;
+
+    const uint32_t totalTokens = batch * seqLen;
+    const ge::DataType dtype = qkvDesc->GetDataType();
+    // kernel 用 sizeof(T) 计算 UB 布局，host 必须与之对齐：当前仅支持 2 字节 dtype
+    uint32_t elemBytes = 0;
+    if (dtype == ge::DT_BF16 || dtype == ge::DT_FLOAT16) {
+        elemBytes = 2;
+    } else {
+        OP_LOGE(context, "unsupported dtype %d, expect BF16/FLOAT16.", static_cast<int32_t>(dtype));
+        return ge::GRAPH_FAILED;
+    }
+    const uint32_t padStride = RoundUp(qkvStride, 16);  // 32B 对齐的 UB 行距
+
+    // 按 UB 预算从大到小挑 tile 行数：行数越大越能摊薄每 tile 的固定开销
+    uint32_t tokenTile = 0;
+    for (uint32_t cand = SQNR_TOKEN_TILE; cand >= 1; cand >>= 1) {
+        if (CalcUbNeed(cand, padStride, ropeStride, headTotal, headDim, elemBytes) <= ubSize) {
+            tokenTile = cand;
+            break;
+        }
+    }
+    OP_CHECK_IF(tokenTile == 0,
+                OP_LOGE(context, "UB insufficient even at tile=1: stride=%u pad=%u heads=%u.",
+                        qkvStride, padStride, headTotal),
+                return ge::GRAPH_FAILED);
+
+    uint32_t blockDim = (aivNum < (totalTokens + tokenTile - 1) / tokenTile)
+                            ? aivNum
+                            : (totalTokens + tokenTile - 1) / tokenTile;
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+    uint32_t tokenPerCore = RoundUp((totalTokens + blockDim - 1) / blockDim, tokenTile);
+    blockDim = (totalTokens + tokenPerCore - 1) / tokenPerCore;
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+
+    SplitQkvNormRopeTilingData tilingData;
+    tilingData.set_batch(batch);
+    tilingData.set_seqLen(seqLen);
+    tilingData.set_numHeadQ(numHeadQ);
+    tilingData.set_numHeadK(numHeadK);
+    tilingData.set_numHeadV(numHeadV);
+    tilingData.set_headDim(headDim);
+    tilingData.set_qkvStride(qkvStride);
+    tilingData.set_padStride(padStride);
+    tilingData.set_ropeStride(ropeStride);
+    tilingData.set_totalTokens(totalTokens);
+    tilingData.set_tokenPerCore(tokenPerCore);
+    tilingData.set_tokenTile(tokenTile);
+    tilingData.set_lastBlockTokenNum(totalTokens - tokenPerCore * (blockDim - 1));
+    tilingData.set_eps(eps);
+    tilingData.set_reciprocal(1.0f / static_cast<float>(headDim));
+    uint32_t flags = 0;
+    if (gqaExpand) {
+        flags |= SQNR_FLAG_GQA_EXPAND;
+    }
+    if (layoutBNSD) {
+        flags |= SQNR_FLAG_LAYOUT_BNSD;
+    }
+    if (kvInterleaved) {
+        flags |= SQNR_FLAG_KV_INTERLEAVED;
+    }
+    tilingData.set_flags(flags);
+    tilingData.set_blockDim(blockDim);
+    tilingData.set_ropeDim(ropeDim);
+
+    context->SetBlockDim(blockDim);
+    context->SetTilingKey(SQNR_KEY_SINGLE);
+    tilingData.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tilingData.GetDataSize());
+
+    size_t *workspace = context->GetWorkspaceSizes(1);
+    OP_CHECK_NULL_WITH_CONTEXT(context, workspace);
+    workspace[0] = 0;
+
+    OP_LOGI(context, "tokens=%u blockDim=%u tokenPerCore=%u tile=%u lastCore=%u stride=%u pad=%u rope=%u heads=%u/%u D=%u ropeDim=%u gqa=%d bnsd=%d",
+            totalTokens, blockDim, tokenPerCore, tokenTile, tilingData.get_lastBlockTokenNum(), qkvStride, padStride,
+            ropeStride, numHeadQ, numHeadK, headDim, ropeDim, static_cast<int32_t>(gqaExpand), static_cast<int32_t>(layoutBNSD));
+    return ge::GRAPH_SUCCESS;
+}
+
+IMPL_OP_OPTILING(SplitQkvNormRope)
+    .Tiling(Tiling4SplitQkvNormRope)
+    .TilingParse<SplitQkvNormRopeCompileInfo>(TilingPrepare4SplitQkvNormRope);
+
+}  // namespace optiling

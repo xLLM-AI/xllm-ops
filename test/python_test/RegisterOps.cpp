@@ -1060,6 +1060,60 @@ gamma_add_rms_norm_impl_npu(const at::Tensor& x1,
   return std::make_tuple(y, rstd, x);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> split_qkv_norm_rope_impl_npu(
+    const at::Tensor& qkv,
+    const at::Tensor& q_gamma,
+    const at::Tensor& k_gamma,
+    const at::Tensor& cos,
+    const at::Tensor& sin,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    double epsilon,
+    bool gqa_expand,
+    bool layout_bnsd,
+    bool kv_interleaved,
+    int64_t rope_dim) {
+  constexpr int64_t kHeadDimFallback = 128;
+  const int64_t kHeadDim = q_gamma.dim() > 0 ? q_gamma.size(-1) : kHeadDimFallback;
+  // rank<2 时 std::vector::operator[] 会越界读（.vec() 已无 TORCH_CHECK），先校验
+  TORCH_CHECK(qkv.dim() == 3, "qkv must be rank-3 [B,S,stride], got rank ", qkv.dim());
+  auto sizes = qkv.sizes().vec();
+  const int64_t batch = sizes[0];
+  const int64_t seq_len = sizes[1];
+  const int64_t kv_heads = gqa_expand ? num_q_heads : num_kv_heads;
+
+  auto make_shape = [&](int64_t heads) {
+    if (layout_bnsd) {
+      return std::vector<int64_t>{batch, heads, seq_len, kHeadDim};
+    }
+    return std::vector<int64_t>{batch, seq_len, heads * kHeadDim};
+  };
+
+  at::Tensor q = at::empty(make_shape(num_q_heads), qkv.options());
+  at::Tensor k = at::empty(make_shape(kv_heads), qkv.options());
+  at::Tensor v = at::empty(make_shape(kv_heads), qkv.options());
+  // 生成的 aclnn 接口按 OpDef 的 Float 属性取 float（EXEC_NPU_CMD 需要左值）
+  float eps_f = static_cast<float>(epsilon);
+
+  EXEC_NPU_CMD(aclnnSplitQkvNormRope,
+               qkv,
+               q_gamma,
+               k_gamma,
+               cos,
+               sin,
+               num_q_heads,
+               num_kv_heads,
+               eps_f,
+               gqa_expand,
+               layout_bnsd,
+               kv_interleaved,
+               rope_dim,
+               q,
+               k,
+               v);
+  return std::make_tuple(q, k, v);
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 moe_init_routing_custom_impl_npu(const at::Tensor& x,
                                  const at::Tensor& expert_idx,
@@ -2755,6 +2809,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gamma_add_rms_norm",
         &gamma_add_rms_norm_impl_npu,
         "gamma_add_rms_norm");
+  m.def("split_qkv_norm_rope",
+        &split_qkv_norm_rope_impl_npu,
+        "split_qkv_norm_rope");
   m.def("moe_init_routing_custom", &moe_init_routing_custom_impl_npu, "moe_init_routing_custom");
   m.def("moe_init_routing_v3", &moe_init_routing_v3_impl_npu, "moe_init_routing_v3");
   m.def("hc_pre_sinkhorn", &hc_pre_sinkhorn_impl_npu, "hc_pre_sinkhorn");
