@@ -11,7 +11,8 @@ PYTORCH_NPU_INSTALL_PATH = os.path.dirname(os.path.abspath(torch_npu.__file__))
 USE_NINJA = os.getenv('USE_NINJA') == '1'
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 
-source_files = [os.path.join(BASE_DIR, "RegisterOps.cpp")]
+source_files = [os.path.join(BASE_DIR, "RegisterOps.cpp"),
+                os.path.join(BASE_DIR, "mega_kda_ops.cpp")]
 
 exts = []
 ext = NpuExtension(
