@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+add_op_to_compiled_list()
+
 if(BUILD_OPEN_PROJECT)
   target_sources(op_host_aclnn PRIVATE kda_replayssm_verify_record_def.cpp)
 endif()
