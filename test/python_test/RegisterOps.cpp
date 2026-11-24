@@ -19,6 +19,7 @@ limitations under the License.
 #include <cmath>
 
 #include "acl/acl_rt.h"
+#include "mega_kda_ops.h"
 #include "pytorch_npu_helper.hpp"
 
 void select_unshared_kv_impl_npu(
@@ -2728,6 +2729,7 @@ std::tuple<at::Tensor, at::Tensor> smla_va(
 } // namespace xllm_ops
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  register_mega_kda_ops(m);
   m.def("select_unshared_kv", &select_unshared_kv_impl_npu, "select_unshared_kv");
   m.def("cache_unshared_kv", &cache_unshared_kv_impl_npu, "cache_unshared_kv");
   m.def("x_attention", &x_attention_impl_npu, "x_attention");
