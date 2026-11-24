@@ -34,6 +34,8 @@ show_help() {
     echo '  --build-transformer  Build ops-transformer third-party ops (default: enabled)'
     echo '  --no-build-transformer  Skip building ops-transformer third-party ops'
     echo '  --no-install-transformer  Build ops-transformer but do not install its artifacts'
+    echo '  --build-transformer-torch-extension  Build the ops-transformer torch_extension wheel (default: disabled)'
+    echo '  --no-build-transformer-torch-extension  Skip the ops-transformer torch_extension wheel'
     echo '  --no-build-flash     Skip building flash-linear-attention-npu third-party ops'
     echo '  --no-install-flash   Build flash-linear-attention-npu but do not install its wheel'
     echo "  -h, --help          Show this help message"
@@ -55,6 +57,7 @@ parse_args() {
     COMPUTE_UNIT=""
     BUILD_TRANSFORMER="true"
     INSTALL_TRANSFORMER="true"
+    BUILD_TRANSFORMER_TORCH_EXTENSION="false"
     BUILD_FLASH="true"
     INSTALL_FLASH="true"
 
@@ -75,6 +78,12 @@ parse_args() {
                 ;;
             --no-install-transformer)
                 INSTALL_TRANSFORMER="false"
+                ;;
+            --build-transformer-torch-extension)
+                BUILD_TRANSFORMER_TORCH_EXTENSION="true"
+                ;;
+            --no-build-transformer-torch-extension)
+                BUILD_TRANSFORMER_TORCH_EXTENSION="false"
                 ;;
             --no-build-flash)
                 BUILD_FLASH="false"
@@ -293,6 +302,13 @@ build_ops_transformer() {
     if [[ "${INSTALL_TRANSFORMER}" != "true" ]]; then
         echo "[INFO] ops-transformer artifact installation disabled (--no-install-transformer)"
         transformer_args+=(--no-install)
+    fi
+    if [[ "${BUILD_TRANSFORMER_TORCH_EXTENSION}" == "true" ]]; then
+        echo "[INFO] ops-transformer torch_extension wheel enabled"
+        transformer_args+=(--torch-extension)
+    else
+        echo "[INFO] ops-transformer torch_extension wheel disabled (default)"
+        transformer_args+=(--no-torch-extension)
     fi
     stdbuf -oL bash "${transformer_script}" "${transformer_args[@]}"
 }

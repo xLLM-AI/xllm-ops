@@ -16,6 +16,8 @@
 #   bash build_ops_transformer.sh build      # 仅执行编译
 #   bash build_ops_transformer.sh all        # 安装依赖 + 编译 + 安装产物
 #   bash build_ops_transformer.sh --soc=ascend950 build   # 指定 SOC 编译
+#
+# 默认不构建 torch_extension wheel；需要时显式加 --torch-extension。
 # =============================================================================
 
 set -e
@@ -52,9 +54,9 @@ fi
 # 编译优化级别 (默认 O3)
 OPT_LEVEL="O3"
 
-# 是否将 torch_extension 打包进 .run 安装包 (默认开启)
+# 是否构建 torch_extension wheel (默认关闭)
 # 开启时: 先构建 whl 到 torch_extension/dist/, 再由 --pkg 打包进同一个 .run 包
-BUILD_TORCH_EXTENSION="true"
+BUILD_TORCH_EXTENSION="false"
 # Whether to install build artifacts (default: enabled); --no-install skips it.
 INSTALL_ARTIFACTS="true"
 
@@ -133,7 +135,7 @@ build_ops() {
     # 若关闭 torch_extension 打包，清理 dist/ 残留的旧 whl，避免 --pkg 误打包
     if [[ "${BUILD_TORCH_EXTENSION}" != "true" ]]; then
         if [[ -d "${OPS_TRANSFORMER_DIR}/torch_extension/dist" ]]; then
-            echo "[INFO] --no-torch-extension: clean stale whl in torch_extension/dist/"
+            echo "[INFO] torch_extension wheel disabled: clean stale whl in torch_extension/dist/"
             rm -rf "${OPS_TRANSFORMER_DIR}/torch_extension/dist"
         fi
     fi
@@ -367,8 +369,8 @@ main() {
             echo "  install  Install dependencies and install build artifacts"
             echo "  build    Build only"
             echo "  all      Install dependencies + build + install artifacts (default)"
-            echo "  --torch-extension      Package torch_extension whl into the .run package (enabled by default)"
-            echo "  --no-torch-extension   Do not package torch_extension whl"
+            echo "  --torch-extension      Build and package the torch_extension whl (default: disabled)"
+            echo "  --no-torch-extension   Do not build the torch_extension whl (default)"
             echo "  --no-install           Do not install built artifacts"
             exit 1
             ;;
