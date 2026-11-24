@@ -203,7 +203,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
         }
     }
     } else {
-    // ==== Full path: D in {128,256} ====
+    // ==== Full path: D in {128, 256} ====
     // 64-lane chunks: pass1 accumulates D/64 chunks; pass2 splits each half into
     // halfDim/64 pairs, first ropeDim/2/64 rotated, rest pass through.
     const uint16_t nChunks = static_cast<uint16_t>(headDim / kSeg);
@@ -392,7 +392,7 @@ __simd_vf__ inline void SqnrNormRopeVfPack(
             }
         }
     }
-    }  // full path (D in {128,256})
+    }  // else: full path (D in {128, 256})
 }
 
 template <typename T>
