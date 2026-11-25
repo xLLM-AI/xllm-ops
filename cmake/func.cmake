@@ -97,7 +97,8 @@ function(op_add_subdirectory OP_LIST OP_DIR_LIST)
                 "${CMAKE_CURRENT_SOURCE_DIR}/moe/**/framework/CMakeLists.txt"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ffn/**/framework/CMakeLists.txt"
                 "${CMAKE_CURRENT_SOURCE_DIR}/mc2/**/framework/CMakeLists.txt"
-           
+
+                "${CMAKE_CURRENT_SOURCE_DIR}/expert_chosen_routing2/**/op_host/CMakeLists.txt"
                 "${CMAKE_CURRENT_SOURCE_DIR}/**/op_host/CMakeLists.txt"
             )
             List(APPEND OP_HOST_CMAKE_FILES ${CANNDEV_OPS_HOST_CMAKE_FILES})
@@ -246,6 +247,19 @@ function(add_ops_info_target)
     set(OPS_INFO_INNER_INI    ${base_aclnn_binary_dir}/inner/aic-${OPINFO_COMPUTE_UNIT}-ops-info.ini)
     set(OPS_INFO_EXCLUDE_INI  ${base_aclnn_binary_dir}/exc/aic-${OPINFO_COMPUTE_UNIT}-ops-info.ini)
 
+    # opbuild only writes the inner/exc ini when that group has an op, so a
+    # filtered build (-n) leaves them missing; depending on them would fail
+    # with "No rule to make target". parse_ini_to_json skips absent files.
+    set(_ops_info_deps ${OPS_INFO_INI}
+            ${ASCENDC_CMAKE_UTIL_DIR}/parse_ini_to_json.py
+            ${XLLM_OPS_SOURCE_IDENTITY_DEPENDENCY})
+    if (generate_aclnn_inner_srcs)
+        list(APPEND _ops_info_deps ${OPS_INFO_INNER_INI})
+    endif()
+    if (generate_exclude_proto_srcs)
+        list(APPEND _ops_info_deps ${OPS_INFO_EXCLUDE_INI})
+    endif()
+
     add_custom_command(OUTPUT ${OPS_INFO_JSON}
             COMMAND ${HI_PYTHON} ${ASCENDC_CMAKE_UTIL_DIR}/parse_ini_to_json.py
             ${OPS_INFO_INI}
@@ -254,9 +268,7 @@ function(add_ops_info_target)
             ${OPS_INFO_JSON}
             COMMAND mkdir -p ${CUSTOM_OPS_INFO_DIR}
             COMMAND cp -f ${OPS_INFO_JSON} ${CUSTOM_OPS_INFO_DIR}
-            DEPENDS ${OPS_INFO_INI} ${OPS_INFO_INNER_INI} ${OPS_INFO_EXCLUDE_INI}
-                    ${ASCENDC_CMAKE_UTIL_DIR}/parse_ini_to_json.py
-                    ${XLLM_OPS_SOURCE_IDENTITY_DEPENDENCY}
+            DEPENDS ${_ops_info_deps}
     )
 
     add_custom_target(${OPS_INFO_TARGET} ALL
