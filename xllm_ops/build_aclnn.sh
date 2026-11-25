@@ -225,6 +225,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "scatter_nd_update_v2"
         "kv_quant_sparse_flash_attention_va"
         "rms_norm_cast_va"
+        "kda_replayssm_verify_record"
+        "kda_replayssm_correction_fold"
 
          ### JD's in-house operators ####
         "beam_search_group"
