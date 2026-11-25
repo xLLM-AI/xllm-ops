@@ -42,7 +42,9 @@ def case(case_id, s, e, dtype="fp32", **kwargs):
 
 
 # One shared matrix: historical F1-F10 / four long shapes plus boundaries.
-CASES = [
+# Every base case then runs with fp32 and bf16 source values; "dtype" is the
+# precision the generated values are rounded to, the kernel itself stays fp32.
+_BASE_CASES = [
     case("F1", 4096, 48), case("F2", 4096, 48, "fp16"),
     case("F3", 4096, 48, "bf16"),
     case("F4", 4096, 48), case("F5", 4096, 48),
@@ -55,7 +57,7 @@ CASES = [
     case("EMPTY_MIX", 17, 3), case("TINY", 17, 3),
     case("ONE", 1, 1), case("SINGLE_IGNORED", 17, 3),
 ]
-for _item in CASES:
+for _item in _BASE_CASES:
     _id = _item["case_id"]
     if _id == "F4":
         _item["lengths"] = [1024] * 4
@@ -78,6 +80,16 @@ for _item in CASES:
         _item["lengths"] = [8, 9]
     elif _id == "SINGLE_IGNORED":
         _item["lengths"] = [999]
+
+# fp32 and bf16 for every case; the two fp16 cases keep their fp16 run too.
+CASES = []
+for _item in _BASE_CASES:
+    for _dtype in ("fp32", "bf16", "fp16"):
+        if _dtype == "fp16" and _item["dtype"] != "fp16":
+            continue
+        CASES.append(dict(_item,
+                          case_id="{}-{}".format(_item["case_id"], _dtype),
+                          dtype=_dtype))
 
 CASE_IDS = [item["case_id"] for item in CASES]
 
@@ -256,7 +268,7 @@ def test_ecr_expert_selection_threshold_seq_lengths_forms(lengths):
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"NPU device not available: {exc}")
 
-    spec = next(item for item in CASES if item["case_id"] == "F4")
+    spec = next(item for item in CASES if item["case_id"] == "F4-fp32")
     values = effective_lengths(spec)
     arg = values
     if lengths == "int32":

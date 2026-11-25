@@ -16,8 +16,9 @@
 """Per-case A/B latency of the aclnn ports against the upstream extensions.
 
 Runs the same 21-case matrix as the pytest suites (shape, source precision,
-top_p, sample segmentation) and, for every case, compares outputs before
-timing so a failing baseline cannot silently produce meaningless numbers.
+top_p, sample segmentation). Every case is gated for both its fp32 and bf16
+source variants (plus fp16 for F2/L3) before anything is timed; timing covers
+the fp32 variants, which is the production path.
 
 The debug box is shared and the upstream path is host-load sensitive, so each
 case is timed in several blocks with the aclnn/upstream order flipping between
@@ -69,7 +70,9 @@ def timeit(fn, warmup, iters):
     return summarize([s.elapsed_time(e) for s, e in spans])
 
 
-# Same matrix as test_ecr_*.py; keep the two in sync when cases change.
+# Same matrix as test_ecr_*.py, including the per-case dtype expansion: every
+# case runs with fp32 and bf16 source values, and F2/L3 keep an fp16 variant.
+# Keep the two files in sync when cases change.
 def case(case_id, s, e, dtype="fp32", **kwargs):
     spec = dict(case_id=case_id, s=s, e=e, dtype=dtype, top_p=0.125,
                 eps=1e-9, seed=1234, dup_ratio=0.0, lengths=[],
@@ -91,6 +94,7 @@ CASES = [
     case("EMPTY_MIX", 17, 3), case("TINY", 17, 3),
     case("ONE", 1, 1), case("SINGLE_IGNORED", 17, 3),
 ]
+_BASE_CASES = CASES
 for _item in CASES:
     _id = _item["case_id"]
     if _id == "F4":
@@ -114,6 +118,17 @@ for _item in CASES:
         _item["lengths"] = [8, 9]
     elif _id == "SINGLE_IGNORED":
         _item["lengths"] = [999]
+
+# Correctness is gated for every variant; timing covers the fp32 variants,
+# which is the production path (see run()).
+CASES = []
+for _item in _BASE_CASES:
+    for _dtype in ("fp32", "bf16", "fp16"):
+        if _dtype == "fp16" and _item["dtype"] != "fp16":
+            continue
+        CASES.append(dict(_item,
+                          case_id="{}-{}".format(_item["case_id"], _dtype),
+                          dtype=_dtype))
 
 
 def make_probability(spec):
@@ -193,6 +208,11 @@ def run(args):
                 raise AssertionError(f"{label}.weights mismatch")
         except Exception as exc:  # noqa: BLE001 - report, keep the matrix going
             print(f"[WAIVED] {label}: {exc}")
+            continue
+
+        # Outputs of every variant are checked above; only fp32 is timed so
+        # the run length stays the same as the fp32-only matrix.
+        if spec["dtype"] != "fp32":
             continue
 
         calls = {
