@@ -5,6 +5,10 @@ import custom_ops_lib
 CHUNK_SIZE = 128
 
 
+def ada_rms_norm_npu(x, scale, shift, weight=None, eps=1e-6):
+    return custom_ops_lib.ada_rms_norm(x, scale, shift, weight, eps)
+
+
 # x_attention
 def x_attention_npu(query, key_cache, value_cache, unshared_key, unshared_value, actual_shared_kvlen, decode_step, 
                     shared_block_tables = None, 
