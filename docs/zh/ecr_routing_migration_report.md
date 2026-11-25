@@ -40,7 +40,7 @@
 ### 3.2 目录结构与隔离
 
 ```
-xllm_ops/expert_chosen_routing2/
+xllm_ops/expert_chosen_routing/
 ├── ecr_expert_selection_threshold/
 │   ├── CMakeLists.txt
 │   ├── op_host/{_def.cpp, _infershape.cpp, _tiling.cpp, _tiling.h, _contract.h}
@@ -79,7 +79,7 @@ xllm_ops/expert_chosen_routing2/
 | 1 | 远程命令通道不可用（MCP ssh 服务未连上） | 会话内 MCP 工具不可达 | 改用 WinSCP `call` + `put/get` 的封装通道（`call` 命令不能加引号，否则参数被转义破坏） |
 | 2 | 配置阶段卡在下载 makeself / nlohmann json / abseil / protobuf | 内网无外网 DNS，`third_party` 需离线准备 | 从同机已有副本拷贝 `makeself`、`pkg/*.tar.gz`、`json/include` |
 | 3 | `ModuleNotFoundError: No module named 'regex'` | 构建脚本依赖 `regex`，镜像未装 | 从同机其他 Python 环境拷入容器 site-packages |
-| 4 | `No SOURCES given to target: cust_opmaster` | `cmake/func.cmake` 用 `**` glob 发现算子，而 CMake 的 `**` 只匹配一层，`expert_chosen_routing2/<op>/op_host` 永远匹配不到 | 在 `func.cmake` 增加 `expert_chosen_routing2/**/op_host/CMakeLists.txt` 显式 glob |
+| 4 | `No SOURCES given to target: cust_opmaster` | `cmake/func.cmake` 用 `**` glob 发现算子，而 CMake 的 `**` 只匹配一层，`expert_chosen_routing/<op>/op_host` 永远匹配不到 | 在 `func.cmake` 增加 `expert_chosen_routing/**/op_host/CMakeLists.txt` 显式 glob |
 | 5 | `expected primary-expression before 'float'`（S2/S4 contract） | 模板函数内 `const auto* attrs = ctx->GetAttrs()` 是依赖类型，成员模板调用需消歧 | 改为 `attrs->template GetAttrPointer<float>(...)` |
 | 6 | `No rule to make target 'autogen/inner/aic-ascend950-ops-info.ini'` | 用 `-n` 只编部分算子时没有 inner/exc 组算子，opbuild 不产出这两个 ini，但 `generate_ops_info` 把它们写进 `DEPENDS` | `func.cmake` 中改为仅当对应组非空时才依赖该 ini（`parse_ini_to_json.py` 本身会跳过不存在的文件） |
 | 7 | 内核编译 `StoreAlign: expects an lvalue for 3rd argument` | 把 `reg::CreateMask<...>()` 临时量直接传给 `MaskReg&` 形参，ccec 不接受 | 先赋给 `reg::MaskReg` 变量再传 |
@@ -472,9 +472,9 @@ python3 -u bench_ecr_routing.py --warmup 20 --iters 100 --rounds 6 \
 
 新增（未跟踪）：
 
-- `xllm_ops/expert_chosen_routing2/ecr_expert_selection_threshold/`（9 个文件）
-- `xllm_ops/expert_chosen_routing2/ecr_token_routing_statistics/`（9 个文件）
-- `xllm_ops/expert_chosen_routing2/ecr_routing_normalize_compact/`（9 个文件）
+- `xllm_ops/expert_chosen_routing/ecr_expert_selection_threshold/`（9 个文件）
+- `xllm_ops/expert_chosen_routing/ecr_token_routing_statistics/`（9 个文件）
+- `xllm_ops/expert_chosen_routing/ecr_routing_normalize_compact/`（9 个文件）
 - `test/python_test/test_ecr_expert_selection_threshold.py`
 - `test/python_test/test_ecr_token_routing_statistics.py`
 - `test/python_test/test_ecr_routing_normalize_compact.py`
