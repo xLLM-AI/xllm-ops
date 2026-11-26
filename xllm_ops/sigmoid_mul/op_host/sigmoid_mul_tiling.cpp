@@ -19,9 +19,6 @@ using Ops::Base::GetUbBlockSize;
 
 constexpr size_t WORKSPACE_NUM = 1;
 constexpr int64_t MIN_SPLIT_THRESHOLD = 1024;
-// UB bytes per element per buffer set (flat mode):
-//   x(T) + gate(T) + x32 + gate32 + out32 + out(T) => 2+2+4+4+4+2 = 18 (bf16/fp16)
-constexpr int64_t UB_BYTES_PER_ELEM_SET = 18;
 
 static const gert::Shape g_vec_1_shape = {1};
 
@@ -121,21 +118,27 @@ static ge::graphStatus SigmoidMulTilingFunc(gert::TilingContext* context)
     int64_t ubBlockSize = Ops::Base::GetUbBlockSize(context);
     int64_t usedCoreNum;
     uint32_t useDoubleBuffer = (totalIdx > MIN_SPLIT_THRESHOLD) ? 1 : 0;
+    int64_t bufNum = useDoubleBuffer ? 2 : 1;
+    // UB bytes per element for one buffer set: x(T)+gate(T)+x32+g32+z32+out(T).
+    // 2-byte dtype -> 18; 4-byte dtype (fp32) -> 24.
+    int64_t bytesPerElem = (dataType == ge::DT_FLOAT) ? 24 : 18;
+    int64_t ubCapacity = FloorAlign(FloorDiv(static_cast<int64_t>(ubSize) / bytesPerElem, bufNum), ubBlockSize);
+    if (ubCapacity < ubBlockSize) {
+        ubCapacity = ubBlockSize;
+    }
 
     if (isBroadcast) {
-        // rows split across cores; each row is processed in one UB shot
+        // rows split across cores; within a row, tile by ubCapacity
         int64_t rows = CeilDiv(totalIdx, rowWidth);
         int64_t rowsPerCore = CeilDiv(rows, coreNum);
         usedCoreNum = (rows > coreNum) ? coreNum : rows;
         tiling->blockFactor = rowsPerCore;
-        tiling->ubFactor = rowWidth;
+        tiling->ubFactor = (ubCapacity < rowWidth) ? ubCapacity : rowWidth;
     } else {
         // flat element split across cores
         tiling->blockFactor = CeilAlign(CeilDiv(totalIdx, coreNum), ubBlockSize);
         usedCoreNum = CeilDiv(totalIdx, tiling->blockFactor);
-        int64_t bufNum = useDoubleBuffer ? 2 : 1;
-        tiling->ubFactor =
-            FloorAlign(FloorDiv(static_cast<int64_t>(ubSize) / UB_BYTES_PER_ELEM_SET, bufNum), ubBlockSize);
+        tiling->ubFactor = ubCapacity;
     }
 
     context->SetBlockDim(usedCoreNum);

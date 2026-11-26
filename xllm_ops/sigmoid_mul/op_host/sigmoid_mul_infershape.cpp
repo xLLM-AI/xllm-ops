@@ -52,7 +52,8 @@ static ge::graphStatus InferShape4SigmoidMul(gert::InferShapeContext* context)
             gDim = gateShape->GetDim(gateShape->GetDimNum() - 1 - i);
         }
         if (xDim != gDim) {
-            OP_CHECK_IF(xDim == 1 || gDim == 1,
+            // Fail only when neither dimension is 1 (truly non-broadcastable).
+            OP_CHECK_IF(xDim != 1 && gDim != 1,
                         OP_LOGE(context, "SigmoidMul: shapes not broadcastable"),
                         return ge::GRAPH_FAILED);
         }

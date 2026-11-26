@@ -9,6 +9,7 @@
 #ifndef SIGMOID_MUL_H
 #define SIGMOID_MUL_H
 
+#include <type_traits>
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "sigmoid_mul_tiling_data.h"
@@ -35,9 +36,9 @@ private:
     __aicore__ inline void CopyInFlat(int64_t progress, int64_t currentNum);
     __aicore__ inline void ComputeFlat(int64_t currentNum);
     __aicore__ inline void CopyOutFlat(int64_t progress, int64_t currentNum);
-    __aicore__ inline void CopyInRow(int64_t row);
-    __aicore__ inline void ComputeRow(int64_t row, float gateScalar);
-    __aicore__ inline void CopyOutRow(int64_t row);
+    __aicore__ inline void CopyInChunk(int64_t offset, int64_t currentNum);
+    __aicore__ inline void ComputeChunk(float gateScalar, int64_t currentNum);
+    __aicore__ inline void CopyOutChunk(int64_t offset, int64_t currentNum);
 
     TPipe pipe;
     TQue<QuePosition::VECIN, 1> inputQueueX;
@@ -46,9 +47,8 @@ private:
     TBuf<QuePosition::VECCALC> x32Buf_;
     TBuf<QuePosition::VECCALC> g32Buf_;
     TBuf<QuePosition::VECCALC> z32Buf_;
-    TBuf<QuePosition::VECCALC> gateAllBuf_;  // broadcast: all gate values [rows_] as T
-    TBuf<QuePosition::VECCALC> sigGateBuf_;  // broadcast: sigmoid(gate) [rows_] as fp32
-    TBuf<QuePosition::VECCALC> sigRowBuf_;   // broadcast: materialized sigmoid row (rowWidth fp32)
+    TBuf<QuePosition::VECCALC> sigGateBuf_;  // broadcast: sigmoid(gate[0..gateVecLen_)) as fp32
+    TBuf<QuePosition::VECCALC> sigRowBuf_;   // broadcast: materialized sigmoid chunk (chunk fp32)
 
     GlobalTensor<T> inputGMX;
     GlobalTensor<T> inputGMG;
@@ -83,17 +83,15 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::Init(GM_ADDR x, GM_ADDR gate,
         inputGMX.SetGlobalBuffer((__gm__ T*)x + rowStart_ * rowWidth_, blockLength_);
         inputGMG.SetGlobalBuffer((__gm__ T*)gate, rows_);
         outputGMZ.SetGlobalBuffer((__gm__ T*)y + rowStart_ * rowWidth_, blockLength_);
-        pipe.InitBuffer(inputQueueX, BUFFER_NUM, rowWidth_ * sizeof(T));
-        pipe.InitBuffer(outputQueueZ, BUFFER_NUM, rowWidth_ * sizeof(T));
-        pipe.InitBuffer(x32Buf_, BUFFER_NUM * rowWidth_ * sizeof(float));
-        pipe.InitBuffer(sigRowBuf_, BUFFER_NUM * rowWidth_ * sizeof(float));
-        pipe.InitBuffer(z32Buf_, BUFFER_NUM * rowWidth_ * sizeof(float));
-        gateVecLen_ = ((rows_ + 127) / 128) * 128;  // bf16 vector repeat = 128 elems
+        // one row is processed in chunks of ubLength_ (<= rowWidth_) to fit UB
+        pipe.InitBuffer(inputQueueX, BUFFER_NUM, ubLength_ * sizeof(T));
+        pipe.InitBuffer(outputQueueZ, BUFFER_NUM, ubLength_ * sizeof(T));
+        pipe.InitBuffer(x32Buf_, BUFFER_NUM * ubLength_ * sizeof(float));
+        pipe.InitBuffer(sigRowBuf_, BUFFER_NUM * ubLength_ * sizeof(float));
+        pipe.InitBuffer(z32Buf_, BUFFER_NUM * ubLength_ * sizeof(float));
+        gateVecLen_ = ((rows_ + 127) / 128) * 128;  // vector-safe count for the gate sigmoid
         pipe.InitBuffer(inputQueueG, 1, gateVecLen_ * sizeof(T));
-        // uniform oversized buffers to avoid small-buffer allocation quirks
-        pipe.InitBuffer(gateAllBuf_, BUFFER_NUM * rowWidth_ * sizeof(T));
-        pipe.InitBuffer(sigGateBuf_, BUFFER_NUM * rowWidth_ * sizeof(float));
-        pipe.InitBuffer(g32Buf_, sizeof(float));
+        pipe.InitBuffer(sigGateBuf_, gateVecLen_ * sizeof(float));
     } else {
         const int64_t total = tilingData->totalNum;
         const int64_t offset = coreIdx * tilingData->blockFactor;
@@ -163,11 +161,17 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ComputeFlat(int64_t currentNu
     AscendC::LocalTensor<float> g32 = g32Buf_.template AllocTensor<float>();
     AscendC::LocalTensor<float> z32 = z32Buf_.template AllocTensor<float>();
 
-    AscendC::Cast(x32, xLocal, RoundMode::CAST_NONE, currentNum);
-    AscendC::Cast(g32, gLocal, RoundMode::CAST_NONE, currentNum);
-    AscendC::Sigmoid(g32, g32, currentNum);
-    AscendC::Mul(z32, x32, g32, currentNum);
-    AscendC::Cast(zLocal, z32, RoundMode::CAST_RINT, currentNum);
+    if constexpr (std::is_same_v<T, float>) {
+        // fp32 inputs need no promotion/cast.
+        AscendC::Sigmoid(gLocal, gLocal, currentNum);
+        AscendC::Mul(zLocal, xLocal, gLocal, currentNum);
+    } else {
+        AscendC::Cast(x32, xLocal, RoundMode::CAST_NONE, currentNum);
+        AscendC::Cast(g32, gLocal, RoundMode::CAST_NONE, currentNum);
+        AscendC::Sigmoid(g32, g32, currentNum);
+        AscendC::Mul(z32, x32, g32, currentNum);
+        AscendC::Cast(zLocal, z32, RoundMode::CAST_RINT, currentNum);
+    }
 
     outputQueueZ.template EnQue<T>(zLocal);
     inputQueueX.FreeTensor(xLocal);
@@ -212,7 +216,11 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ProcessBroadcast()
     inputQueueG.EnQue(gateAll);
     AscendC::LocalTensor<T> gateIn = inputQueueG.template DeQue<T>();
     AscendC::LocalTensor<float> sigGate = sigGateBuf_.template AllocTensor<float>();
-    AscendC::Cast(sigGate, gateIn, RoundMode::CAST_NONE, gateVecLen_);
+    if constexpr (std::is_same_v<T, float>) {
+        AscendC::DataCopy(sigGate, gateIn, static_cast<uint32_t>(gateVecLen_));
+    } else {
+        AscendC::Cast(sigGate, gateIn, RoundMode::CAST_NONE, gateVecLen_);
+    }
     AscendC::Sigmoid(sigGate, sigGate, gateVecLen_);
     // V -> S sync so scalar reads below observe the sigmoid result.
     event_t eid = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
@@ -225,29 +233,35 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ProcessBroadcast()
         if (row >= rows_) {
             break;
         }
-        float gateScalar = sigGate.GetValue(static_cast<uint32_t>(row));
-        CopyInRow(row);
-        ComputeRow(row, gateScalar);
-        CopyOutRow(row);
+        const float gateScalar = sigGate.GetValue(static_cast<uint32_t>(row));
+        const int64_t localRowBase = (row - rowStart_) * rowWidth_;
+        const int64_t chunks = (rowWidth_ + ubLength_ - 1) / ubLength_;
+        for (int64_t c = 0; c < chunks; c++) {
+            const int64_t currentNum = (c == (chunks - 1)) ? (rowWidth_ - ubLength_ * c) : ubLength_;
+            const int64_t offset = localRowBase + c * ubLength_;
+            CopyInChunk(offset, currentNum);
+            ComputeChunk(gateScalar, currentNum);
+            CopyOutChunk(offset, currentNum);
+        }
     }
 }
 
 template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::CopyInRow(int64_t row)
+__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::CopyInChunk(int64_t offset, int64_t currentNum)
 {
     AscendC::LocalTensor<T> xLocal = inputQueueX.template AllocTensor<T>();
     AscendC::DataCopyExtParams p;
     p.blockCount = 1;
-    p.blockLen = rowWidth_ * sizeof(T);
+    p.blockLen = currentNum * sizeof(T);
     p.srcStride = 0;
     p.dstStride = 0;
     p.rsv = 0;
-    AscendC::DataCopyPad(xLocal, inputGMX[(row - rowStart_) * rowWidth_], p, {false, 0, 0, static_cast<T>(0)});
+    AscendC::DataCopyPad(xLocal, inputGMX[offset], p, {false, 0, 0, static_cast<T>(0)});
     inputQueueX.EnQue(xLocal);
 }
 
 template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ComputeRow(int64_t row, float gateScalar)
+__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ComputeChunk(float gateScalar, int64_t currentNum)
 {
     AscendC::LocalTensor<T> xLocal = inputQueueX.template DeQue<T>();
     AscendC::LocalTensor<T> zLocal = outputQueueZ.template AllocTensor<T>();
@@ -255,10 +269,15 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ComputeRow(int64_t row, float
     AscendC::LocalTensor<float> sig32 = sigRowBuf_.template AllocTensor<float>();
     AscendC::LocalTensor<float> z32 = z32Buf_.template AllocTensor<float>();
 
-    AscendC::Cast(x32, xLocal, RoundMode::CAST_NONE, rowWidth_);
-    AscendC::Duplicate(sig32, gateScalar, rowWidth_);
-    AscendC::Mul(z32, x32, sig32, rowWidth_);
-    AscendC::Cast(zLocal, z32, RoundMode::CAST_RINT, rowWidth_);
+    if constexpr (std::is_same_v<T, float>) {
+        AscendC::Duplicate(sig32, gateScalar, currentNum);
+        AscendC::Mul(zLocal, xLocal, sig32, currentNum);
+    } else {
+        AscendC::Cast(x32, xLocal, RoundMode::CAST_NONE, currentNum);
+        AscendC::Duplicate(sig32, gateScalar, currentNum);
+        AscendC::Mul(z32, x32, sig32, currentNum);
+        AscendC::Cast(zLocal, z32, RoundMode::CAST_RINT, currentNum);
+    }
 
     outputQueueZ.template EnQue<T>(zLocal);
     inputQueueX.FreeTensor(xLocal);
@@ -268,16 +287,16 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ComputeRow(int64_t row, float
 }
 
 template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::CopyOutRow(int64_t row)
+__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::CopyOutChunk(int64_t offset, int64_t currentNum)
 {
     AscendC::LocalTensor<T> zLocal = outputQueueZ.template DeQue<T>();
     AscendC::DataCopyExtParams p;
     p.blockCount = 1;
-    p.blockLen = rowWidth_ * sizeof(T);
+    p.blockLen = currentNum * sizeof(T);
     p.srcStride = 0;
     p.dstStride = 0;
     p.rsv = 0;
-    AscendC::DataCopyPad(outputGMZ[(row - rowStart_) * rowWidth_], zLocal, p);
+    AscendC::DataCopyPad(outputGMZ[offset], zLocal, p);
     outputQueueZ.FreeTensor(zLocal);
 }
 

@@ -24,7 +24,8 @@ static const std::initializer_list<op::DataType> AICORE_DTYPE_SUPPORT_LIST = {
 static bool IsAiCoreSupport(const aclTensor* x, const aclTensor* gate)
 {
     auto npuArch = GetCurrentPlatformInfo().GetCurNpuArch();
-    OP_CHECK(npuArch == NpuArch::DAV_2201 || npuArch == NpuArch::DAV_3510,
+    // Only arch22 (Ascend 910B / 910_93) kernels are registered; reject others.
+    OP_CHECK(npuArch == NpuArch::DAV_2201,
              OP_LOGE(ACLNN_ERR_PARAM_INVALID,
                      "SigmoidMul not supported on this platform: npuArch=%d.",
                      static_cast<int>(npuArch)),
@@ -38,8 +39,37 @@ static bool IsAiCoreSupport(const aclTensor* x, const aclTensor* gate)
     return true;
 }
 
+// The kernel only implements element-wise (same size) and trailing-dim-1
+// row broadcast; reject any other NumPy-style broadcast the infer would accept.
+static bool IsSupportedGateLayout(const op::Shape& xShape, const op::Shape& gateShape)
+{
+    const int64_t xSize = xShape.GetShapeSize();
+    const int64_t gSize = gateShape.GetShapeSize();
+    if (gSize == xSize) {
+        return true;
+    }
+    const size_t xRank = xShape.GetDimNum();
+    const size_t gRank = gateShape.GetDimNum();
+    if (xRank != gRank || xRank == 0) {
+        return false;
+    }
+    if (gateShape.GetDim(xRank - 1) != 1) {
+        return false;
+    }
+    for (size_t i = 0; i + 1 < xRank; i++) {
+        if (xShape.GetDim(i) != gateShape.GetDim(i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool SigmoidMulInferShape(const op::Shape& xShape, const op::Shape& gateShape, op::Shape& outShape)
 {
+    OP_CHECK(IsSupportedGateLayout(xShape, gateShape),
+             OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                     "SigmoidMul: unsupported gate layout (expect same-shape or trailing-dim-1 broadcast)."),
+             return false);
     OP_CHECK(BroadcastInferShape(xShape, gateShape, outShape),
              OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Shape broadcast failed."), return false);
     return true;
