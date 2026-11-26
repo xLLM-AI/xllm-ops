@@ -128,12 +128,24 @@ static ge::graphStatus SigmoidMulTilingFunc(gert::TilingContext* context)
     }
 
     if (isBroadcast) {
-        // rows split across cores; within a row, tile by ubCapacity
+        // rows split across cores; within a row, tile by a UB budget that also
+        // reserves space for this core's gate slice (inputQueueG + sigGateBuf).
         int64_t rows = CeilDiv(totalIdx, rowWidth);
         int64_t rowsPerCore = CeilDiv(rows, coreNum);
         usedCoreNum = (rows > coreNum) ? coreNum : rows;
         tiling->blockFactor = rowsPerCore;
-        tiling->ubFactor = (ubCapacity < rowWidth) ? ubCapacity : rowWidth;
+        int64_t typeBytes = (dataType == ge::DT_FLOAT) ? 4 : 2;
+        int64_t gateVecLen = ((rowsPerCore + 127) / 128) * 128;  // matches kernel gateVecLen_
+        int64_t gateBytes = gateVecLen * (typeBytes + 4);         // gate(T) + sigGate(fp32)
+        int64_t remain = static_cast<int64_t>(ubSize) - gateBytes;
+        if (remain < 0) {
+            remain = 0;
+        }
+        int64_t bcastCap = FloorAlign(FloorDiv(remain / bytesPerElem, bufNum), ubBlockSize);
+        if (bcastCap < ubBlockSize) {
+            bcastCap = ubBlockSize;
+        }
+        tiling->ubFactor = (bcastCap < rowWidth) ? bcastCap : rowWidth;
     } else {
         // flat element split across cores
         tiling->blockFactor = CeilAlign(CeilDiv(totalIdx, coreNum), ubBlockSize);

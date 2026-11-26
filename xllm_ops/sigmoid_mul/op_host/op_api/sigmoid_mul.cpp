@@ -39,21 +39,32 @@ static bool IsAiCoreSupport(const aclTensor* x, const aclTensor* gate)
     return true;
 }
 
-// The kernel only implements element-wise (same size) and trailing-dim-1
-// row broadcast; reject any other NumPy-style broadcast the infer would accept.
+static bool IsSameShape(const op::Shape& a, const op::Shape& b)
+{
+    if (a.GetDimNum() != b.GetDimNum()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.GetDimNum(); i++) {
+        if (a.GetDim(i) != b.GetDim(i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The kernel only implements element-wise (exact same shape) and row broadcast
+// (same rank, equal leading dims, gate trailing dim 1). Reject anything else
+// that NumPy-style BroadcastInferShape would otherwise accept.
 static bool IsSupportedGateLayout(const op::Shape& xShape, const op::Shape& gateShape)
 {
-    const int64_t xSize = xShape.GetShapeSize();
-    const int64_t gSize = gateShape.GetShapeSize();
-    if (gSize == xSize) {
+    if (IsSameShape(xShape, gateShape)) {
         return true;
     }
     const size_t xRank = xShape.GetDimNum();
-    const size_t gRank = gateShape.GetDimNum();
-    if (xRank != gRank || xRank == 0) {
+    if (xRank != gateShape.GetDimNum() || xRank == 0) {
         return false;
     }
-    if (gateShape.GetDim(xRank - 1) != 1) {
+    if (gateShape.GetDim(xRank - 1) != 1 || xShape.GetDim(xRank - 1) == 1) {
         return false;
     }
     for (size_t i = 0; i + 1 < xRank; i++) {

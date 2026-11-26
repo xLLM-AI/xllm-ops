@@ -61,6 +61,7 @@ private:
     int64_t gateVecLen_ = 0;  // rows_ padded up to a vector-safe multiple of 64
     int64_t rowsPerCore_ = 0;
     int64_t rowStart_ = 0;
+    int64_t coreRows_ = 0;    // number of gate rows owned by this core
     bool isBroadcast_ = false;
 };
 
@@ -79,7 +80,8 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::Init(GM_ADDR x, GM_ADDR gate,
         rowsPerCore_ = (rows_ + coreNum - 1) / coreNum;
         rowStart_ = coreIdx * rowsPerCore_;
         const int64_t rowEnd = (rowStart_ + rowsPerCore_ > rows_) ? rows_ : (rowStart_ + rowsPerCore_);
-        blockLength_ = (rowEnd - rowStart_) * rowWidth_;
+        coreRows_ = (rowEnd > rowStart_) ? (rowEnd - rowStart_) : 0;  // idle cores own 0 rows
+        blockLength_ = coreRows_ * rowWidth_;
         inputGMX.SetGlobalBuffer((__gm__ T*)x + rowStart_ * rowWidth_, blockLength_);
         inputGMG.SetGlobalBuffer((__gm__ T*)gate, rows_);
         outputGMZ.SetGlobalBuffer((__gm__ T*)y + rowStart_ * rowWidth_, blockLength_);
@@ -89,7 +91,10 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::Init(GM_ADDR x, GM_ADDR gate,
         pipe.InitBuffer(x32Buf_, BUFFER_NUM * ubLength_ * sizeof(float));
         pipe.InitBuffer(sigRowBuf_, BUFFER_NUM * ubLength_ * sizeof(float));
         pipe.InitBuffer(z32Buf_, BUFFER_NUM * ubLength_ * sizeof(float));
-        gateVecLen_ = ((rows_ + 127) / 128) * 128;  // vector-safe count for the gate sigmoid
+        gateVecLen_ = ((coreRows_ + 127) / 128) * 128;  // vector-safe count for this core's gate slice
+        if (gateVecLen_ < 128) {
+            gateVecLen_ = 128;  // keep InitBuffer sizes valid even for idle cores
+        }
         pipe.InitBuffer(inputQueueG, 1, gateVecLen_ * sizeof(T));
         pipe.InitBuffer(sigGateBuf_, gateVecLen_ * sizeof(float));
     } else {
@@ -202,17 +207,20 @@ template <typename T, int BUFFER_MODE>
 __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ProcessBroadcast()
 {
     const int64_t coreIdx = AscendC::GetBlockIdx();
+    if (coreRows_ <= 0) {
+        return;  // this core owns no rows (more cores than rows)
+    }
 
-    // Precompute sigmoid(gate[0..rows_)) once into fp32 using a TQue-backed bf16
-    // source (the same pattern as the verified flat path).
+    // Precompute sigmoid of this core's gate slice [rowStart_, rowStart_+coreRows_)
+    // once into fp32 using a TQue-backed source (same pattern as the flat path).
     AscendC::LocalTensor<T> gateAll = inputQueueG.template AllocTensor<T>();
     AscendC::DataCopyExtParams gp;
     gp.blockCount = 1;
-    gp.blockLen = rows_ * sizeof(T);
+    gp.blockLen = coreRows_ * sizeof(T);
     gp.srcStride = 0;
     gp.dstStride = 0;
     gp.rsv = 0;
-    AscendC::DataCopyPad(gateAll, inputGMG[0], gp, {false, 0, 0, static_cast<T>(0)});
+    AscendC::DataCopyPad(gateAll, inputGMG[rowStart_], gp, {false, 0, 0, static_cast<T>(0)});
     inputQueueG.EnQue(gateAll);
     AscendC::LocalTensor<T> gateIn = inputQueueG.template DeQue<T>();
     AscendC::LocalTensor<float> sigGate = sigGateBuf_.template AllocTensor<float>();
@@ -233,7 +241,7 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ProcessBroadcast()
         if (row >= rows_) {
             break;
         }
-        const float gateScalar = sigGate.GetValue(static_cast<uint32_t>(row));
+        const float gateScalar = sigGate.GetValue(static_cast<uint32_t>(row - rowStart_));
         const int64_t localRowBase = (row - rowStart_) * rowWidth_;
         const int64_t chunks = (rowWidth_ + ubLength_ - 1) / ubLength_;
         for (int64_t c = 0; c < chunks; c++) {
