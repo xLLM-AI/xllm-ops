@@ -1009,6 +1009,27 @@ at::Tensor ada_rms_norm_impl_npu(const at::Tensor& x,
   return out;
 }
 
+at::Tensor rms_norm_channels_impl_npu(const at::Tensor& value,
+                                      const at::Tensor& gamma,
+                                      double epsilon) {
+  // Channel-axis RMSNorm on a contiguous [B, C, T, H, W] tensor.
+  TORCH_CHECK(value.dim() == 5, "value must be 5D [B, C, T, H, W]");
+  TORCH_CHECK(gamma.dim() == 1, "gamma must be 1D");
+  TORCH_CHECK(value.size(1) == gamma.size(0),
+              "gamma numel must match the channel dimension");
+  TORCH_CHECK(value.scalar_type() == gamma.scalar_type(),
+              "value and gamma must have the same dtype");
+  TORCH_CHECK(value.is_contiguous(), "value must be contiguous");
+  TORCH_CHECK(gamma.is_contiguous(), "gamma must be contiguous");
+  TORCH_CHECK(std::isfinite(epsilon) && epsilon >= 0.0,
+              "eps must be finite and non-negative");
+  at::Tensor out = at::empty(value.sizes(), value.options());
+  if (value.numel() != 0) {
+    EXEC_NPU_CMD(aclnnRmsNormChannels, value, gamma, epsilon, out);
+  }
+  return out;
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> add_rms_norm_bias_impl_npu(
     const at::Tensor& x1,
     const at::Tensor& x2,
@@ -2757,6 +2778,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("x"), pybind11::arg("scale"), pybind11::arg("shift"),
         pybind11::arg("weight") = pybind11::none(),
         pybind11::arg("eps") = 1e-6);
+  m.def("rms_norm_channels", &rms_norm_channels_impl_npu, "rms_norm_channels",
+        pybind11::arg("value"), pybind11::arg("gamma"),
+        pybind11::arg("eps") = 1e-12);
   m.def("beam_search_rec_final_select",
         &beam_search_rec_final_select_impl_npu,
         "beam_search_rec_final_select");

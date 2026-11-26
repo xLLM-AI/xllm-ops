@@ -9,6 +9,11 @@ def ada_rms_norm_npu(x, scale, shift, weight=None, eps=1e-6):
     return custom_ops_lib.ada_rms_norm(x, scale, shift, weight, eps)
 
 
+# rms_norm_channels: channel-axis RMSNorm on a contiguous [B, C, T, H, W] tensor.
+def rms_norm_channels_npu(value, gamma, eps=1e-12):
+    return custom_ops_lib.rms_norm_channels(value, gamma, eps)
+
+
 # x_attention
 def x_attention_npu(query, key_cache, value_cache, unshared_key, unshared_value, actual_shared_kvlen, decode_step, 
                     shared_block_tables = None, 
