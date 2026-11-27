@@ -302,6 +302,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
 
     CUSTOM_OPS_ARRAY=(
         "ada_rms_norm"
+        "rms_norm_channels"
         "moe_init_routing_custom"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
