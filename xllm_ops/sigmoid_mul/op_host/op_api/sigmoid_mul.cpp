@@ -1,8 +1,8 @@
 /**
  * @file sigmoid_mul.cpp
- * @brief ACLNN L0 API implementation - SigmoidMul
+ * @brief ACLNN L0 API implementation - SigmoidMul (bf16, 2-D).
  *
- * out = x * sigmoid(gate); gate supports [B, W] or [B, 1] (broadcast).
+ * out = x * sigmoid(gate); gate is [M, N] (element-wise) or [M, 1] (row broadcast).
  */
 #include "sigmoid_mul.h"
 #include "opdev/op_log.h"
@@ -18,13 +18,12 @@ namespace l0op {
 OP_TYPE_REGISTER(SigmoidMul);
 
 static const std::initializer_list<op::DataType> AICORE_DTYPE_SUPPORT_LIST = {
-    DataType::DT_BF16, DataType::DT_FLOAT16, DataType::DT_FLOAT
+    DataType::DT_BF16
 };
 
 static bool IsAiCoreSupport(const aclTensor* x, const aclTensor* gate)
 {
     auto npuArch = GetCurrentPlatformInfo().GetCurNpuArch();
-    // Only arch22 (Ascend 910B / 910_93) kernels are registered; reject others.
     OP_CHECK(npuArch == NpuArch::DAV_2201,
              OP_LOGE(ACLNN_ERR_PARAM_INVALID,
                      "SigmoidMul not supported on this platform: npuArch=%d.",
@@ -33,53 +32,32 @@ static bool IsAiCoreSupport(const aclTensor* x, const aclTensor* gate)
     OP_CHECK(CheckType(x->GetDataType(), AICORE_DTYPE_SUPPORT_LIST) &&
              CheckType(gate->GetDataType(), AICORE_DTYPE_SUPPORT_LIST),
              OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                     "SigmoidMul not supported: dtype x=%d, gate=%d. Supported: BF16, FP16, FP32.",
+                     "SigmoidMul not supported: dtype x=%d, gate=%d. Supported: BF16.",
                      static_cast<int>(x->GetDataType()), static_cast<int>(gate->GetDataType())),
              return false);
     return true;
 }
 
-static bool IsSameShape(const op::Shape& a, const op::Shape& b)
-{
-    if (a.GetDimNum() != b.GetDimNum()) {
-        return false;
-    }
-    for (size_t i = 0; i < a.GetDimNum(); i++) {
-        if (a.GetDim(i) != b.GetDim(i)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// The kernel only implements element-wise (exact same shape) and row broadcast
-// (same rank, equal leading dims, gate trailing dim 1). Reject anything else
-// that NumPy-style BroadcastInferShape would otherwise accept.
+// Only 2-D element-wise (same shape) or trailing-dim-1 row broadcast [M, 1].
 static bool IsSupportedGateLayout(const op::Shape& xShape, const op::Shape& gateShape)
 {
-    if (IsSameShape(xShape, gateShape)) {
-        return true;
-    }
-    const size_t xRank = xShape.GetDimNum();
-    if (xRank != gateShape.GetDimNum() || xRank == 0) {
+    if (xShape.GetDimNum() != 2 || gateShape.GetDimNum() != 2) {
         return false;
     }
-    if (gateShape.GetDim(xRank - 1) != 1 || xShape.GetDim(xRank - 1) == 1) {
-        return false;
-    }
-    for (size_t i = 0; i + 1 < xRank; i++) {
-        if (xShape.GetDim(i) != gateShape.GetDim(i)) {
-            return false;
-        }
-    }
-    return true;
+    const int64_t M = xShape.GetDim(0);
+    const int64_t N = xShape.GetDim(1);
+    const int64_t gM = gateShape.GetDim(0);
+    const int64_t gN = gateShape.GetDim(1);
+    const bool sameShape = (M == gM && N == gN);
+    const bool rowBroadcast = (gN == 1 && gM == M);
+    return sameShape || rowBroadcast;
 }
 
 static bool SigmoidMulInferShape(const op::Shape& xShape, const op::Shape& gateShape, op::Shape& outShape)
 {
     OP_CHECK(IsSupportedGateLayout(xShape, gateShape),
              OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                     "SigmoidMul: unsupported gate layout (expect same-shape or trailing-dim-1 broadcast)."),
+                     "SigmoidMul: gate must be same shape as x or [M, 1] (2-D only)."),
              return false);
     OP_CHECK(BroadcastInferShape(xShape, gateShape, outShape),
              OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Shape broadcast failed."), return false);

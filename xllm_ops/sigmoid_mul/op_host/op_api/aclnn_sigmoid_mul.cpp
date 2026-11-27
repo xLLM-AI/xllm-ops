@@ -17,7 +17,7 @@ using namespace op;
 #define ACLNN_MAX_SHAPE_RANK 8
 
 static const std::initializer_list<op::DataType> AICORE_DTYPE_SUPPORT_LIST = {
-    DataType::DT_BF16, DataType::DT_FLOAT16, DataType::DT_FLOAT
+    DataType::DT_BF16
 };
 
 static bool IsDtypeSupported(DataType dtype)
@@ -44,7 +44,7 @@ static bool CheckDtypeValid(const aclTensor* x, const aclTensor* gate, const acl
     OP_CHECK_DTYPE_NOT_MATCH(out, x->GetDataType(), return false);
     OP_CHECK(IsDtypeSupported(x->GetDataType()),
              OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                     "Dtype not supported: dtype=%d. Supported: BF16, FP16, FP32.",
+                     "Dtype not supported: dtype=%d. Supported: BF16.",
                      static_cast<int>(x->GetDataType())),
              return false);
     return true;

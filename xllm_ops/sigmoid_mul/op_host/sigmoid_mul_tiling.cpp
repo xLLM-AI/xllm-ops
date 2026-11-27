@@ -1,6 +1,7 @@
 /*!
  * \file sigmoid_mul_tiling.cpp
- * \brief SigmoidMul tiling (arch22).
+ * \brief SigmoidMul tiling (arch22): 2-D bf16, two kernels selected by MODE
+ *        (0 flat element-wise, 1 [M,1] broadcast).
  */
 #include "register/op_def_registry.h"
 #include "op_common/log/log.h"
@@ -18,21 +19,11 @@ using Ops::Base::FloorAlign;
 using Ops::Base::GetUbBlockSize;
 
 constexpr size_t WORKSPACE_NUM = 1;
-constexpr int64_t MIN_SPLIT_THRESHOLD = 1024;
-
-static const gert::Shape g_vec_1_shape = {1};
-
-static inline const gert::Shape EnsureNotScalar(const gert::Shape& in_shape)
-{
-    if (in_shape.GetDimNum() == 0) {
-        return g_vec_1_shape;
-    }
-    return in_shape;
-}
+constexpr int64_t PER_CORE_FLOOR = 4096;    // flat: each core owns at least this many elements
+constexpr int64_t UB_BYTES_PER_ELEM = 18;   // bf16 x/gate/out (6 B) + fp32 xf/gf/zf (12 B)
 
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t* ubSize, int64_t* coreNum)
 {
-    // Platform is constant per process; cache after first query to avoid per-call cost.
     static uint64_t cachedUb = 0;
     static int64_t cachedCores = 0;
     if (cachedUb != 0 && cachedCores != 0) {
@@ -57,29 +48,38 @@ static ge::graphStatus GetShapeAttrsInfo(gert::TilingContext* context, int64_t* 
 {
     auto inputX = context->GetInputShape(0);
     OP_CHECK_NULL_WITH_CONTEXT(context, inputX);
-    auto inputShapeX = EnsureNotScalar(inputX->GetStorageShape());
     auto inputG = context->GetInputShape(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, inputG);
-    auto inputShapeG = EnsureNotScalar(inputG->GetStorageShape());
+    const gert::Shape& xShape = inputX->GetStorageShape();
+    const gert::Shape& gShape = inputG->GetStorageShape();
+    OP_CHECK_IF(xShape.GetDimNum() != 2, OP_LOGE(context, "SigmoidMul: x must be 2-D"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(gShape.GetDimNum() != 2, OP_LOGE(context, "SigmoidMul: gate must be 2-D"), return ge::GRAPH_FAILED);
 
-    *totalIdx = inputShapeX.GetShapeSize();
-    *rowWidth = inputShapeX.GetDim(inputShapeX.GetDimNum() - 1);
-    *isBroadcast = (inputShapeG.GetShapeSize() != *totalIdx) ? 1 : 0;
+    *totalIdx = xShape.GetShapeSize();
+    *rowWidth = xShape.GetDim(1);
+    const int64_t gateSize = gShape.GetShapeSize();
+    *isBroadcast = (gateSize != *totalIdx) ? 1 : 0;
+    if (*isBroadcast) {
+        OP_CHECK_IF(!(gShape.GetDim(1) == 1 && gShape.GetDim(0) == xShape.GetDim(0)),
+                    OP_LOGE(context, "SigmoidMul: broadcast gate must be [M, 1]"), return ge::GRAPH_FAILED);
+    } else {
+        OP_CHECK_IF(!(gShape.GetDim(0) == xShape.GetDim(0) && gShape.GetDim(1) == xShape.GetDim(1)),
+                    OP_LOGE(context, "SigmoidMul: element-wise gate must match x shape"), return ge::GRAPH_FAILED);
+    }
 
-    const std::set<ge::DataType> supportedDtype = {ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT};
     auto inputDesc = context->GetInputDesc(0);
     OP_CHECK_NULL_WITH_CONTEXT(context, inputDesc);
     *dataType = inputDesc->GetDataType();
-    OP_CHECK_IF(supportedDtype.count(*dataType) == 0, OP_LOGE(context, "invalid dtype"),
+    OP_CHECK_IF(*dataType != ge::DT_BF16, OP_LOGE(context, "SigmoidMul: only bf16 supported"),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus GetWorkspaceSize(gert::TilingContext* context)
 {
-    size_t* currentWorkspace = context->GetWorkspaceSizes(WORKSPACE_NUM);
-    OP_CHECK_NULL_WITH_CONTEXT(context, currentWorkspace);
-    currentWorkspace[0] = 0;
+    size_t* ws = context->GetWorkspaceSizes(WORKSPACE_NUM);
+    OP_CHECK_NULL_WITH_CONTEXT(context, ws);
+    ws[0] = 0;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -96,7 +96,6 @@ static ge::graphStatus SigmoidMulTilingFunc(gert::TilingContext* context)
     ge::DataType dataType;
     OP_CHECK_IF(GetShapeAttrsInfo(context, &totalIdx, &rowWidth, &isBroadcast, &dataType) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context, "GetShapeAttrsInfo error"), return ge::GRAPH_FAILED);
-
     OP_CHECK_IF(GetWorkspaceSize(context) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context, "GetWorkspaceSize error"), return ge::GRAPH_FAILED);
 
@@ -104,53 +103,48 @@ static ge::graphStatus SigmoidMulTilingFunc(gert::TilingContext* context)
     OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
     OP_CHECK_IF(memset_s(tiling, sizeof(SigmoidMulTilingData), 0, sizeof(SigmoidMulTilingData)) != EOK,
                 OP_LOGE(context, "set tiling data error"), return ge::GRAPH_FAILED);
-
     tiling->totalNum = totalIdx;
     tiling->rowWidth = rowWidth;
     tiling->isBroadcast = isBroadcast;
+    const uint32_t useDoubleBuffer = (totalIdx > 1024) ? 1u : 0u;
 
     if (totalIdx == 0) {
         context->SetBlockDim(1);
-        ASCENDC_TPL_SEL_PARAM(context, static_cast<uint32_t>(dataType), 0);
+        ASCENDC_TPL_SEL_PARAM(context, static_cast<uint32_t>(dataType), useDoubleBuffer);
         return ge::GRAPH_SUCCESS;
     }
 
-    int64_t ubBlockSize = Ops::Base::GetUbBlockSize(context);
-    int64_t usedCoreNum;
-    uint32_t useDoubleBuffer = (totalIdx > MIN_SPLIT_THRESHOLD) ? 1 : 0;
-    int64_t bufNum = useDoubleBuffer ? 2 : 1;
-    // UB bytes per element for one buffer set: x(T)+gate(T)+x32+g32+z32+out(T).
-    // 2-byte dtype -> 18; 4-byte dtype (fp32) -> 24.
-    int64_t bytesPerElem = (dataType == ge::DT_FLOAT) ? 24 : 18;
-    int64_t ubCapacity = FloorAlign(FloorDiv(static_cast<int64_t>(ubSize) / bytesPerElem, bufNum), ubBlockSize);
-    if (ubCapacity < ubBlockSize) {
-        ubCapacity = ubBlockSize;
+    const int64_t ubBlock = Ops::Base::GetUbBlockSize(context);
+    const int64_t bufNum = useDoubleBuffer ? 2 : 1;
+    int64_t ubCapacity = FloorAlign(FloorDiv(static_cast<int64_t>(ubSize) / UB_BYTES_PER_ELEM, bufNum), ubBlock);
+    if (ubCapacity < ubBlock) {
+        ubCapacity = ubBlock;
     }
 
+    int64_t usedCoreNum;
     if (isBroadcast) {
-        // rows split across cores; within a row, tile by a UB budget that also
-        // reserves space for this core's gate slice (inputQueueG + sigGateBuf).
-        int64_t rows = CeilDiv(totalIdx, rowWidth);
-        int64_t rowsPerCore = CeilDiv(rows, coreNum);
-        usedCoreNum = (rows > coreNum) ? coreNum : rows;
+        const int64_t rows = totalIdx / rowWidth;
+        int64_t blockDim = (rows < coreNum) ? rows : coreNum;
+        if (blockDim < 1) {
+            blockDim = 1;
+        }
+        const int64_t rowsPerCore = CeilDiv(rows, blockDim);
         tiling->blockFactor = rowsPerCore;
-        int64_t typeBytes = (dataType == ge::DT_FLOAT) ? 4 : 2;
-        int64_t gateVecLen = ((rowsPerCore + 127) / 128) * 128;  // matches kernel gateVecLen_
-        int64_t gateBytes = gateVecLen * (typeBytes + 4);         // gate(T) + sigGate(fp32)
-        int64_t remain = static_cast<int64_t>(ubSize) - gateBytes;
-        if (remain < 0) {
-            remain = 0;
-        }
-        int64_t bcastCap = FloorAlign(FloorDiv(remain / bytesPerElem, bufNum), ubBlockSize);
-        if (bcastCap < ubBlockSize) {
-            bcastCap = ubBlockSize;
-        }
-        tiling->ubFactor = (bcastCap < rowWidth) ? bcastCap : rowWidth;
+        usedCoreNum = CeilDiv(rows, rowsPerCore);
+        int64_t tile = (ubCapacity < rowWidth) ? ubCapacity : rowWidth;
+        tiling->ubFactor = (tile < ubBlock) ? ubBlock : tile;
     } else {
-        // flat element split across cores
-        tiling->blockFactor = CeilAlign(CeilDiv(totalIdx, coreNum), ubBlockSize);
+        int64_t blockDim = CeilDiv(totalIdx, PER_CORE_FLOOR);
+        if (blockDim > coreNum) {
+            blockDim = coreNum;
+        }
+        if (blockDim < 1) {
+            blockDim = 1;
+        }
+        tiling->blockFactor = CeilAlign(CeilDiv(totalIdx, blockDim), ubBlock);
         usedCoreNum = CeilDiv(totalIdx, tiling->blockFactor);
-        tiling->ubFactor = ubCapacity;
+        int64_t tile = (ubCapacity < tiling->blockFactor) ? ubCapacity : tiling->blockFactor;
+        tiling->ubFactor = (tile < ubBlock) ? ubBlock : tile;
     }
 
     context->SetBlockDim(usedCoreNum);
