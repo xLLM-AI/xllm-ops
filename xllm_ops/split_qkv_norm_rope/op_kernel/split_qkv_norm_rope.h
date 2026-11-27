@@ -28,7 +28,6 @@ using namespace AscendC;
 
 constexpr uint32_t kHeadDim = 128;           // default D; runtime D from tiling
 constexpr uint32_t kHalfDim = kHeadDim / 2;
-constexpr uint32_t kMaxHeads = 64;           // Nq+Nk upper bound (sumsq buffer)
 constexpr uint32_t kTokenTile = 8;           // default tile rows; host picks 8/4/2/1 by UB budget
 
 constexpr uint32_t kFlagGqaExpand = 1u << 0;       // expand k/v to Nq heads
@@ -456,7 +455,7 @@ public:
         const uint32_t gammaElems = (halfDim_ < 64) ? 128u : headDim_;
         pipe_->InitBuffer(bufGammaQ_, gammaElems * sizeof(float));
         pipe_->InitBuffer(bufGammaK_, gammaElems * sizeof(float));
-        pipe_->InitBuffer(bufSum_, tileRows_ * kMaxHeads * sizeof(float));
+        pipe_->InitBuffer(bufSum_, tileRows_ * (numHeadQ_ + numHeadK_) * sizeof(float));  // runtime Nq+Nk
 
         // per-core token range
         const uint32_t blockIdx = AscendC::GetBlockIdx();

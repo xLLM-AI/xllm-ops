@@ -47,7 +47,7 @@ inline uint32_t RoundUp(uint32_t value, uint32_t align)
 
 // UB 需求（与 kernel 侧 InitBuffer 一致）；headDim 由调用方传入（从 q_gamma 推导）
 uint64_t CalcUbNeed(uint32_t tile, uint32_t padStride, uint32_t ropeStride, uint32_t headTotal,
-                    uint32_t headDim, uint32_t elemBytes)
+                    uint32_t qkHeads, uint32_t headDim, uint32_t elemBytes)
 {
     uint64_t need = static_cast<uint64_t>(tile) * 2 *
                     (static_cast<uint64_t>(padStride) * elemBytes +
@@ -56,7 +56,7 @@ uint64_t CalcUbNeed(uint32_t tile, uint32_t padStride, uint32_t ropeStride, uint
     // gamma fp32：D=64/96 走 HalfMasked 模板，buffer 放宽到 128 float（半区双窗口布局）；其余按 D
     const uint64_t gammaElems = (headDim / 2 < 64) ? 128ull : static_cast<uint64_t>(headDim);
     need += 2ull * headDim * elemBytes + 2ull * gammaElems * 4;            // inGamma ×2 + gamma fp32 ×2
-    need += static_cast<uint64_t>(tile) * SQNR_MAX_HEADS * 4;              // sumsq
+    need += static_cast<uint64_t>(tile) * qkHeads * 4;                      // sumsq (runtime head count)
     return need;
 }
 }  // namespace
@@ -213,7 +213,7 @@ static ge::graphStatus Tiling4SplitQkvNormRope(gert::TilingContext *context)
     // 按 UB 预算从大到小挑 tile 行数：行数越大越能摊薄每 tile 的固定开销
     uint32_t tokenTile = 0;
     for (uint32_t cand = SQNR_TOKEN_TILE; cand >= 1; cand >>= 1) {
-        if (CalcUbNeed(cand, padStride, ropeStride, headTotal, headDim, elemBytes) <= ubSize) {
+        if (CalcUbNeed(cand, padStride, ropeStride, headTotal, qkHeads, headDim, elemBytes) <= ubSize) {
             tokenTile = cand;
             break;
         }

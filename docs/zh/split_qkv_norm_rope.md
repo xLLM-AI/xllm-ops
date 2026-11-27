@@ -144,13 +144,14 @@ aclnnStatus aclnnSplitQkvNormRope(
 | `kv_interleaved` | Bool | false | 要求 `Nv == Nk`（当前恒成立）；数据必须与所选布局一致 | 输入行内 KV 是否按 head 交错 `[K_i,V_i]`（JoyOV2 `to_qkv` 的打包方式） |
 | `rope_dim` | Int | 0 | `0`；或 `D >= 128` 时 `rope_dim ∈ (0, D]` 且 `% 128 == 0`（`D=128` 时仅 `0/128`，等价全旋转）；`D = 64/96` 时仅 `0`（= `head_dim` 全旋转，无部分 rope） | 参与 NeoX 旋转的维度数，`0` = 全 `head_dim` 旋转；其余维度直通 |
 
-> 头数上限 `Nq + Nk <= 64` 来自 `sumsq` workspace 的容量（`kMaxHeads`）；
-> 更大的头数即使放开该常量，也会被 UB 预算拒绝。`tokenTile` 不在属性里暴露，
+> 头数上限 `Nq + Nk <= 128`（同时 `Nq <= 128`、`Nk <= 128`）。`sumsq` workspace
+> 按运行期 `Nq + Nk` 分配，不再使用固定 64 上界；UB 预算按实际头数核算，
+> 头数过大时 `tokenTile` 自动下调。`tokenTile` 不在属性里暴露，
 > 由 host 按 UB 自动选择，见 “Tiling” 一节。
 
 约束（host 侧校验，失败返回 `ACLNN_ERR_PARAM_INVALID`；完整清单见 “符号与形状”）：
 
-- `stride >= (Nq+2*Nk)*D`、`ropeStride ∈ [D/2, D]` 且 16 对齐、`Nq % Nk == 0`、`Nq+Nk <= 64`；
+- `stride >= (Nq+2*Nk)*D`、`ropeStride ∈ [D/2, D]` 且 16 对齐、`Nq % Nk == 0`、`Nq+Nk <= 128`；
 - `D` 由 `q_gamma` 形状推导（单一来源），`q_gamma`/`k_gamma` rank-1 且维度一致；当前支持 `D ∈ {64, 96, 128, 256}`；
 - `rope_dim` 为 0，或 `D >= 128` 时满足 `0 < rope_dim <= D` 且 `% 128 == 0`（64-lane pair 对齐）；
   `D = 64/96` 时仅允许 `rope_dim == head_dim`（HalfMasked 路径只做全旋转），否则参数错误；
@@ -169,7 +170,7 @@ aclnnStatus aclnnSplitQkvNormRope(
   `D=64/96` 半区不足 64 lane，走编译期 `kHalfMasked` 模板实例（`UpdateMask` 计数掩码 +
   前/后半各一 64-lane 窗口，官方 arch35 `HalfAlignVF` 范式），`D >= 128` 实例零回退；
 - dtype 只支持 2 字节（bf16/fp16），fp32 未支持；
-- 头数上限 `Nq+Nk <= 64`，更大头数受 `sumsq` workspace 与 UB 双重约束；
+- 头数上限 `Nq+Nk <= 128`，`sumsq` workspace 按运行期头数分配，更大头数受 UB 预算约束；
 - `kv_interleaved` 仅在 `Nv == Nk` 时有定义，两者互斥规则待 `Nv` 泛化时显式校验。
 
 已知问题（aclnn eager 路径，待框架修复）：
