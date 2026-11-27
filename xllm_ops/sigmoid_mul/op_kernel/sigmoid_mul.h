@@ -163,9 +163,6 @@ __aicore__ inline void SigmoidMul<T, MODE>::ComputeFlat(int64_t currentNum)
     AscendC::LocalTensor<T> xLocal = inputQueueX.template DeQue<T>();
     AscendC::LocalTensor<T> gLocal = inputQueueG.template DeQue<T>();
     AscendC::LocalTensor<T> zLocal = outputQueueZ.template AllocTensor<T>();
-    AscendC::LocalTensor<float> x32 = x32Buf_.template AllocTensor<float>();
-    AscendC::LocalTensor<float> g32 = g32Buf_.template AllocTensor<float>();
-    AscendC::LocalTensor<float> z32 = z32Buf_.template AllocTensor<float>();
 
     // Pad the compute count to a vector-safe multiple of 128; only `currentNum`
     // elements are copied out, so short tails are still computed correctly.
@@ -173,20 +170,25 @@ __aicore__ inline void SigmoidMul<T, MODE>::ComputeFlat(int64_t currentNum)
     if constexpr (std::is_same_v<T, float>) {
         AscendC::Sigmoid(gLocal, gLocal, vlen);
         AscendC::Mul(zLocal, xLocal, gLocal, vlen);
+        inputQueueX.FreeTensor(xLocal);  // free inputs as soon as they are consumed
+        inputQueueG.FreeTensor(gLocal);
     } else {
+        AscendC::LocalTensor<float> x32 = x32Buf_.template AllocTensor<float>();
+        AscendC::LocalTensor<float> g32 = g32Buf_.template AllocTensor<float>();
+        AscendC::LocalTensor<float> z32 = z32Buf_.template AllocTensor<float>();
         AscendC::Cast(x32, xLocal, RoundMode::CAST_NONE, vlen);
         AscendC::Cast(g32, gLocal, RoundMode::CAST_NONE, vlen);
+        inputQueueX.FreeTensor(xLocal);  // inputs consumed by the casts
+        inputQueueG.FreeTensor(gLocal);
         AscendC::Sigmoid(g32, g32, vlen);
         AscendC::Mul(z32, x32, g32, vlen);
+        x32Buf_.FreeTensor(x32);         // scratch consumed by the mul
+        g32Buf_.FreeTensor(g32);
         AscendC::Cast(zLocal, z32, RoundMode::CAST_RINT, vlen);
+        z32Buf_.FreeTensor(z32);
     }
 
     outputQueueZ.template EnQue<T>(zLocal);
-    inputQueueX.FreeTensor(xLocal);
-    inputQueueG.FreeTensor(gLocal);
-    x32Buf_.FreeTensor(x32);
-    g32Buf_.FreeTensor(g32);
-    z32Buf_.FreeTensor(z32);
 }
 
 template <typename T, int MODE>
@@ -232,12 +234,12 @@ __aicore__ inline void SigmoidMul<T, MODE>::ProcessBroadcast()
     } else {
         AscendC::Cast(sigGate, gateIn, RoundMode::CAST_NONE, gateVecLen_);
     }
+    inputQueueG.FreeTensor(gateIn);  // gate input consumed by the cast/copy
     AscendC::Sigmoid(sigGate, sigGate, gateVecLen_);
     // V -> S sync so scalar reads below observe the sigmoid result.
     event_t eid = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
     AscendC::SetFlag<AscendC::HardEvent::V_S>(eid);
     AscendC::WaitFlag<AscendC::HardEvent::V_S>(eid);
-    inputQueueG.FreeTensor(gateIn);
 
     for (int64_t r = 0; r < rowsPerCore_; r++) {
         const int64_t row = coreIdx * rowsPerCore_ + r;
@@ -255,6 +257,7 @@ __aicore__ inline void SigmoidMul<T, MODE>::ProcessBroadcast()
             CopyOutChunk(offset, currentNum);
         }
     }
+    sigGateBuf_.FreeTensor(sigGate);  // sigmoid table consumed by the last row
 }
 
 template <typename T, int MODE>
@@ -276,25 +279,28 @@ __aicore__ inline void SigmoidMul<T, MODE>::ComputeChunk(float gateScalar, int64
 {
     AscendC::LocalTensor<T> xLocal = inputQueueX.template DeQue<T>();
     AscendC::LocalTensor<T> zLocal = outputQueueZ.template AllocTensor<T>();
-    AscendC::LocalTensor<float> x32 = x32Buf_.template AllocTensor<float>();
-    AscendC::LocalTensor<float> sig32 = sigRowBuf_.template AllocTensor<float>();
-    AscendC::LocalTensor<float> z32 = z32Buf_.template AllocTensor<float>();
 
     if constexpr (std::is_same_v<T, float>) {
+        AscendC::LocalTensor<float> sig32 = sigRowBuf_.template AllocTensor<float>();
         AscendC::Duplicate(sig32, gateScalar, currentNum);
         AscendC::Mul(zLocal, xLocal, sig32, currentNum);
+        inputQueueX.FreeTensor(xLocal);  // input consumed
+        sigRowBuf_.FreeTensor(sig32);
     } else {
+        AscendC::LocalTensor<float> x32 = x32Buf_.template AllocTensor<float>();
+        AscendC::LocalTensor<float> sig32 = sigRowBuf_.template AllocTensor<float>();
+        AscendC::LocalTensor<float> z32 = z32Buf_.template AllocTensor<float>();
         AscendC::Cast(x32, xLocal, RoundMode::CAST_NONE, currentNum);
+        inputQueueX.FreeTensor(xLocal);  // input consumed by the cast
         AscendC::Duplicate(sig32, gateScalar, currentNum);
         AscendC::Mul(z32, x32, sig32, currentNum);
+        x32Buf_.FreeTensor(x32);
+        sigRowBuf_.FreeTensor(sig32);
         AscendC::Cast(zLocal, z32, RoundMode::CAST_RINT, currentNum);
+        z32Buf_.FreeTensor(z32);
     }
 
     outputQueueZ.template EnQue<T>(zLocal);
-    inputQueueX.FreeTensor(xLocal);
-    x32Buf_.FreeTensor(x32);
-    sigRowBuf_.FreeTensor(sig32);
-    z32Buf_.FreeTensor(z32);
 }
 
 template <typename T, int MODE>
