@@ -48,6 +48,9 @@ static bool IsSupportedGateLayout(const op::Shape& xShape, const op::Shape& gate
     const int64_t N = xShape.GetDim(1);
     const int64_t gM = gateShape.GetDim(0);
     const int64_t gN = gateShape.GetDim(1);
+    if (N != 2048) {
+        return false;  // tail dim is strictly 2048
+    }
     const bool sameShape = (M == gM && N == gN);
     const bool rowBroadcast = (gN == 1 && gM == M);
     return sameShape || rowBroadcast;

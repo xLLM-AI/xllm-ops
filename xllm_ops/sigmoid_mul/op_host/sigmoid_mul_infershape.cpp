@@ -32,6 +32,9 @@ static ge::graphStatus InferShape4SigmoidMul(gert::InferShapeContext* context)
     OP_CHECK_IF(!(sameShape || rowBroadcast),
                 OP_LOGE(context, "SigmoidMul: gate must be same shape as x or [M, 1]"),
                 return ge::GRAPH_FAILED);
+    // Tail dim is strictly 2048 (allow unknown -1 only in dynamic rank/shape graphs).
+    OP_CHECK_IF(N >= 0 && N != 2048, OP_LOGE(context, "SigmoidMul: tail dim N must be 2048"),
+                return ge::GRAPH_FAILED);
 
     // Output always follows x.
     *outShape = *xShape;
