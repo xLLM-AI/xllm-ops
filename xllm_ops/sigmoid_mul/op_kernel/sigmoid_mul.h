@@ -28,6 +28,10 @@ namespace SigmoidMulKernel {
 using namespace AscendC;
 
 constexpr int64_t kPipeDepth = 2;
+// AscendC::Sigmoid needs a scratch buffer for the dividend, and it loops internally
+// when that buffer is smaller than calCount. Keep it fixed: sizing it with the tile
+// would grow the UB budget with the tile size for no gain.
+constexpr int64_t kSigmoidTmpElems = 2048;
 
 template <typename T>
 class KernelSigmoidMul {
@@ -60,6 +64,8 @@ public:
         pipe_.InitBuffer(outQue_, kPipeDepth, tileLen_ * sizeof(T));
         pipe_.InitBuffer(sigmoidBuf_, tileLen_ * sizeof(float));
         pipe_.InitBuffer(yBuf_, tileLen_ * sizeof(float));
+        int64_t sigmoidTmpElems = tileLen_ < kSigmoidTmpElems ? tileLen_ : kSigmoidTmpElems;
+        pipe_.InitBuffer(sigmoidTmpBuf_, sigmoidTmpElems * sizeof(float));
     }
 
     // One tile ahead: the MTE2 copy of tile t+1 overlaps the vector work of tile t,
@@ -119,13 +125,11 @@ private:
         Cast(y, b, RoundMode::CAST_NONE, count);
         inQue2_.FreeTensor(b);
 
-        // sigmoid(x1) = 1 / (1 + exp(-x1)) in fp32; bf16 has no native exp.
+        // sigmoid(x1) in fp32. Use the library entry point rather than a hand-rolled
+        // 1/(1+exp(-x)) so the rounding matches the reference op exactly.
         Cast(sigmoid, a, RoundMode::CAST_NONE, count);
         inQue1_.FreeTensor(a);
-        Muls(sigmoid, sigmoid, static_cast<float>(-1.0), count);
-        Exp(sigmoid, sigmoid, static_cast<int32_t>(count));
-        Adds(sigmoid, sigmoid, static_cast<float>(1.0), count);
-        Reciprocal(sigmoid, sigmoid, count);
+        Sigmoid<float, true>(sigmoid, sigmoid, sigmoidTmpBuf_.Get<uint8_t>(), count);
         Mul(y, y, sigmoid, count);
 
         LocalTensor<T> o = outQue_.AllocTensor<T>();
@@ -152,6 +156,7 @@ private:
     TQue<QuePosition::VECIN, kPipeDepth> inQue2_;
     TQue<QuePosition::VECOUT, kPipeDepth> outQue_;
     TBuf<QuePosition::VECCALC> sigmoidBuf_;
+    TBuf<QuePosition::VECCALC> sigmoidTmpBuf_;
     TBuf<QuePosition::VECCALC> yBuf_;
     GlobalTensor<T> gmX1_;
     GlobalTensor<T> gmX2_;

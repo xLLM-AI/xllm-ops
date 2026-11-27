@@ -38,12 +38,21 @@ single unkeyed binary and the runtime rejects the launch with `ACLNN_ERR_RUNTIME
   exactly that tile (and stays on the aligned fast copy path) instead of allocating the full
   8K-element working set for a few hundred elements.
 - UB budget: 20 B/element — `x1`/`x2`/`out` double-buffered bf16 (12 B) plus two fp32 scratch
-  buffers (8 B). With 196 KB UB the tile settles at 8192 elements.
+  buffers (8 B) — plus a fixed 8 KB scratch for `AscendC::Sigmoid`. With 196 KB UB the tile
+  settles at 8192 elements.
 - Software pipeline: the MTE2 copy-in of tile `t+1` overlaps the vector work of tile `t`, and the
   MTE3 store of tile `t` overlaps the vector work of tile `t+1`.
 - `x2` is lifted to fp32 first and its VECIN slot is released immediately (`FreeTensor` before the
-  sigmoid sequence), so the MTE2 side gets the buffer back a full sigmoid sequence early. The
+  sigmoid runs), so the MTE2 side gets the buffer back a full sigmoid sequence early. The
   multiply also stays in fp32, keeping the only rounding at the final cast to bf16.
+- The sigmoid is `AscendC::Sigmoid` on fp32 rather than a hand-rolled
+  `1/(1+exp(-x))`. At source level the library issues
+  `Muls(-1) → Exp → Adds(1) → Duplicate(1) → Div`, but on this target `Div(1, x)` lowers to
+  the same `vrec` as `Reciprocal` and the `Duplicate` is folded away, so the emitted kernel is
+  byte-identical to the manual chain (`VMULS / VEXP / VADDS / VREC`). Verified by disassembling
+  the object and by md5 equality between the two builds, so the switch cannot change rounding.
+  It needs a dividend scratch buffer, but the API loops internally when that buffer is smaller
+  than `calCount`, so a fixed 8 KB is used and the tile does not shrink.
 - Tails that are not tile-aligned go through `DataCopyPad`, so arbitrary `N` (and `M`) work even
   though only 1024/2048/4096 are tuned.
 
@@ -53,9 +62,9 @@ single unkeyed binary and the runtime rejects the launch with `ACLNN_ERR_RUNTIME
   per-core element floor and `M`), so no row is ever split between cores and `x1` never needs
   cross-core reduction.
 - Each core first computes the sigmoid of its whole row range in one pass — up to 512 rows
-  (`kRowChunk`) at a time, bf16 `x1` cast to fp32 and pushed through
-  `Muls(-1) → Exp → Adds(1) → Reciprocal` once per row — into a UB fp32 scalar table. A
-  `SetFlag/WaitFlag<HardEvent::V_S>` pair makes those values visible to scalar reads.
+  (`kRowChunk`) at a time, bf16 `x1` cast to fp32 then handed to `AscendC::Sigmoid` — into a UB
+  fp32 scalar table. A `SetFlag/WaitFlag<HardEvent::V_S>` pair makes those values visible to
+  scalar reads.
 - Then the rows are flattened into a single tile sequence `(row, tile) -> index` and streamed with
   prefetch-one-ahead, so the copy-in of the next tile overlaps compute across a row boundary
   instead of draining the pipeline at every row end. Tiles that straddle nothing are full
@@ -64,7 +73,8 @@ single unkeyed binary and the runtime rejects the launch with `ACLNN_ERR_RUNTIME
   `Muls(f, f, s)`, cast back to bf16. Because the sigmoid is a scalar multiply, the broadcast
   costs one scalar read per tile, not an fp32 sigmoid per element.
 - UB budget: 12 B/element — `x2`/`out` double-buffered bf16 (8 B) plus one fp32 `x2` scratch
-  (4 B), and the only extra allocation is the 512-row fp32 sigmoid table (2 KB).
+  (4 B), and the only extra allocation is the 512-row fp32 sigmoid table plus its `Sigmoid`
+  scratch (2 KB each).
 
 ## Build
 
@@ -142,6 +152,11 @@ Accuracy: `max_rel = 6.55e-3`, `max_abs = 8.98e-3`, 0 elements outside bf16 tole
 (`1x1`, `1x7`, `1x255`, `1x256`, `3x1000`, `5x257`, `17x2049`, `127x4097`, `255x1023`,
 `2049x1024`, `8193x2048`) plus the broadcast unaligned ones (`5x257(b)`, `16x257(b)`,
 `16x1000(b)`, `17x2049(b)`, `255x1023(b)`).
+
+The op's bf16 sigmoid differs from `aclnnSigmoid` by at most 1 bf16 ULP on ~18 % of elements
+(measured with `x2 = 1` over 8.7 M elements, inputs spanning [-20, 20]); that residual comes from
+the built-in op's own path, not from a rounding choice here — both the library call and the manual
+chain emit the same instructions.
 
 Large shapes hit ~2.5 TB/s of effective HBM traffic, i.e. the same ceiling as the unfused pair, and
 the fused/unfused ratio converges to the 5 B/3 B traffic ratio (1.67x).

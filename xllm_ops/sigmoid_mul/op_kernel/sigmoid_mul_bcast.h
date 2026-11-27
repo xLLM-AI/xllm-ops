@@ -29,6 +29,7 @@ using namespace AscendC;
 
 constexpr int64_t kPipeDepth = 2;
 // Rows whose sigmoid is computed in one vector pass before the row loop consumes them.
+// Also the largest calCount handed to AscendC::Sigmoid, so it sizes the scratch buffer.
 constexpr int64_t kRowChunk = 512;
 
 template <typename T>
@@ -58,6 +59,7 @@ public:
 
         pipe_.InitBuffer(x1Que_, 1, kRowChunk * sizeof(T));
         pipe_.InitBuffer(sigBuf_, kRowChunk * sizeof(float));
+        pipe_.InitBuffer(sigTmpBuf_, kRowChunk * sizeof(float));
         pipe_.InitBuffer(x2Que_, kPipeDepth, tileLen_ * sizeof(T));
         pipe_.InitBuffer(outQue_, kPipeDepth, tileLen_ * sizeof(T));
         pipe_.InitBuffer(x2fBuf_, tileLen_ * sizeof(float));
@@ -120,10 +122,7 @@ private:
         uint32_t n = static_cast<uint32_t>(chunkRows);
         Cast(sig, in, RoundMode::CAST_NONE, n);
         x1Que_.FreeTensor(in);
-        Muls(sig, sig, static_cast<float>(-1.0), n);
-        Exp(sig, sig, static_cast<int32_t>(n));
-        Adds(sig, sig, static_cast<float>(1.0), n);
-        Reciprocal(sig, sig, n);
+        Sigmoid<float, true>(sig, sig, sigTmpBuf_.Get<uint8_t>(), n);
 
         // The row loop reads these through the scalar unit.
         SetFlag<HardEvent::V_S>(EVENT_ID0);
@@ -184,6 +183,7 @@ private:
     TQue<QuePosition::VECIN, kPipeDepth> x2Que_;
     TQue<QuePosition::VECOUT, kPipeDepth> outQue_;
     TBuf<QuePosition::VECCALC> sigBuf_;
+    TBuf<QuePosition::VECCALC> sigTmpBuf_;
     TBuf<QuePosition::VECCALC> x2fBuf_;
     GlobalTensor<T> gmX1_;
     GlobalTensor<T> gmX2_;
