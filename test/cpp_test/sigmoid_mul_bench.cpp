@@ -3,12 +3,12 @@
 //     bf16 tolerance rtol=1/64 atol=1/256.
 //   - accuracy (relative): fused out vs unfused aclnnSigmoid + aclnnMul result.
 //   - perf: fused aclnnSigmoidMul vs unfused aclnnSigmoid + aclnnMul (re-plan/call).
+// aclnn status codes are checked; the bench exits non-zero on any failure.
 // Build (example):
 //   OPP=<opp>/vendors/<vendor>; A=$ASCEND_HOME_PATH/aarch64-linux
 //   g++ -O2 -std=c++17 sigmoid_mul_bench.cpp -o sigmoid_mul_bench \
 //     -I$OPP/op_api/include -I$A/include -L$A/lib64 -L$OPP/op_api/lib \
 //     -lcust_opapi -lopapi -lnnopbase -lascendcl -lpthread
-// Run: LD_LIBRARY_PATH=$OPP/op_api/lib:$A/lib64 ./sigmoid_mul_bench
 
 #include <cstdio>
 #include <cstdint>
@@ -26,8 +26,10 @@ static float bf2f(uint16_t v){uint32_t b=(uint32_t)v<<16;float f;memcpy(&f,&b,4)
 static aclTensor* mk(std::vector<int64_t> sh, void* p){std::vector<int64_t> st(sh.size(),1);for(int i=(int)sh.size()-2;i>=0;i--)st[i]=sh[i+1]*st[i+1];return aclCreateTensor(sh.data(),sh.size(),ACL_BF16,st.data(),0,ACL_FORMAT_ND,sh.data(),sh.size(),p);}
 struct D{aclTensor* t;void* p;uint64_t b;};
 static D alloc(std::vector<int64_t> sh){D r;int64_t n=1;for(auto d:sh)n*=d;r.b=n*2;aclrtMalloc(&r.p,r.b,ACL_MEM_MALLOC_NORMAL_ONLY);r.t=mk(sh,r.p);return r;}
-static void sigmul(aclTensor*x,aclTensor*g,aclTensor*out,aclrtStream s,void*wb){uint64_t w=0;aclOpExecutor*e=nullptr;aclnnSigmoidMulGetWorkspaceSize(x,g,out,&w,&e);aclnnSigmoidMul(wb,w,e,s);}
-static void sig_mul(aclTensor*x,aclTensor*g,aclTensor*out,aclTensor*sig,aclrtStream s,void*wb){uint64_t w=0;aclOpExecutor*e=nullptr;aclnnSigmoidGetWorkspaceSize(g,sig,&w,&e);aclnnSigmoid(wb,w,e,s);aclnnMulGetWorkspaceSize(x,sig,out,&w,&e);aclnnMul(wb,w,e,s);}
+static int g_err=0;
+#define STCHK(st,what) do{ if((st)!=ACL_SUCCESS){printf("[ERR] %s -> %d\n",what,(int)(st)); g_err=1;} }while(0)
+static void sigmul(aclTensor*x,aclTensor*g,aclTensor*out,aclrtStream s,void*wb){uint64_t w=0;aclOpExecutor*e=nullptr;STCHK(aclnnSigmoidMulGetWorkspaceSize(x,g,out,&w,&e),"aclnnSigmoidMulGetWorkspaceSize");STCHK(aclnnSigmoidMul(wb,w,e,s),"aclnnSigmoidMul");}
+static void sig_mul(aclTensor*x,aclTensor*g,aclTensor*out,aclTensor*sig,aclrtStream s,void*wb){uint64_t w=0;aclOpExecutor*e=nullptr;STCHK(aclnnSigmoidGetWorkspaceSize(g,sig,&w,&e),"aclnnSigmoidGetWorkspaceSize");STCHK(aclnnSigmoid(wb,w,e,s),"aclnnSigmoid");STCHK(aclnnMulGetWorkspaceSize(x,sig,out,&w,&e),"aclnnMulGetWorkspaceSize");STCHK(aclnnMul(wb,w,e,s),"aclnnMul");}
 template<class F> static double timed(F f,aclrtStream s,int it,int warm,int rep){for(int i=0;i<warm;i++)f();aclrtSynchronizeStream(s);double best=1e18;for(int r=0;r<rep;r++){aclrtEvent a,b;aclrtCreateEvent(&a);aclrtCreateEvent(&b);aclrtSynchronizeStream(s);aclrtRecordEvent(a,s);for(int i=0;i<it;i++)f();aclrtRecordEvent(b,s);aclrtSynchronizeStream(s);float ms;aclrtEventElapsedTime(&ms,a,b);best=std::min(best,(double)ms*1000/it);aclrtDestroyEvent(a);aclrtDestroyEvent(b);}return best;}
 int main(){
   CK(aclInit(nullptr));CK(aclrtSetDevice(0));aclrtStream s=nullptr;CK(aclrtCreateStream(&s));void*wb=nullptr;CK(aclrtMalloc(&wb,8u<<20,ACL_MEM_MALLOC_NORMAL_ONLY));
@@ -69,5 +71,6 @@ int main(){
     snprintf(a2,sizeof(a2),"MERE=%.1e MARE=%.1e bad=%ld",m2,x2,b2);
     printf("%-16s %8.2fus %7.2fus %6.2fx | %-24s | %-24s\n",c.n,tu,tf,tu/tf,a1,a2);
   }
+  if(g_err){printf("\nBENCH FAILED: an aclnn call returned an error\n");return 1;}
   aclrtDestroyStream(s);aclrtResetDevice(0);aclFinalize();return 0;
 }

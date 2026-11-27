@@ -29,6 +29,10 @@ static ge::graphStatus InferShape4SigmoidMul(gert::InferShapeContext* context)
     const int64_t gN = gateShape->GetDim(1);
     // Treat an unknown dim (<0, e.g. -1 in dynamic graphs) as compatible.
     auto dimEq = [](int64_t a, int64_t b) { return a < 0 || b < 0 || a == b; };
+    // A known gate width must be 1 (row broadcast) or 2048; reject others even
+    // when x's trailing dim is dynamic.
+    OP_CHECK_IF(gN >= 0 && gN != 1 && gN != 2048,
+                OP_LOGE(context, "SigmoidMul: known gate width must be 1 or 2048"), return ge::GRAPH_FAILED);
     const bool sameShape = (dimEq(M, gM) && dimEq(N, gN));
     const bool rowBroadcast = (gN == 1 && dimEq(M, gM));
     OP_CHECK_IF(!(sameShape || rowBroadcast),

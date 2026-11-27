@@ -118,10 +118,13 @@ static ge::graphStatus SigmoidMulTilingFunc(gert::TilingContext* context)
     }
 
     const int64_t ubBlock = Ops::Base::GetUbBlockSize(context);
+    // The kernel pads the vector compute and buffer sizes to 128 elements, so
+    // budget the UB capacity at 128-element alignment to avoid over-committing UB.
+    const int64_t VEC_ALIGN = 128;
     const int64_t bufNum = 2;
-    int64_t ubCapacity = FloorAlign(FloorDiv(static_cast<int64_t>(ubSize) / UB_BYTES_PER_ELEM, bufNum), ubBlock);
-    if (ubCapacity < ubBlock) {
-        ubCapacity = ubBlock;
+    int64_t ubCapacity = FloorAlign(FloorDiv(static_cast<int64_t>(ubSize) / UB_BYTES_PER_ELEM, bufNum), VEC_ALIGN);
+    if (ubCapacity < VEC_ALIGN) {
+        ubCapacity = VEC_ALIGN;
     }
 
     int64_t usedCoreNum;
@@ -144,10 +147,10 @@ static ge::graphStatus SigmoidMulTilingFunc(gert::TilingContext* context)
         if (blockDim < 1) {
             blockDim = 1;
         }
-        tiling->blockFactor = CeilAlign(CeilDiv(totalIdx, blockDim), ubBlock);
+        tiling->blockFactor = CeilAlign(CeilDiv(totalIdx, blockDim), VEC_ALIGN);
         usedCoreNum = CeilDiv(totalIdx, tiling->blockFactor);
         int64_t tile = (ubCapacity < tiling->blockFactor) ? ubCapacity : tiling->blockFactor;
-        tiling->ubFactor = (tile < ubBlock) ? ubBlock : tile;
+        tiling->ubFactor = (tile < VEC_ALIGN) ? VEC_ALIGN : tile;
     }
 
     context->SetBlockDim(usedCoreNum);

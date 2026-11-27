@@ -131,6 +131,9 @@ __aicore__ inline void SigmoidMul<T, MODE>::Process()
 template <typename T, int MODE>
 __aicore__ inline void SigmoidMul<T, MODE>::ProcessFlat()
 {
+    if (blockLength_ <= 0) {
+        return;  // no elements for this core (empty tensor or extra core)
+    }
     int64_t loopCount = (blockLength_ + ubLength_ - 1) / ubLength_;
     for (int64_t i = 0; i < loopCount; i++) {
         int64_t currentNum = (i == (loopCount - 1)) ? (blockLength_ - ubLength_ * i) : ubLength_;
