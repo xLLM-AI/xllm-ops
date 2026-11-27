@@ -20,9 +20,9 @@ namespace NsSigmoidMul {
 
 using namespace AscendC;
 
-template <typename T, int BUFFER_MODE>
+template <typename T, int MODE>
 class SigmoidMul {
-    static constexpr int32_t BUFFER_NUM = BUFFER_MODE ? 2 : 1;
+    static constexpr int32_t BUFFER_NUM = 2;
 
 public:
     __aicore__ inline SigmoidMul() {}
@@ -65,8 +65,8 @@ private:
     bool isBroadcast_ = false;
 };
 
-template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::Init(GM_ADDR x, GM_ADDR gate, GM_ADDR y,
+template <typename T, int MODE>
+__aicore__ inline void SigmoidMul<T, MODE>::Init(GM_ADDR x, GM_ADDR gate, GM_ADDR y,
     const SigmoidMulTilingData* tilingData)
 {
     isBroadcast_ = (tilingData->isBroadcast != 0);
@@ -75,7 +75,7 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::Init(GM_ADDR x, GM_ADDR gate,
     const int64_t coreIdx = AscendC::GetBlockIdx();
     const int64_t coreNum = AscendC::GetBlockNum();
 
-    if (isBroadcast_) {
+    if constexpr (MODE == 1) {
         rows_ = tilingData->totalNum / tilingData->rowWidth;
         rowsPerCore_ = (rows_ + coreNum - 1) / coreNum;
         rowStart_ = coreIdx * rowsPerCore_;
@@ -114,10 +114,10 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::Init(GM_ADDR x, GM_ADDR gate,
     }
 }
 
-template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::Process()
+template <typename T, int MODE>
+__aicore__ inline void SigmoidMul<T, MODE>::Process()
 {
-    if (isBroadcast_) {
+    if constexpr (MODE == 1) {
         ProcessBroadcast();
     } else {
         ProcessFlat();
@@ -127,8 +127,8 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::Process()
 // ---------------------------------------------------------------------------
 // Flat mode: gate has the same element count as x.
 // ---------------------------------------------------------------------------
-template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ProcessFlat()
+template <typename T, int MODE>
+__aicore__ inline void SigmoidMul<T, MODE>::ProcessFlat()
 {
     int64_t loopCount = (blockLength_ + ubLength_ - 1) / ubLength_;
     for (int64_t i = 0; i < loopCount; i++) {
@@ -139,8 +139,8 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ProcessFlat()
     }
 }
 
-template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::CopyInFlat(int64_t progress, int64_t currentNum)
+template <typename T, int MODE>
+__aicore__ inline void SigmoidMul<T, MODE>::CopyInFlat(int64_t progress, int64_t currentNum)
 {
     AscendC::LocalTensor<T> xLocal = inputQueueX.template AllocTensor<T>();
     AscendC::LocalTensor<T> gLocal = inputQueueG.template AllocTensor<T>();
@@ -156,8 +156,8 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::CopyInFlat(int64_t progress, 
     inputQueueG.EnQue(gLocal);
 }
 
-template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ComputeFlat(int64_t currentNum)
+template <typename T, int MODE>
+__aicore__ inline void SigmoidMul<T, MODE>::ComputeFlat(int64_t currentNum)
 {
     AscendC::LocalTensor<T> xLocal = inputQueueX.template DeQue<T>();
     AscendC::LocalTensor<T> gLocal = inputQueueG.template DeQue<T>();
@@ -186,8 +186,8 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ComputeFlat(int64_t currentNu
     z32Buf_.FreeTensor(z32);
 }
 
-template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::CopyOutFlat(int64_t progress, int64_t currentNum)
+template <typename T, int MODE>
+__aicore__ inline void SigmoidMul<T, MODE>::CopyOutFlat(int64_t progress, int64_t currentNum)
 {
     AscendC::LocalTensor<T> zLocal = outputQueueZ.template DeQue<T>();
     AscendC::DataCopyExtParams copyParams;
@@ -203,8 +203,8 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::CopyOutFlat(int64_t progress,
 // ---------------------------------------------------------------------------
 // Broadcast mode: gate is [.., 1]; each core owns a set of rows.
 // ---------------------------------------------------------------------------
-template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ProcessBroadcast()
+template <typename T, int MODE>
+__aicore__ inline void SigmoidMul<T, MODE>::ProcessBroadcast()
 {
     const int64_t coreIdx = AscendC::GetBlockIdx();
     if (coreRows_ <= 0) {
@@ -254,8 +254,8 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ProcessBroadcast()
     }
 }
 
-template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::CopyInChunk(int64_t offset, int64_t currentNum)
+template <typename T, int MODE>
+__aicore__ inline void SigmoidMul<T, MODE>::CopyInChunk(int64_t offset, int64_t currentNum)
 {
     AscendC::LocalTensor<T> xLocal = inputQueueX.template AllocTensor<T>();
     AscendC::DataCopyExtParams p;
@@ -268,8 +268,8 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::CopyInChunk(int64_t offset, i
     inputQueueX.EnQue(xLocal);
 }
 
-template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ComputeChunk(float gateScalar, int64_t currentNum)
+template <typename T, int MODE>
+__aicore__ inline void SigmoidMul<T, MODE>::ComputeChunk(float gateScalar, int64_t currentNum)
 {
     AscendC::LocalTensor<T> xLocal = inputQueueX.template DeQue<T>();
     AscendC::LocalTensor<T> zLocal = outputQueueZ.template AllocTensor<T>();
@@ -294,8 +294,8 @@ __aicore__ inline void SigmoidMul<T, BUFFER_MODE>::ComputeChunk(float gateScalar
     z32Buf_.FreeTensor(z32);
 }
 
-template <typename T, int BUFFER_MODE>
-__aicore__ inline void SigmoidMul<T, BUFFER_MODE>::CopyOutChunk(int64_t offset, int64_t currentNum)
+template <typename T, int MODE>
+__aicore__ inline void SigmoidMul<T, MODE>::CopyOutChunk(int64_t offset, int64_t currentNum)
 {
     AscendC::LocalTensor<T> zLocal = outputQueueZ.template DeQue<T>();
     AscendC::DataCopyExtParams p;

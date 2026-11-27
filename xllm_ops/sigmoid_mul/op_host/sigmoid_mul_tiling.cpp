@@ -106,16 +106,15 @@ static ge::graphStatus SigmoidMulTilingFunc(gert::TilingContext* context)
     tiling->totalNum = totalIdx;
     tiling->rowWidth = rowWidth;
     tiling->isBroadcast = isBroadcast;
-    const uint32_t useDoubleBuffer = (totalIdx > 1024) ? 1u : 0u;
 
     if (totalIdx == 0) {
         context->SetBlockDim(1);
-        ASCENDC_TPL_SEL_PARAM(context, static_cast<uint32_t>(dataType), useDoubleBuffer);
+        ASCENDC_TPL_SEL_PARAM(context, static_cast<uint32_t>(dataType), static_cast<uint32_t>(isBroadcast));
         return ge::GRAPH_SUCCESS;
     }
 
     const int64_t ubBlock = Ops::Base::GetUbBlockSize(context);
-    const int64_t bufNum = useDoubleBuffer ? 2 : 1;
+    const int64_t bufNum = 2;
     int64_t ubCapacity = FloorAlign(FloorDiv(static_cast<int64_t>(ubSize) / UB_BYTES_PER_ELEM, bufNum), ubBlock);
     if (ubCapacity < ubBlock) {
         ubCapacity = ubBlock;
@@ -148,7 +147,7 @@ static ge::graphStatus SigmoidMulTilingFunc(gert::TilingContext* context)
     }
 
     context->SetBlockDim(usedCoreNum);
-    ASCENDC_TPL_SEL_PARAM(context, static_cast<uint32_t>(dataType), useDoubleBuffer);
+    ASCENDC_TPL_SEL_PARAM(context, static_cast<uint32_t>(dataType), static_cast<uint32_t>(isBroadcast));
     return ge::GRAPH_SUCCESS;
 }
 
