@@ -1,6 +1,6 @@
 /**
  * @file aclnn_sigmoid_mul.cpp
- * @brief ACLNN L2 API implementation - SigmoidMul
+ * @brief ACLNN L2 API implementation - SigmoidMul (bf16, 2-D, tail 2048).
  */
 #include "aclnn_sigmoid_mul.h"
 #include "sigmoid_mul.h"
@@ -15,6 +15,7 @@
 using namespace op;
 
 #define ACLNN_MAX_SHAPE_RANK 8
+#define SIGMOID_MUL_TAIL 2048
 
 static const std::initializer_list<op::DataType> AICORE_DTYPE_SUPPORT_LIST = {
     DataType::DT_BF16
@@ -63,27 +64,40 @@ static bool CheckFormat(const aclTensor* x, const aclTensor* gate, const aclTens
     return true;
 }
 
-static bool CheckShape(const aclTensor* x, const aclTensor* gate, const aclTensor* out)
+// Contract: 2-D tensors, tail dim == 2048, gate same-shape or [M,1], out == x shape.
+// Validated here (before the empty shortcut and before dispatch) so unsupported
+// shapes surface as ACLNN_ERR_PARAM_INVALID instead of an internal error.
+static bool CheckContract(const aclTensor* x, const aclTensor* gate, const aclTensor* out)
 {
-    OP_CHECK_MAX_DIM(x, ACLNN_MAX_SHAPE_RANK, return false);
-    OP_CHECK_MAX_DIM(gate, ACLNN_MAX_SHAPE_RANK, return false);
-    OP_CHECK_MAX_DIM(out, ACLNN_MAX_SHAPE_RANK, return false);
+    const auto& xs = x->GetViewShape();
+    const auto& gs = gate->GetViewShape();
+    const auto& os = out->GetViewShape();
+    OP_CHECK(xs.GetDimNum() == 2 && gs.GetDimNum() == 2 && os.GetDimNum() == 2,
+             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "SigmoidMul: only 2-D tensors supported"), return false);
+    const int64_t M = xs.GetDim(0);
+    const int64_t N = xs.GetDim(1);
+    OP_CHECK(N == SIGMOID_MUL_TAIL,
+             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "SigmoidMul: tail dim N must be 2048, got %ld", N),
+             return false);
+    const int64_t gM = gs.GetDim(0);
+    const int64_t gN = gs.GetDim(1);
+    const bool sameShape = (gM == M && gN == N);
+    const bool rowBroadcast = (gN == 1 && gM == M);
+    OP_CHECK(sameShape || rowBroadcast,
+             OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                     "SigmoidMul: gate must be same shape as x or [M,1]"), return false);
+    OP_CHECK(os.GetDim(0) == M && os.GetDim(1) == N,
+             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "SigmoidMul: out shape must equal x shape"),
+             return false);
     return true;
 }
 
 static aclnnStatus CheckParams(const aclTensor* x, const aclTensor* gate, const aclTensor* out)
 {
     CHECK_COND(CheckNotNull(x, gate, out), ACLNN_ERR_PARAM_NULLPTR, "CheckNotNull failed");
-    CHECK_COND(CheckDtypeValid(x, gate, out), ACLNN_ERR_PARAM_INVALID,
-               "CheckDtypeValid failed: x_dtype=%d, gate_dtype=%d, out_dtype=%d",
-               static_cast<int>(x->GetDataType()), static_cast<int>(gate->GetDataType()),
-               static_cast<int>(out->GetDataType()));
-    CHECK_COND(CheckFormat(x, gate, out), ACLNN_ERR_PARAM_INVALID,
-               "CheckFormat failed");
-    CHECK_COND(CheckShape(x, gate, out), ACLNN_ERR_PARAM_INVALID,
-               "CheckShape failed: x_dim=%zu, gate_dim=%zu, out_dim=%zu",
-               x->GetViewShape().GetDimNum(), gate->GetViewShape().GetDimNum(),
-               out->GetViewShape().GetDimNum());
+    CHECK_COND(CheckDtypeValid(x, gate, out), ACLNN_ERR_PARAM_INVALID, "CheckDtypeValid failed");
+    CHECK_COND(CheckFormat(x, gate, out), ACLNN_ERR_PARAM_INVALID, "CheckFormat failed");
+    CHECK_COND(CheckContract(x, gate, out), ACLNN_ERR_PARAM_INVALID, "CheckContract failed");
     return ACLNN_SUCCESS;
 }
 
@@ -95,6 +109,9 @@ extern "C" aclnnStatus aclnnSigmoidMulGetWorkspaceSize(
     aclOpExecutor** executor)
 {
     L2_DFX_PHASE_1(aclnnSigmoidMul, DFX_IN(x, gate), DFX_OUT(out));
+
+    CHECK_COND(workspaceSize != nullptr, ACLNN_ERR_PARAM_NULLPTR, "workspaceSize is null");
+    CHECK_COND(executor != nullptr, ACLNN_ERR_PARAM_NULLPTR, "executor is null");
 
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);

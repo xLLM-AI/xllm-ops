@@ -10,7 +10,7 @@ endif()
 add_ops_compile_options(
     OP_NAME SigmoidMul
     OPTIONS
-        --cce-auto-sync=off
+        --cce-auto-sync=on
         -Wno-deprecated-declarations
         -Wno-error
 )

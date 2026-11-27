@@ -31,7 +31,7 @@ public:
         OpAICoreConfig cfg;
         cfg.DynamicCompileStaticFlag(true)
             .DynamicFormatFlag(false)
-            .DynamicRankSupportFlag(true)
+            .DynamicRankSupportFlag(false)   // infer-shape requires exactly 2-D
             .DynamicShapeSupportFlag(true)
             .NeedCheckSupportFlag(false)
             .PrecisionReduceFlag(true);

@@ -105,12 +105,13 @@ __aicore__ inline void SigmoidMul<T, MODE>::Init(GM_ADDR x, GM_ADDR gate, GM_ADD
         inputGMX.SetGlobalBuffer((__gm__ T*)x + offset, blockLength_);
         inputGMG.SetGlobalBuffer((__gm__ T*)gate + offset, blockLength_);
         outputGMZ.SetGlobalBuffer((__gm__ T*)y + offset, blockLength_);
-        pipe.InitBuffer(inputQueueX, BUFFER_NUM, ubLength_ * sizeof(T));
-        pipe.InitBuffer(inputQueueG, BUFFER_NUM, ubLength_ * sizeof(T));
-        pipe.InitBuffer(outputQueueZ, BUFFER_NUM, ubLength_ * sizeof(T));
-        pipe.InitBuffer(x32Buf_, BUFFER_NUM * ubLength_ * sizeof(float));
-        pipe.InitBuffer(g32Buf_, BUFFER_NUM * ubLength_ * sizeof(float));
-        pipe.InitBuffer(z32Buf_, BUFFER_NUM * ubLength_ * sizeof(float));
+        const int64_t bufLen = ((ubLength_ + 127) / 128) * 128;  // 128-elem aligned tiles
+        pipe.InitBuffer(inputQueueX, BUFFER_NUM, bufLen * sizeof(T));
+        pipe.InitBuffer(inputQueueG, BUFFER_NUM, bufLen * sizeof(T));
+        pipe.InitBuffer(outputQueueZ, BUFFER_NUM, bufLen * sizeof(T));
+        pipe.InitBuffer(x32Buf_, BUFFER_NUM * bufLen * sizeof(float));
+        pipe.InitBuffer(g32Buf_, BUFFER_NUM * bufLen * sizeof(float));
+        pipe.InitBuffer(z32Buf_, BUFFER_NUM * bufLen * sizeof(float));
     }
 }
 
@@ -166,16 +167,18 @@ __aicore__ inline void SigmoidMul<T, MODE>::ComputeFlat(int64_t currentNum)
     AscendC::LocalTensor<float> g32 = g32Buf_.template AllocTensor<float>();
     AscendC::LocalTensor<float> z32 = z32Buf_.template AllocTensor<float>();
 
+    // Pad the compute count to a vector-safe multiple of 128; only `currentNum`
+    // elements are copied out, so short tails are still computed correctly.
+    const int64_t vlen = ((currentNum + 127) / 128) * 128;
     if constexpr (std::is_same_v<T, float>) {
-        // fp32 inputs need no promotion/cast.
-        AscendC::Sigmoid(gLocal, gLocal, currentNum);
-        AscendC::Mul(zLocal, xLocal, gLocal, currentNum);
+        AscendC::Sigmoid(gLocal, gLocal, vlen);
+        AscendC::Mul(zLocal, xLocal, gLocal, vlen);
     } else {
-        AscendC::Cast(x32, xLocal, RoundMode::CAST_NONE, currentNum);
-        AscendC::Cast(g32, gLocal, RoundMode::CAST_NONE, currentNum);
-        AscendC::Sigmoid(g32, g32, currentNum);
-        AscendC::Mul(z32, x32, g32, currentNum);
-        AscendC::Cast(zLocal, z32, RoundMode::CAST_RINT, currentNum);
+        AscendC::Cast(x32, xLocal, RoundMode::CAST_NONE, vlen);
+        AscendC::Cast(g32, gLocal, RoundMode::CAST_NONE, vlen);
+        AscendC::Sigmoid(g32, g32, vlen);
+        AscendC::Mul(z32, x32, g32, vlen);
+        AscendC::Cast(zLocal, z32, RoundMode::CAST_RINT, vlen);
     }
 
     outputQueueZ.template EnQue<T>(zLocal);

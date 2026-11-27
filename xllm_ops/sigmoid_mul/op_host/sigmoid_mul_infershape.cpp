@@ -27,12 +27,14 @@ static ge::graphStatus InferShape4SigmoidMul(gert::InferShapeContext* context)
     const int64_t N = xShape->GetDim(1);
     const int64_t gM = gateShape->GetDim(0);
     const int64_t gN = gateShape->GetDim(1);
-    const bool sameShape = (M == gM && N == gN);
-    const bool rowBroadcast = (gN == 1 && gM == M);
+    // Treat an unknown dim (<0, e.g. -1 in dynamic graphs) as compatible.
+    auto dimEq = [](int64_t a, int64_t b) { return a < 0 || b < 0 || a == b; };
+    const bool sameShape = (dimEq(M, gM) && dimEq(N, gN));
+    const bool rowBroadcast = (gN == 1 && dimEq(M, gM));
     OP_CHECK_IF(!(sameShape || rowBroadcast),
                 OP_LOGE(context, "SigmoidMul: gate must be same shape as x or [M, 1]"),
                 return ge::GRAPH_FAILED);
-    // Tail dim is strictly 2048 (allow unknown -1 only in dynamic rank/shape graphs).
+    // Tail dim is 2048 (unknown N allowed here; tiling enforces 2048 at runtime).
     OP_CHECK_IF(N >= 0 && N != 2048, OP_LOGE(context, "SigmoidMul: tail dim N must be 2048"),
                 return ge::GRAPH_FAILED);
 

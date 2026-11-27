@@ -57,10 +57,10 @@ static ge::graphStatus GetShapeAttrsInfo(gert::TilingContext* context, int64_t* 
 
     *totalIdx = xShape.GetShapeSize();
     *rowWidth = xShape.GetDim(1);
-    const int64_t gateSize = gShape.GetShapeSize();
-    *isBroadcast = (gateSize != *totalIdx) ? 1 : 0;
+    // Classify by dimensions (robust for empty tensors where both sizes are 0).
+    *isBroadcast = (gShape.GetDim(1) == 1) ? 1 : 0;
     if (*isBroadcast) {
-        OP_CHECK_IF(!(gShape.GetDim(1) == 1 && gShape.GetDim(0) == xShape.GetDim(0)),
+        OP_CHECK_IF(gShape.GetDim(0) != xShape.GetDim(0),
                     OP_LOGE(context, "SigmoidMul: broadcast gate must be [M, 1]"), return ge::GRAPH_FAILED);
     } else {
         OP_CHECK_IF(!(gShape.GetDim(0) == xShape.GetDim(0) && gShape.GetDim(1) == xShape.GetDim(1)),
@@ -110,6 +110,8 @@ static ge::graphStatus SigmoidMulTilingFunc(gert::TilingContext* context)
     tiling->isBroadcast = isBroadcast;
 
     if (totalIdx == 0) {
+        tiling->blockFactor = 1;
+        tiling->ubFactor = 2048;  // keep InitBuffer sizes valid for the empty launch
         context->SetBlockDim(1);
         ASCENDC_TPL_SEL_PARAM(context, static_cast<uint32_t>(dataType), static_cast<uint32_t>(isBroadcast));
         return ge::GRAPH_SUCCESS;
