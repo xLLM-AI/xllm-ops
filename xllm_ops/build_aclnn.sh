@@ -263,6 +263,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "rec_constrained_top_k"
         "laser_attention"
         "layer_norm_fwd"
+        "sigmoid_mul"
     )
     CANN_TOOLKIT_VERSION="$(get_cann_toolkit_version || true)"
     if [[ "${CANN_TOOLKIT_VERSION}" =~ ^([0-9]+)\.([0-9]+) ]]; then
