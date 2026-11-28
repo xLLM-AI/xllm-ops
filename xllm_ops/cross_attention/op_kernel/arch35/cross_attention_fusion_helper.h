@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 // Ascend950 native CV entry: all workspace offsets are relative to the user region.
+// The kernel classes live in namespace ca (FA2 online softmax implementation).
 #ifndef CROSS_ATTN_ARCH35_FUSION_HELPER_H
 #define CROSS_ATTN_ARCH35_FUSION_HELPER_H
 
@@ -26,7 +27,7 @@ __aicore__ inline void CallCrossAttentionArch35(GM_ADDR query, GM_ADDR key, GM_A
 {
     static_assert(AscendC::IsSameType<TABLE_T, int32_t>::value, "block_table must be int32");
     static_assert(AscendC::IsSameType<KVLEN_T, int64_t>::value, "actual_kv_lens must be int64");
-    Xllm::CrossAttentionAiv<INPUT_T> op;
+    ca::CrossAttentionAiv<INPUT_T> op;
     op.Init(tilingDataPtr, attnOut, actualKvLens, workspace);
     op.Process();
 }
@@ -37,7 +38,7 @@ __aicore__ inline void CallCrossAttentionArch35Aic(GM_ADDR query, GM_ADDR key, G
 {
     static_assert(AscendC::IsSameType<TABLE_T, int32_t>::value, "block_table must be int32");
     static_assert(AscendC::IsSameType<KVLEN_T, int64_t>::value, "actual_kv_lens must be int64");
-    Xllm::CrossAttentionAic<INPUT_T> op;
+    ca::CrossAttentionAic<INPUT_T> op;
     op.Init(tilingDataPtr, query, key, value, blockTable, actualKvLens, workspace);
     op.Process();
 }

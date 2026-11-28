@@ -1,41 +1,33 @@
-/* Copyright 2026 The xLLM Authors. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    https://gitcode.com/xLLM-AI/xllm_ops/blob/main/LICENSE
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-==============================================================================*/
-
 /**
- * CrossAttention kernel body: AIC (QK / PV) and AIV (softmax / normalisation).
+ * CrossAttention kernel 主体：AIC（QK / PV）与 AIV（softmax / 归一化）。
  *
- * CV direct connect: S / P / O never go through GM staging.
- *   QK: the cube result stays in L0C and is fixpipe'd straight into each AIV sub's UB (S ring)
- *   softmax: AIV computes exp(s - m) in UB with RegBase (__VEC_SCOPE__ + RegTensor) and writes P
- *            from UB into the L1 A1 ring slot (CopyUbufToCbuf, row major to NZ fractal)
- *   PV: cube loads the A1 ring slot straight into L0A; O accumulates in L0C across beats and is
- *       fixpipe'd into both subs' UB once per task, then normalised and written back to GM
- * Beat pipeline, one KV tile per beat:
- *   AIC pre-issues QK one S ring deep, then runs PV beat by beat (driven by P_READY)
- *   AIV runs softmax beat by beat; the P ring is CA_P_RING deep and P_FREE recycles the L1 slots
- * Numerics: m is computed once per task from the beat 0 block maximum and reused, so no rescale is
- *   needed; l accumulates element-wise in UB and is reduced per row at the end of the task.
+ * M2 形态：CV 直通，S / P / PV 全部不走 GM staging。
+ *   QK：cube 结果留在 L0C，直接 Fixpipe 进两个 AIV sub 各自的 UB（S 环）
+ *   softmax：AIV 用 RegBase（__VEC_SCOPE__ + RegTensor）在 UB 里做 online 折叠
+ *            （gm=max(gm,块最大)，dm=exp(gm_old-gm_new)，P=exp(s*scale-gm)），
+ *            P 直接 UB -> L1 的 A1 环槽（CopyUbufToCbuf，行主序转 NZ 分形）
+ *   PV：cube 从 L1 的 A1 环槽直接 LoadData 到 L0A；每拍的 PV 单独出 L0C，
+ *       逐拍 Fixpipe 进两个 sub 的 UB（PV 环），AIV 隔拍合并
+ *       O_run = O_run * dm + PV；任务末 out = O_run / lsum 写回 GM
+ * beat 流水（每个 KV tile 一个 beat）：
+ *   AIC 按 CA_S_RING 分块预发射 QK，再逐拍 PV（P_READY 驱动）+ PV Fixpipe（PV_READY 驱动）
+ *   AIV 逐拍 softmax，P 环 CA_P_RING 深，靠 P_FREE 回收 L1 槽；
+ *   PV 环 CA_PV_RING 深，靠 PV_FREE 回收 UB 槽
+ * 数值口径：online softmax（对齐 A3 / FlashAttention 的 running-max 合并）——
+ *   每行维护运行最大 gm 与行和 lsum，逐拍 lsum = lsum * dm + 本拍行和；
+ *   O_run 逐拍 O_run = O_run * dm + PV。exp 自变量恒 <= 0，无上钳截断误差。
  */
-#ifndef CROSS_ATTENTION_KERNEL_H
-#define CROSS_ATTENTION_KERNEL_H
+#ifndef CROSS_ATTN_ARCH35_FUSION_KERNEL_H
+#define CROSS_ATTN_ARCH35_FUSION_KERNEL_H
 
 #include "kernel_operator.h"
 #include "cross_attention_common.h"
 
-namespace Xllm {
+namespace ca {
 
+// arch35 侧 tiling 结构定义在 Xllm 命名空间（op_kernel/arch35/cross_attention_tiling.h），
+// host tiling 序列化与 kernel 读取共用同一 128B POD 布局
+using Xllm::CrossAttentionTilingData;
 
 using AscendC::Add;
 using AscendC::Cast;
@@ -66,39 +58,39 @@ using AscendC::SetFlag;
 using AscendC::TPosition;
 using AscendC::WaitFlag;
 
-// RegBase namespace: AscendC::MicroAPI is only an alias of AscendC::Reg and it exists only in the
-// __NPU_ARCH__ == 3510 pass; using Reg directly also resolves in the host pass.
+// RegBase 命名空间：AscendC::MicroAPI 只是 AscendC::Reg 的别名，且该别名仅在
+// __NPU_ARCH__==3510 的 pass 里生效；这里直接用 Reg，host pass 也能解析类型。
 namespace Mapi = AscendC::Reg;
 
-// L0C -> UB Fixpipe config: isFixPixelMerge (second argument) set to true selects the UB destination.
+// L0C -> UB 的 Fixpipe 配置：isFixPixelMerge（第二个参数）置 true 走 UB 目的地址
 constexpr AscendC::FixpipeConfig CA_CFG_ROW_MAJOR_UB = {AscendC::CO2Layout::ROW_MAJOR, true};
 
-// RegBase Cast traits for fp32 -> 16 bit. fp16 uses NO_SAT (the softmax output is inside [0, 1]) and
-// bf16 uses SAT, matching the official arch35 operators.
+// RegBase 的 Cast trait：fp32 -> 16bit。fp16 用 NO_SAT（softmax 输出必然在 [0,1]），
+// bf16 用 SAT（官方 arch35 算子的口径）。
 constexpr Mapi::CastTrait CA_CAST_F32_TO_FP16 = {Mapi::RegLayout::ZERO, Mapi::SatMode::NO_SAT,
                                                  Mapi::MaskMergeMode::ZEROING, AscendC::RoundMode::CAST_RINT};
 constexpr Mapi::CastTrait CA_CAST_F32_TO_BF16 = {Mapi::RegLayout::ZERO, Mapi::SatMode::SAT,
                                                  Mapi::MaskMergeMode::ZEROING, AscendC::RoundMode::CAST_RINT};
 
-// ---- Offsets inside the UB scalar area, relative to CA_UB_SCAL ----
-constexpr uint32_t CA_SCAL_RED = 0;   // 64 floats: ReduceMax / Exp landing buffer
-constexpr uint32_t CA_SCAL_TMP = 384; // 32 floats: merge denominator
-constexpr uint32_t CA_SCAL_MRG = 512; // 64 floats: merge group maximum m*
+// ---- UB 标量区内部偏移（相对 CA_UB_SCAL）----
+constexpr uint32_t CA_SCAL_RED = 0;   // 64 float：ReduceMax/Exp 的落地缓冲
+constexpr uint32_t CA_SCAL_TMP = 384; // 32 float：merge 的分母
+constexpr uint32_t CA_SCAL_MRG = 512; // 64 float：merge 的组内最大 m*
 
-// Task descriptor, parsed independently from tiling on AIC and AIV
+// 任务描述（AIC / AIV 各自从 tiling 独立解析）
 struct CaTaskDesc {
     uint32_t batchIdx;
     uint32_t kvHeadIdx;
     uint32_t qRowTileIdx;
-    uint32_t gTileIdx;  // head tile inside the group (always 0 when groupSize <= 16)
+    uint32_t gTileIdx;  // group 内的 head 分档下标（groupSize <= 16 时恒为 0）
     uint32_t kvSegIdx;
-    uint32_t nQ;      // q rows actually covered by this tile
-    uint32_t g;       // heads covered by this tile = min(gPerTile, groupSize - gBase)
+    uint32_t nQ;      // 本 tile 实际的 q 行数
+    uint32_t g;       // 本 tile 覆盖的 head 数 = min(gPerTile, groupSize - gBase)
     uint32_t rows;    // R = nQ * g
-    uint32_t kvLoops; // beat count
+    uint32_t kvLoops; // beat 数
     uint32_t segStartBlock;
     uint32_t segValid;
-    uint64_t qHeadBase; // element offset of q row 0, first head of this tile
+    uint64_t qHeadBase; // q 行 0、本档首个 head 的元素偏移
 };
 
 __aicore__ inline void ParseTask(const __gm__ CrossAttentionTilingData* t, uint32_t taskIdx,
@@ -113,8 +105,7 @@ __aicore__ inline void ParseTask(const __gm__ CrossAttentionTilingData* t, uint3
     d.kvHeadIdx = (rowBase / t->qRowTileNum) % t->kvHeads;
     d.batchIdx = rowBase / (t->qRowTileNum * t->kvHeads);
 
-    // This task covers heads [gBase, gBase + g) of the group; gBase is 0 and g is groupSize when
-    // groupSize <= 16, so the single tile case keeps the original layout.
+    // 本 task 只覆盖 group 内从 gBase 起的 g 个 head（groupSize <= 16 时 gBase = 0、g = groupSize）
     const uint32_t gBase = d.gTileIdx * t->gPerTile;
     d.g = t->groupSize - gBase;
     if (d.g > t->gPerTile) {
@@ -153,9 +144,9 @@ __aicore__ inline void ParseTask(const __gm__ CrossAttentionTilingData* t, uint3
                   t->headDim;
 }
 
-// Host derives kSeg from maxNumBlocksPerBatch (capacity only), so a small actual kvLen leaves empty
-// segments behind. Every core recomputes the effective segment count from the same lens and falls
-// back to the kSeg == 1 epilogue when the real block count does not fill one segment.
+// host 的 kSeg 只能按 maxNumBlocksPerBatch（容量）决定，实际 kvLen 小的时候会多切出
+// 若干空段，而 kSeg > 1 的代价是两个全局栅栏 + 一拍 merge 往返（实测 b=1 小 kv 约 6~8 µs）。
+// 各核用同一份 lens 推出「生效段数」：实际 block 数不足一段时直接退回 kSeg==1 的收尾路径。
 __aicore__ inline uint32_t CaEffSeg(const __gm__ CrossAttentionTilingData* t,
                                     const GlobalTensor<int64_t>& lensGm)
 {
@@ -182,7 +173,7 @@ __aicore__ inline uint32_t CaEffSeg(const __gm__ CrossAttentionTilingData* t,
 }
 
 // ---------------------------------------------------------------------------
-// AIC: QK / PV
+// AIC：QK / PV
 // ---------------------------------------------------------------------------
 template <typename T>
 class CrossAttentionAic {
@@ -191,8 +182,7 @@ public:
                                 __gm__ uint8_t* value, __gm__ uint8_t* blockTable, __gm__ uint8_t* actualKvLens,
                                 __gm__ uint8_t* workspace)
     {
-        // The CV path needs no S / O staging workspace and P reaches L1 over the CV channel, so the
-        // workspace only holds the merge slots.
+        // M2 不再需要 S / O 的 staging workspace；P 也走 CV 通道进 L1，workspace 里只剩 merge 槽
         tiling_ = t;
         qGm_.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(query));
         kGm_.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(key));
@@ -200,7 +190,6 @@ public:
         btGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(blockTable));
         lensGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(actualKvLens));
         coreIdx_ = GetBlockIdx();
-        oPending_ = false;
         l0Slot_ = 0u;
         pvASlot_ = 0u;
         vHead_ = false;
@@ -211,10 +200,10 @@ public:
     {
         PrimeBeatFlags();
 
-        // Task chain: the front prefetch of task j is issued while task j-1 still runs PV, so the Q panel
-        // and the first K window are already on MTE2 and the task boundary adds no GM latency in front of
-        // the QK chain. The first task takes the same path: Q / K / V are issued together instead of
-        // starting K only after Q has landed.
+        // 任务链按“上一任务尾块 QK 一发出就预约下一任务的前置搬运”组织：
+        // 任务 j 的 Q 面板与 K 首窗在任务 j-1 的 PV 期间就已经在 MTE2 上跑，
+        // 任务边界的 GM 延迟不再串在 QK 链之前（原来每次切任务要等 Q + 4 个 K 面板落地）。
+        // 首个任务同样走这条路：Q / K / V 三段一起发，不再 Q 落地后才发 K。
         CaTaskDesc cur;
         uint32_t taskIdx = coreIdx_;
         bool haveCur = false;
@@ -227,8 +216,7 @@ public:
             taskIdx += tiling_->usedCoreNum;
         }
         if (haveCur) {
-            // A cold start has nothing in flight, so the V head window can go with the front prefetch; across
-            // tasks it cannot, because the V slots are still held by this task's PV.
+            // 冷启动无任何在途计算，V 首窗可以并进前置搬运一起发（跨任务时不行：V 槽还被本任务占着）
             PrefetchFront(cur, true);
         }
         while (haveCur) {
@@ -249,10 +237,9 @@ public:
             haveCur = haveNext;
         }
 
-        // kSeg > 1: AIV needs every core's merge slot before merging. SyncAll<true> (AIV only) does not
-        // guarantee cross-core visibility here, so the combined AIC + AIV barrier is used: AIV goes through
-        // its own AIC and the AICs synchronise globally. When the real block count does not fill one segment
-        // effSeg_ is already 1 and neither side enters this path.
+        // kSeg > 1：AIV 合并前需要所有核的 merge 槽都写完。SyncAll<true>（AIV-only）在本场景
+        // 不保证跨核可见，改用 AIC+AIV 全局栅栏：AIV 经本核 AIC 中转，AIC 之间再做全局同步。
+        // 实际 block 数不足一段时 effSeg_ 已退回 1，两侧都不再进这条路径。
         if (effSeg_ > 1u) {
             AscendC::SyncAll<false>();
         }
@@ -263,46 +250,45 @@ private:
     {
         const uint32_t loops = d.kvLoops;
         loops_ = loops;
-        // The Q panel was already prefetched into L1 by the previous task (or the cold start); only wait for
-        // it to land and split it to L0A.
+        // Q 面板已由上一任务尾块（或冷启动）搬进 L1，这里只等落地再切 L0A。
         PrepQ(d);
-        // The V head window is filled only at the task head; PvBeat keeps CA_V_L1_SLOTS-1 beats of rolling
-        // prefetch afterwards.
+        // V 的首个窗口只在任务头补：之后由 PvBeat 提前 CA_V_L1_SLOTS-1 拍滚动预取。
         if (!vHead_) {
             PrefetchVHead(d);
         }
         vHead_ = false;
-        // Rolling schedule, one beat at a time:
-        //   Prologue: pre-issue QK one S ring deep (AIV softmaxes concurrently) and, after each QK beat,
-        //             refill the L1 slot just released by SplitB with beat +CA_S_RING.
-        //   Steady state: run PV(i) first, then issue QK(i+CA_QK_LEAD). QK always leads PV by one S ring, so
-        //             P(i+1) already exists before PV(i) and the P prefetch works across beats instead of
-        //             exposing P_READY once per block head.
-        //             PV stays contiguous (QK is appended to the same beat), so the CUBE PV chain is not
-        //             interrupted.
-        // L0B shares one slot pair between the K and V panels and l0Slot_ alternates it across QK and PV.
+        // 滚动调度（单拍粒度，不再按 S 环块两段式）：
+        //   序言：把前一个 S 环深的 QK 全部预发射（AIV 同时做 softmax），并在每拍 QK 之后
+        //         把 +CA_S_RING 拍的 K 预取进刚被 SplitB 释放的 L1 槽。
+        //         CA_QK_LEAD（序言深度）试过 8 拍：QK 把 CUBE 的发射窗口从 PV 前面抢走，
+        //         kv=700 从 29.5 退化到 32.3 µs，故维持与 S 环同深（见设计文档 15.11）。
+        //   主体：每拍先做 PV(i)，再发 QK(i+CA_QK_LEAD)。QK 始终领先 PV 一个 S 环深，
+        //         所以 P(i+1) 早在 PV(i) 之前就已由 AIV 产出，P 的拍内预取可以跨拍连续生效，
+        //         不再像按块调度那样在每个块首拍暴露一次 P_READY。
+        //         PV 仍连续推进（QK 排在同一拍末尾），不会打断 CUBE 的 PV 链。
+        // L0B 的 K/V 面板共用一对槽，slot 由 l0Slot_ 跨 QK/PV 连续交替。
         const uint32_t pro = (loops < CA_QK_LEAD) ? loops : CA_QK_LEAD;
         for (uint32_t j = 0; j < pro; ++j) {
             if (j >= CA_S_RING) {
-                // The previous owner of S slot j%CA_S_RING (beat j-CA_S_RING) has been read by AIV
+                // S 槽 j%CA_S_RING 的上一任占用者（第 j-CA_S_RING 拍）已被 AIV 读走
                 WaitSFree();
             }
             QkBeat(d, j);
             NotifySReady();
-            // The K L1 slot is released by SplitB inside QkBeat, so refill it for beat +CA_S_RING right away
+            // K 的 L1 槽在 QkBeat 的 SplitB 之后归还，这里立刻补 +CA_S_RING 拍的那一份
             if (j + CA_S_RING < loops) {
                 PrefetchK(d, j + CA_S_RING);
             }
         }
         for (uint32_t i = 0; i < loops; ++i) {
-            // Tail: push the next task's Q and first K window onto MTE2. This task's K slots have all been
-            // returned and the remaining PV beats cover that GM time. V is left out, its slots are still held.
+            // 尾段把下一任务的 Q 与 K 首窗压进 MTE2：此时本任务的 K 槽已全部归还，
+            // 剩下的 PV 拍覆盖这 144 KB 的 GM 时间。V 不带（槽仍被本任务尾拍占着）。
             if (next != nullptr && i == ((loops >= 2u) ? (loops - 2u) : 0u)) {
                 PrefetchFront(*next, false);
             }
             PvBeat(d, i);
             if (i + pro < loops) {
-                // The previous owner of ring slot (i+pro)%CA_S_RING (beat i+pro-CA_S_RING) has been read by AIV
+                // 环槽 (i+pro)%CA_S_RING 的上一任占用者（第 i+pro-CA_S_RING 拍）已被 AIV 读走
                 WaitSFree();
                 QkBeat(d, i + pro);
                 NotifySReady();
@@ -312,33 +298,33 @@ private:
             }
         }
 
-        // Credit drain: one S_FREE is produced per beat and AIC only consumes the ones beyond the ring
-        // depth, so the remainder is topped up at the end of the task to keep the count constant across
-        // tasks. P_FREE goes the other way: AIC is the producer and never consumes it.
+        // 信用排空：S_FREE 每拍产出一份，AIC 只在超出环深时消费，任务结束时补齐不足一个环深的部分，
+        // 保证计数跨任务守恒。（P_FREE 方向相反：AIC 是生产者，不需要消费。）
         const uint32_t drainS = loops < CA_S_RING ? loops : CA_S_RING;
         for (uint32_t k = 0; k < drainS; ++k) {
             WaitSFree();
         }
 
-        // Deliver O from L0C into both subs' UB once per task, then wait for AIV to return the O buffer
-        if (oPending_) {
-            WaitOFree();
+        // PV_FREE 与 S_FREE 同构：AIV 每拍产出一份，AIC 只在超出 PV 环深时消费，
+        // 任务末补齐不足一个环深的部分，保证计数跨任务守恒（online：PV 逐拍进 UB，
+        // O_run 在 AIV 侧维护，任务末不再有 O 投递 / O_READY / O_FREE）。
+        const uint32_t drainPV = loops < CA_PV_RING ? loops : CA_PV_RING;
+        for (uint32_t k = 0; k < drainPV; ++k) {
+            WaitPvFree();
         }
-        FinishO(d);
-        oPending_ = true;
     }
 
-    // ---- AIC side cross-core handshake (mode 4 intra block, one id per sub, see cross_attention_common.h) ----
+    // ---- AIC 侧核间握手（mode 4 intra block，按 sub 分 id，见 cross_attention_common.h） ----
     __aicore__ inline void NotifySReady()
     {
         CrossCoreSetFlag<4, PIPE_FIX>(CA_FLAG_S_READY);
         CrossCoreSetFlag<4, PIPE_FIX>(CA_FLAG_S_READY + CA_FLAG_SUB_STRIDE);
     }
 
-    __aicore__ inline void NotifyOReady()
+    __aicore__ inline void NotifyPvReady()
     {
-        CrossCoreSetFlag<4, PIPE_FIX>(CA_FLAG_O_READY);
-        CrossCoreSetFlag<4, PIPE_FIX>(CA_FLAG_O_READY + CA_FLAG_SUB_STRIDE);
+        CrossCoreSetFlag<4, PIPE_FIX>(CA_FLAG_PV_READY);
+        CrossCoreSetFlag<4, PIPE_FIX>(CA_FLAG_PV_READY + CA_FLAG_SUB_STRIDE);
     }
 
     __aicore__ inline void NotifyPFree()
@@ -349,8 +335,8 @@ private:
 
     __aicore__ inline void WaitPReady()
     {
-        // Stays on PIPE_S: in the CV path these waits only order "P written" / "P read", and attaching them
-        // to PIPE_MTE1 deadlocks on multi-beat shapes.
+        // 默认挂在 PIPE_S（标量）上：CV 直通下这两个等待只用于“P 已写完/已读走”的
+        // 顺序，实测挂到 PIPE_MTE1 会在多拍形状上引入死锁，退回默认。
         CrossCoreWaitFlag<4>(CA_FLAG_P_READY);
         CrossCoreWaitFlag<4>(CA_FLAG_P_READY + CA_FLAG_SUB_STRIDE);
     }
@@ -361,13 +347,13 @@ private:
         CrossCoreWaitFlag<4>(CA_FLAG_P_FREE + CA_FLAG_SUB_STRIDE);
     }
 
-    __aicore__ inline void WaitOFree()
+    __aicore__ inline void WaitPvFree()
     {
-        CrossCoreWaitFlag<4>(CA_FLAG_O_FREE);
-        CrossCoreWaitFlag<4>(CA_FLAG_O_FREE + CA_FLAG_SUB_STRIDE);
+        CrossCoreWaitFlag<4>(CA_FLAG_PV_FREE);
+        CrossCoreWaitFlag<4>(CA_FLAG_PV_FREE + CA_FLAG_SUB_STRIDE);
     }
 
-    // AIV has finished reading the S ring slot (one credit per sub)
+    // AIV 已完成对 S 环槽的读取（两个 sub 各一份信用）
     __aicore__ inline void WaitSFree()
     {
         CrossCoreWaitFlag<4>(CA_FLAG_S_FREE);
@@ -399,14 +385,12 @@ private:
         DataCopy(b1, src[off], nd);
     }
 
-    // The A panel has two L1 layouts, selected by whether rows is a multiple of CA_BLOCK_CUBE:
-    //   interleaved (rows%16==0): the whole panel is one big NZ matrix with fractal order
-    //     k_block*nbCount+m_block. Nd2Nz uses dstNzC0Stride = rows (d direction block stride = rows
-    //     units of 32 B) and a single descriptor copies the whole panel. MTE2 is limited by descriptor
-    //     count, not by bytes, so this is the cheapest form.
-    //   blocked (tail rows%16!=0): copy one 16-row block at a time, contiguous between blocks, with
-    //     dstNzC0Stride = 16. When rows is not a multiple of 16 the d direction block stride would land
-    //     in the middle of a fractal, so this is the only option.
+    // A 面板的 L1 布局有两种，由 rows 是否能被 CA_BLOCK_CUBE 整除决定：
+    //   interleaved（rows%16==0）：整面板当一个大 NZ 矩阵，分形序 k_block*nbCount+m_block。
+    //     Nd2Nz 的 dstNzC0Stride 取 rows（d 方向分块步长 = rows 个 32B），一个描述符搬完整个
+    //     面板 —— MTE2 的瓶颈是描述符个数（实测约 0.131 µs/条，与字节数无关），所以这样最省。
+    //   blocked（尾块 rows%16!=0）：按 16 行一个分块分别搬、块间连续，每块内 dstNzC0Stride=16。
+    //     rows 不是 16 的倍数时 d 方向分块步长会落在分形半中间，只能退回这种搬法。
     static constexpr bool CaInterleaved(uint32_t rows)
     {
         return (rows % CA_BLOCK_CUBE) == 0u;
@@ -416,8 +400,8 @@ private:
     {
         const uint32_t g = d.g;
         if (CaInterleaved(d.rows)) {
-            // The g heads of one q row are contiguous in GM (row stride headDim) and q rows are qHeads*headDim
-            // apart. On the interleaved L1 panel matrix p starts at row p*g and the matrices are g*C0 apart.
+            // 一个 q 行的 g 个头在 GM 里连续（行内步长 headDim），q 行之间隔 qHeads*headDim；
+            // 落到 L1 的整面板 NZ 上，每个矩阵 p 的基址就是 p*g 行，矩阵间步长 g*C0 均匀。
             Nd2NzParams nd;
             nd.ndNum = static_cast<uint16_t>(d.nQ);
             nd.nValue = static_cast<uint16_t>(g);
@@ -449,11 +433,10 @@ private:
         }
     }
 
-    // Identity copy of a whole panel: the interleaved L1 panel (Nd2Nz dstNzC0Stride = rows) is byte
-    // identical to the Zn layout of L0A, so one Mmad with M = rows needs a single descriptor:
-    //   mStep covers all m blocks, kStep the 8 k fractals, and the k fractal stride is nbCount on both
-    //   sides. The only difference from SplitA(interleaved=true) is the destination side: SplitA lays
-    //   every 16-row block out flat for per-block Mmad.
+    // 整面板恒等搬运：L1 的 interleaved 面板（Nd2Nz 的 dstNzC0Stride = rows）与 L0A 的
+    // Zn 布局逐字节相同，所以一次 M = rows 的 Mmad 只需要一条描述符：
+    //   mStep = 全部 m 分块，kStep = 8 个 k 分形，源/目的跨 k 分形的步长同为 nbCount。
+    // 和 SplitA(interleaved=true) 的区别只在目的端：后者把每个 16 行分块摊平，供逐块 Mmad。
     __aicore__ inline void SplitAWhole(LocalTensor<T>& a2, LocalTensor<T>& a1, uint32_t nbCount)
     {
         LoadData2DParamsV2 ld;
@@ -469,8 +452,8 @@ private:
 
     __aicore__ inline void SplitA(LocalTensor<T>& a2, LocalTensor<T>& a1, uint32_t nbCount, bool interleaved)
     {
-        // One L1->L0A copy per 16-row block: the destination is contiguous in both layouts (dstStride=1);
-        // on the source side the 8 k fractals of one m block are nbCount fractals apart when interleaved.
+        // 每 16 行分块一次 L1->L0A：目的端两种布局下都连续（dstStride=1），
+        // 源端 interleaved 时同一 m 分块的 8 个 k 分形相隔 nbCount 个分形。
         LoadData2DParamsV2 ld;
         ld.mStartPosition = 0;
         ld.kStartPosition = 0;
@@ -486,7 +469,7 @@ private:
         }
     }
 
-    // K stored row major as (kv, hd) in L1 is already the (K=hd, N=kv) Zn layout, copy it directly
+    // K 按 (kv, hd) 行主序存入 L1 后即等于 (K=hd, N=kv) 的 Zn 布局，直接搬运
     __aicore__ inline void SplitBForQk(LocalTensor<T>& b2, LocalTensor<T>& b1)
     {
         LoadData2DParams ld;
@@ -497,7 +480,7 @@ private:
         LoadData(b2, b1, ld);
     }
 
-    // V is row major (K=kv, N=hd) and needs an in-flight Nz -> Zn transpose
+    // V 为 (K=kv, N=hd) 行主序，需要 Nz -> Zn 的在途转置
     __aicore__ inline void SplitBForPv(LocalTensor<T>& b2, LocalTensor<T>& b1)
     {
         constexpr uint32_t dstOffset = (CA_HEAD_DIM / CA_BLOCK_CUBE) * CA_BLOCK_CUBE * CA_C0;
@@ -513,29 +496,27 @@ private:
         }
     }
 
-    // ---- Reverse dependencies inside AIC (L1 / L0 reuse) ----
-    // L0B shares one slot pair between the QK K panel and the PV V panel, alternating globally per beat
-    // (l0Slot_), so the next beat can already copy L1->L0 into the other slot while the previous Mmad
-    // still runs and MTE1 hides under Mmad. L0A uses two P slots as well; the Q panel is loaded once per
-    // task, so no A dependency appears inside a beat.
-    // The header only exports EVENT_ID0..3; 4..7 are used as integer literals (8 hardware event ids).
+    // ---- 跨拍反向依赖（AIC 内 L1 / L0 复用） ----
+    // L0B 一对槽由 QK 的 K 面板与 PV 的 V 面板共用，按拍全局奇偶交替（l0Slot_）：
+    // 下一拍可以往另一个槽里做 L1->L0 搬运，不必等上一拍 Mmad 算完，从而把 MTE1 藏进 Mmad。
+    // L0A 的 P 面板同样双槽；Q 面板任务级只装一次，拍内不再产生 A 依赖。
+    // 头文件只导出 EVENT_ID0..3，4..7 直接用整型字面量（硬件事件 ID 共 8 个）
     static constexpr int32_t CA_L0B_S0 = EVENT_ID2;
     static constexpr int32_t CA_L0B_S1 = EVENT_ID3;
     static constexpr int32_t CA_PV_A_S0 = EVENT_ID0;
     static constexpr int32_t CA_PV_A_S1 = EVENT_ID1;
-    static constexpr int32_t CA_L1_Q = 4;      // Q's L1 panel (issued once per task)
+    static constexpr int32_t CA_L1_Q = 4;      // Q 的 L1 面板（每任务一次）
 
-    // Two dependency families for the L1 ring slots, 8 ids each. MTE2_MTE1: Q 0 / V 1-2 / K 4-7.
-    // MTE1_MTE2: KFree 0,5,6,7 / VFree 1,2 / Q 4.
-    // P uses the A5 CV channel (AIV's MTE3 writes L1 directly), so AIC needs no MTE2 copy and id 3 is
-    // free.
-    //   MTE1_MTE2 (slot may be overwritten: produced by MTE1 after the read, consumed by MTE2 before load)
+    // L1 环槽的两组依赖，同类型内各占 8 个 id。MTE2_MTE1：Q 0 / V 1~2 / K 4~7；
+    // MTE1_MTE2：KFree 0,5,6,7 / VFree 1,2 / Q 4。
+    // P 走 A5 的 CV 通道（AIV 的 MTE3 直接写 L1），不再是 AIC 的 MTE2 副本，id 3 空闲。
+    //   MTE1_MTE2（槽可覆写信用，生产者在 MTE1 读完拍置位，消费者在 MTE2 搬入前置位）
     static constexpr int32_t KFreeId(uint32_t slot)
     {
         return (slot == 0u) ? 5 : ((slot == 1u) ? 6 : ((slot == 2u) ? 7 : 0));
     }
     static constexpr int32_t VFreeId(uint32_t slot) { return 1 + static_cast<int32_t>(slot); }
-    //   MTE2_MTE1 (this beat's copy has landed in L1; ED0 is reserved for the immediate Q barrier)
+    //   MTE2_MTE1（本拍副本已落 L1，ED0 留给 Q 的即时屏障）
     static constexpr int32_t KCopyId(uint32_t slot) { return 4 + static_cast<int32_t>(slot); }
     static constexpr int32_t VCopyId(uint32_t slot) { return 1 + static_cast<int32_t>(slot); }
 
@@ -551,11 +532,12 @@ private:
     __aicore__ inline void PrimeBeatFlags()
     {
         SetFlag<HardEvent::MTE1_MTE2>(CA_L1_Q);
-        // S L0C double-slot credit: every QkBeat waits for "previous fixpipe finished reading"; prime it.
+        // S 的 L0C 双槽信用：QkBeat 每拍等一份“上一轮 fixpipe 已读完”，首拍由这里预置
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
-        // One "may overwrite" credit per K / V L1 slot, consumed by the first prefetch window of each task.
-        // Every beat sets and consumes exactly one, so the credit count is conserved across tasks (see
-        // RunTask / PvBeat).
+        // PV 的 L0C 双槽信用：PvBeat 每拍等一份“上一轮 PV fixpipe 已读完”，首拍由这里预置
+        SetFlag<HardEvent::FIX_M>(EVENT_ID1);
+        // K / V 每个 L1 槽各预置一份“可覆写”信用，供各任务首个预取窗口消费；
+        // K/V 每拍都是一次“置位 + 消费”，所以信用数跨任务守恒（见 RunTask / PvBeat）。
         for (uint32_t s = 0; s < CA_K_L1_SLOTS; ++s) {
             SetFlag<HardEvent::MTE1_MTE2>(KFreeId(s));
         }
@@ -571,17 +553,16 @@ private:
     static constexpr int32_t L0BSlotId(uint32_t slot) { return (slot == 0u) ? CA_L0B_S0 : CA_L0B_S1; }
     static constexpr int32_t PvASlotId(uint32_t slot) { return (slot == 0u) ? CA_PV_A_S0 : CA_PV_A_S1; }
 
-    // S ring slot (both AIV subs use the same offsets on physically separate UB)
+    // S 环槽（AIV 的两个 sub 用同一套字节偏移，物理 UB 各自独立）
     __aicore__ inline uint32_t UbSlot(uint32_t ring, uint32_t slotBytes) const
     {
         return CA_UB_S + (ring % CA_S_RING) * slotBytes;
     }
 
-    // ---- Front prefetch (issue only, never wait) ----
-    // Shared by the cold start and the cross-task prefetch: issue Q into L1 and the first K window into
-    // the L1 ring slots without any barrier. The former overlaps Q's GM latency with K's, the latter
-    // moves the whole GM latency under the previous task's PV.
-    // withV is true only on the cold start: across tasks the V slots are still held by this task's PV.
+    // ---- 前置搬运（只发不等） ----
+    // 冷启动与跨任务预取共用：只发 Q 进 L1 与 K 首窗进 L1 环槽，不插任何等待计算的屏障。
+    // 前者把 Q 的 GM 延迟与 K 的并行起来，后者把整段 GM 延迟挪到上一任务的 PV 之下。
+    // withV 只在冷启动为 true：跨任务时 V 的 3 个槽还被本任务尾拍的 PV 占着。
     __aicore__ inline void PrefetchFront(const CaTaskDesc& d, bool withV)
     {
         LocalTensor<T> a1(TPosition::A1, CA_A1_ADDR_Q, CA_A_ELEMS);
@@ -601,8 +582,8 @@ private:
         }
     }
 
-    // Single-beat K prefetch: after every QK beat, refill beat +CA_S_RING.
-    // The call site must follow QkBeat directly, where SplitB has just returned the MTE1_MTE2 credit.
+    // 单拍 K 预取：滚动调度里每发完一拍 QK，立刻补 +CA_S_RING 拍的那一份。
+    // 调用点必须紧跟在 QkBeat 之后——该槽的 MTE1_MTE2 信用刚由那次 SplitB 归还。
     __aicore__ inline void PrefetchK(const CaTaskDesc& d, uint32_t beat)
     {
         const uint32_t ks = beat % CA_K_L1_SLOTS;
@@ -612,7 +593,7 @@ private:
         SetFlag<HardEvent::MTE2_MTE1>(KCopyId(ks));
     }
 
-    // V head window: issue CA_V_L1_SLOTS beats at once; PvBeat keeps the rolling prefetch afterwards
+    // V 的首个窗口：前 CA_V_L1_SLOTS 拍一次发满，之后由 PvBeat 逐拍滚动预取
     __aicore__ inline void PrefetchVHead(const CaTaskDesc& d)
     {
         const uint32_t vn = (d.kvLoops < CA_V_L1_SLOTS) ? d.kvLoops : CA_V_L1_SLOTS;
@@ -626,8 +607,7 @@ private:
         vHead_ = true;
     }
 
-    // Task head: wait for Q to land in L1 (already issued by the front prefetch), split it to L0A, then
-    // reuse the Q panel for every beat.
+    // 任务头：等 Q 落 L1（前置搬运已发过），再切到 L0A，之后所有拍直接复用 Q 面板。
     __aicore__ inline void PrepQ(const CaTaskDesc& d)
     {
         LocalTensor<T> a1(TPosition::A1, CA_A1_ADDR_Q, CA_A_ELEMS);
@@ -635,7 +615,7 @@ private:
         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
         const uint32_t nbCount = CaCeilDiv(d.rows, CA_BLOCK_CUBE);
         if ((d.rows % CA_BLOCK_CUBE == 0u) && (nbCount > 1u)) {
-            // Pairs with the large-M path in QkBeat: copy the interleaved L1 panel into L0A unchanged
+            // 与 QkBeat 的大 M 口径配对：L1 的 interleaved 面板原样搬进 L0A
             SplitAWhole(a2, a1, nbCount);
         } else {
             SplitA(a2, a1, nbCount, CaInterleaved(d.rows));
@@ -655,25 +635,25 @@ private:
         LocalTensor<float> co1(TPosition::CO1, CA_CO1_ADDR_Q + (beat & 1u) * CA_CO1_S_SLOT_BYTES,
                                CA_MAX_R * CA_HEAD_DIM);
 
-        // This beat's K was issued by a prefetch window in RunTask; only wait for it to land in L1.
+        // 本拍的 K 已在 RunTask 的预取窗口里发过，这里只等它落 L1；MTE2 早已跑到当前拍之前。
         WaitFlag<HardEvent::MTE2_MTE1>(KCopyId(ks));
 
-        // The L0B slot may be overwritten once the previous Mmad has read it
+        // 该 L0B 槽的上一任 Mmad 读完后才能覆写
         WaitFlag<HardEvent::M_MTE1>(L0BSlotId(slot));
         SplitBForQk(b2, b1);
         SetFlag<HardEvent::MTE1_MTE2>(KFreeId(ks));
         SetFlag<HardEvent::MTE1_M>(EVENT_ID1);
         WaitFlag<HardEvent::MTE1_M>(EVENT_ID1);
 
-        // S uses two L0C slots alternating on beat parity: this beat's Mmad only waits for the fixpipe of
-        // beat-2 to finish reading the same slot. With a single slot it would have to wait for its own
-        // fixpipe to move all of S into UB, which costs a fixed bubble on every beat.
+        // S 在 L0C 里按拍奇偶双槽：本拍 Mmad 只等 beat-2 的 fixpipe 读完同槽。
+        // 单槽时这里必须等本拍 fixpipe 把 S 全部搬进 UB 才能进下一拍（每拍固定 0.29 µs 气泡），
+        // 双槽后这个等待降到 2 拍之前，实测即可消失。
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
         const uint32_t nbCount = CaCeilDiv(d.rows, CA_BLOCK_CUBE);
-        // When rows is a multiple of 16 and spans more than one block, the whole A panel is one big NZ
-        // matrix and a single Mmad computes it: eight m=16 Mmads per beat carry little math each while every
-        // issue pays a fixed overhead, so the fragmented form wastes issue slots. The tail case (rows not a
-        // multiple of 16) keeps the per-block form, where L0C holds parallel 16-row tiles.
+        // rows 是 16 的整数倍且不止一个分块时，把整个 A 面板当一个大 NZ 矩阵、一次 Mmad 算完：
+        // 每拍 8 条 m=16 的 Mmad 各自只有 32 cycle 的数学量，实测单条要 49 cycle
+        // （见 profile：aic_mac_time 11.86 µs / 438 条），碎片化的发射开销占掉 1/3。
+        // 尾块（rows 不是 16 的倍数）仍退回逐分块，此时 L0C 是并列的 16 行瓦片。
         const bool bigM = (d.rows % CA_BLOCK_CUBE == 0u) && (nbCount > 1u);
         MmadParams mp;
         mp.m = static_cast<uint16_t>(bigM ? d.rows : CA_BLOCK_CUBE);
@@ -693,8 +673,8 @@ private:
         SetFlag<HardEvent::M_FIX>(EVENT_ID0);
         WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
 
-        // S goes from L0C straight into both AIV subs' UB: deliver per sub row range and let subBlockId pick
-        // the target UB. The row ranges match CaSubBegin / CaSubRows on the AIV side and are 16-row aligned.
+        // S 直接从 L0C 进两个 AIV sub 的 UB：按 sub 行区间分别投递，subBlockId 选择目标 UB。
+        // 行区间与 AIV 侧的 CaSubBegin/CaSubRows 完全一致，且都是 16 行对齐。
         const uint32_t ubOff = UbSlot(beat, CA_S_SLOT_BYTES);
         for (uint32_t sub = 0; sub < 2u; ++sub) {
             const uint32_t nRows = CaSubRows(d.rows, sub);
@@ -704,13 +684,13 @@ private:
             const uint32_t begin = CaSubBegin(d.rows, sub);
             LocalTensor<float> dst(TPosition::VECCALC, ubOff, CA_UB_ROWS * CA_HEAD_DIM);
             if (bigM) {
-                // Large M: L0C is one rows x 128 NZ matrix with C0 stride = rows, so one descriptor per sub is enough
+                // 大 M：L0C 是一个 rows x 128 的 NZ 矩阵，C0 步长 = rows，sub 一条就能搬完
                 FixpipeWide(dst, co1, begin, nRows, sub, CA_KV_TILE, d.rows);
             } else {
                 FixpipeRows(dst, co1, begin, nRows, sub, CA_KV_TILE);
             }
         }
-        // Return the credit without waiting: the next user of this slot is the Mmad of beat+2, which waits there
+        // 只还信用不等：本槽的下一个使用者是 beat+2 的 Mmad，它会在那里等。
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
     }
 
@@ -724,20 +704,21 @@ private:
         LocalTensor<T> b1(TPosition::B1, VL1Off(beat), CA_B_ELEMS);
         LocalTensor<T> a2(TPosition::A2, CA_A2_ADDR_P + aslot * CA_A2_P_SLOT_BYTES, CA_A_ELEMS);
         LocalTensor<T> b2(TPosition::B2, slot * CA_B2_SLOT_BYTES, CA_B_ELEMS);
-        LocalTensor<float> co1(TPosition::CO1, CA_CO1_ADDR_P, CA_MAX_R * CA_HEAD_DIM);
-        // AIV writes P into the L1 A1 ring slot over the A5 CV channel, each sub covering its own rows, so AIC
-        // needs neither a GM read back nor an Nd2Nz: once P_READY arrives the slot already holds the L0A
-        // fractal order. The L0A P slot being free means Mmad(beat-2) has finished and SplitA runs in order
-        // on MTE1, hence SplitA(beat-4) is complete and the L1 P slot (beat%CA_P_RING) can be overwritten.
+        LocalTensor<float> co1(TPosition::CO1, CA_CO1_ADDR_P + (pSeq_ & 1u) * CA_CO1_P_SLOT_BYTES,
+                               CA_MAX_R * CA_HEAD_DIM);
+        // P 由 AIV 通过 A5 的 CV 通道直接写进 L1 的 A1 环槽，两个 sub 各写自己的行段。
+        // AIC 侧没有 GM 读回与 Nd2Nz：P_READY 一到，L1 里的就是 L0A 要的分形序。
+        // L0A 的 P 槽空出来保证 Mmad(beat-2) 已结束，而 SplitA 在 MTE1 上按序，
+        // 故 SplitA(beat-4) 必然完成 —— L1 的 P 槽（beat%CA_P_RING）可以安全覆写。
         WaitFlag<HardEvent::M_MTE1>(PvASlotId(aslot));
 
-        // This beat's V was delivered by the prefetch of beat-CA_V_L1_SLOTS (or by the task head window)
+        // 本拍的 V 由前 CA_V_L1_SLOTS 拍的预取（或任务头窗口）送进 L1
         WaitFlag<HardEvent::MTE2_MTE1>(VCopyId(vs));
 
         WaitFlag<HardEvent::M_MTE1>(L0BSlotId(slot));
         SplitBForPv(b2, b1);
-        // Return this slot's credit and spend it immediately on the prefetch of beat+CA_V_L1_SLOTS, which
-        // needs exactly this slot; MTE1 has finished reading it, so the overwrite is safe.
+        // 归还本槽信用，并立刻把它用在 beat+CA_V_L1_SLOTS 拍的预取上：
+        // 那一拍要用的正是这个槽，此时 MTE1 已读完，可以安全覆写。
         SetFlag<HardEvent::MTE1_MTE2>(VFreeId(vs));
         const uint32_t pf = beat + CA_V_L1_SLOTS;
         if (pf < loops_) {
@@ -747,16 +728,15 @@ private:
         }
         SetFlag<HardEvent::MTE1_M>(EVENT_ID1);
 
-        // This beat's P has been written into the L1 ring slot by AIV over the CV channel and both subs must
-        // be done. The wait sits just before SplitA so AIV's latency hides under this beat's V copy / SplitB.
+        // 本拍的 P 已由 AIV 经 CV 通道写进 L1 环槽，两个 sub 都写完才能读。
+        // 等到 SplitA 之前再等，把 AIV 的等待期藏在本拍的 V 搬运 / SplitB 之下。
         WaitPReady();
         const uint32_t nbCount = CaCeilDiv(d.rows, CA_BLOCK_CUBE);
-        // P's L1 layout has the same two cases as Q in QK:
-        //   when rows is a multiple of 16 and there is more than one block, the interleaved panel is used
-        //   (C0 stride = rows) with SplitAWhole + a single Mmad(m=rows), matching the QK large-M path;
-        //   the tail case (rows%16 != 0) or a single block keeps the 16-row block layout (block base
-        //   nb*16*128, C0 stride 16 inside a block), which matches CopyPToL1 on the AIV side and the
-        //   byte-exact output of the previous GM based version.
+        // P 的 L1 布局跟 QK 的 Q 一样分两种：
+        //   rows 是 16 的整数倍且有多块时走「整面板交错」（C0 步长 = rows），配 SplitAWhole
+        //   恒等搬运 + 单条 Mmad(m=rows)，与 QK 的大 M 口径一致；
+        //   尾块（rows%16 != 0）或单块仍走 16 行分块布局（块基址 nb*16*128，块内 C0 步长 16），
+        //   与 CopyPToL1 的写入口径、与旧 GM 回程版的 Nd2Nz 输出逐字节一致。
         const bool wideP = (d.rows % CA_BLOCK_CUBE == 0u) && (nbCount > 1u);
         if (wideP) {
             SplitAWhole(a2, a1, nbCount);
@@ -764,38 +744,68 @@ private:
             SplitA(a2, a1, nbCount, false);
         }
         SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
-        // P's L1 slot has been read into L0A, return the credit so AIV may overwrite it (CA_P_RING deep)
+        // P 的 L1 槽已经读进 L0A，可以还信用让 AIV 覆写（CA_P_RING 深）
         NotifyPFree();
 
         WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
         WaitFlag<HardEvent::MTE1_M>(EVENT_ID1);
 
-        // One V panel serves all 16-row blocks; O accumulates in L0C across beats and is cleared on beat 0
+        // online：本拍 PV 单独出一个 L0C 槽（按 pSeq_ 奇偶双缓冲，与 QK 的 S 同构），
+        // 不再跨拍累加。本槽的上一任 Mmad 的 fixpipe 读完（FIX_M 信用）才能覆写。
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID1);
+        // 同一份 V 面板供所有 16 行分块复用；每拍 cmatrixInitVal=true，输出即本拍 PV
         MmadParams mp;
         mp.m = static_cast<uint16_t>(wideP ? d.rows : CA_BLOCK_CUBE);
         mp.n = static_cast<uint16_t>(CA_KV_TILE);
         mp.k = static_cast<uint16_t>(CA_HEAD_DIM);
         if (wideP) {
-            // Large M: one Mmad produces the whole rows x 128, so O is a complete NZ matrix in L0C (C0 stride = rows)
-            mp.cmatrixInitVal = (beat == 0u);
+            // 大 M：一条 Mmad 出整个 rows x 128，PV 在 L0C 里是完整 NZ 矩阵（C0 步长 = rows）
+            mp.cmatrixInitVal = true;
             Mmad(co1, a2, b2, mp);
         } else {
             for (uint32_t nb = 0; nb < nbCount; ++nb) {
-                mp.cmatrixInitVal = (beat == 0u);
+                mp.cmatrixInitVal = true;
                 Mmad(co1[nb * CA_BLOCK_CUBE * CA_HEAD_DIM], a2[nb * CA_BLOCK_CUBE * CA_HEAD_DIM], b2, mp);
             }
         }
         SetFlag<HardEvent::M_MTE1>(L0BSlotId(slot));
         SetFlag<HardEvent::M_MTE1>(PvASlotId(aslot));
+        // M_FIX 自配对屏障：本拍 Mmad 落地后 fixpipe 才能读（与 QkBeat 的 EVENT_ID0 同法）
+        SetFlag<HardEvent::M_FIX>(EVENT_ID1);
+        WaitFlag<HardEvent::M_FIX>(EVENT_ID1);
+
+        // 本拍 PV 直接从 L0C 投递到两个 AIV sub 各自的 UB 环槽（PV_READY 驱动，
+        // PV_FREE 按 sub 回收信用；空行 sub 的 AIV 也照常消费/归还，配对不失衡）
+        if (beat >= CA_PV_RING) {
+            WaitPvFree();
+        }
+        const uint32_t pvUbOff = CA_UB_PV + (pSeq_ % CA_PV_RING) * CA_PV_SLOT_BYTES;
+        for (uint32_t sub = 0; sub < 2u; ++sub) {
+            const uint32_t nRows = CaSubRows(d.rows, sub);
+            if (nRows == 0u) {
+                continue;
+            }
+            const uint32_t begin = CaSubBegin(d.rows, sub);
+            LocalTensor<float> dst(TPosition::VECCALC, pvUbOff, CA_UB_ROWS * CA_HEAD_DIM);
+            // 与 wideP 同条件：大 M 单条 Mmad 的 PV 在 L0C 里是完整 NZ 矩阵
+            if (wideP) {
+                FixpipeWide(dst, co1, begin, nRows, sub, CA_HEAD_DIM, d.rows);
+            } else {
+                FixpipeRows(dst, co1, begin, nRows, sub, CA_HEAD_DIM);
+            }
+        }
+        NotifyPvReady();
+        // 只还信用不等：本槽的下一个使用者是 pSeq_+2 的 Mmad，它会在那里等
+        SetFlag<HardEvent::FIX_M>(EVENT_ID1);
         l0Slot_ ^= 1u;
         pvASlot_ ^= 1u;
         ++pSeq_;
     }
 
-    // Every 16-row block in L0C is the result of its own Mmad and they lie side by side as 16x128 tiles,
-    // not as one NZ matrix. When reading mSize rows Fixpipe indexes by m1 inside the matrix, so mSize > 16
-    // would read the neighbouring tile. Hence one Fixpipe per 16-row block; the large-M path uses
-    // FixpipeWide below, where L0C is a complete NZ matrix with C0 stride = M.
+    // L0C 里的每个 16 行分块都是一次独立 Mmad 的结果，在 L0C 中是并列的 16x128 瓦片，
+    // 并不是一个 32x128 的 NZ 矩阵。Fixpipe 一次读 mSize 行时会按矩阵内的 m1 跨步索引，
+    // mSize>16 就会读到别的瓦片（症状：每 32 行里第二个 16 行块错）。因此按 16 行逐块投递。
+    // 大 M 单条 Mmad 的路径改用下面的 FixpipeWide（L0C 是完整 NZ 矩阵，C0 步长 = M）。
     __aicore__ inline void FixpipeRows(LocalTensor<float> dst, LocalTensor<float> co1, uint32_t begin,
                                        uint32_t nRows, uint32_t sub, uint32_t nSize)
     {
@@ -811,9 +821,8 @@ private:
         }
     }
 
-    // Large-M path: one Mmad produces a complete rows x nSize NZ matrix, so L0C's C0 stride is
-    // mStride(=M). Each sub needs one Fixpipe starting at row begin inside the first n fractal, i.e.
-    // begin*C0.
+    // 大 M 路径：一次 Mmad 算出完整的 rows x nSize NZ 矩阵，L0C 的 C0 步长就是 mStride(=M)。
+    // 每个 sub 只有一条 fixpipe，起始地址是「第 begin 行在第一个 n 分形里的位置」= begin*C0。
     __aicore__ inline void FixpipeWide(LocalTensor<float> dst, LocalTensor<float> co1, uint32_t begin,
                                        uint32_t nRows, uint32_t sub, uint32_t nSize, uint32_t mStride)
     {
@@ -826,32 +835,8 @@ private:
         Fixpipe<float, float, CA_CFG_ROW_MAJOR_UB>(dst, co1[begin * CA_C0], fp);
     }
 
-    // Deliver the accumulated O from L0C into both subs' UB once per task
-    __aicore__ inline void FinishO(const CaTaskDesc& d)
-    {
-        LocalTensor<float> co1(TPosition::CO1, CA_CO1_ADDR_P, CA_MAX_R * CA_HEAD_DIM);
-        SetFlag<HardEvent::M_FIX>(EVENT_ID0);
-        WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
-        for (uint32_t sub = 0; sub < 2u; ++sub) {
-            const uint32_t nRows = CaSubRows(d.rows, sub);
-            if (nRows == 0u) {
-                continue;
-            }
-            const uint32_t begin = CaSubBegin(d.rows, sub);
-            LocalTensor<float> dst(TPosition::VECCALC, CA_UB_O, CA_UB_ROWS * CA_HEAD_DIM);
-            // Same condition as wideP in PvBeat: the large-M single Mmad leaves O as a complete NZ matrix in L0C
-            if ((d.rows % CA_BLOCK_CUBE == 0u) && (d.rows > CA_BLOCK_CUBE)) {
-                FixpipeWide(dst, co1, begin, nRows, sub, CA_HEAD_DIM, d.rows);
-            } else {
-                FixpipeRows(dst, co1, begin, nRows, sub, CA_HEAD_DIM);
-            }
-        }
-        // O's fixpipe uses its own FIX_M credit (EVENT_ID1): EVENT_ID0 is already taken by the S double slot
-        // in QK, and sharing one counter makes this wait return early, notifying AIV before O has landed.
-        SetFlag<HardEvent::FIX_M>(EVENT_ID1);
-        WaitFlag<HardEvent::FIX_M>(EVENT_ID1);
-        NotifyOReady();
-    }
+    // 任务末不再投递 O：online 口径下 O_run 全程在 AIV 的 UB 里逐拍合并（见 OUpdateBeat），
+    // L0C 的 PV 槽逐拍已被 fixpipe 排空，任务边界只剩 PV_FREE 信用补齐（见 RunTask）。
 
     const __gm__ CrossAttentionTilingData* tiling_;
     GlobalTensor<T> qGm_;
@@ -860,21 +845,20 @@ private:
     GlobalTensor<int32_t> btGm_;
     GlobalTensor<int64_t> lensGm_;
     uint32_t coreIdx_;
-    bool oPending_;
-    uint32_t l0Slot_;  // shared L0B slot pointer (alternates across QK / PV)
-    uint32_t pvASlot_; // L0A P panel double-slot pointer
-    uint32_t loops_;   // KV beats of the current task (bound of the V rolling prefetch)
-    bool vHead_;       // this task's V head window was issued by PrefetchFront
-    uint32_t effSeg_;  // effective segment count from the actual kvLen (1 = no merge)
-    // P's L1 slot index must use a beat counter that is continuous across tasks and paired with pUbSeq_
-    // on the AIV side. With a per-task beat, a single-beat task would always use slot 0, the P_FREE wait
-    // condition (beat >= CA_P_RING) would never fire across tasks, and AIV would overwrite P before AIC
-    // had read the previous task's copy.
+    uint32_t l0Slot_;  // L0B 共用槽指针（QK/PV 连续交替）
+    uint32_t pvASlot_; // L0A 中 P 面板双槽指针
+    uint32_t loops_;   // 当前任务的 KV 拍数（V 滚动预取的边界）
+    bool vHead_;       // 本任务的 V 首窗已由 PrefetchFront 发过
+    uint32_t effSeg_;  // 按实际 kvLen 推出的生效段数（1 = 不需要 merge）
+    // P 的 L1 环槽号必须用跨任务连续的拍号，和 AIV 侧的 pUbSeq_ 一一对应：
+    // 若按任务内的 beat 取槽，单拍任务会一直用 0 号槽，而 P_FREE 的等待条件是
+    // beat >= CA_P_RING，跨任务时永远不触发 —— AIV 会在 AIC 还没读走上一任务的
+    // P 时就把它覆写掉（现象：kv 极小的单拍形状错得最重）。
     uint32_t pSeq_ = 0u;
 };
 
 // ---------------------------------------------------------------------------
-// AIV: softmax / normalisation / merge
+// AIV：softmax / 归一化 / merge
 // ---------------------------------------------------------------------------
 template <typename T>
 class CrossAttentionAiv {
@@ -888,8 +872,7 @@ public:
         mergeGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(workspace));
         coreIdx_ = GetBlockIdx() >> 1;
         subIdx_ = GetSubBlockIdx();
-        // Scalar values are read into registers once in Init: feeding a GM value directly as the scalar
-        // operand of a vector instruction is unreliable.
+        // 标量表量在 Init 阶段一次性读入标量寄存器：向量指令的标量操作数直接取 GM 值不可靠
         scaleV_ = t->scaleValue;
         begin_ = 0u;
         nRows_ = 0u;
@@ -903,9 +886,9 @@ public:
             CaTaskDesc d;
             ParseTask(tiling_, taskIdx, lensGm_, d);
             if (d.kvLoops == 0) {
-                // The m/l area is partitioned per sub and both subs must write their own region
+                // m/l 区按 sub 分区，两个 sub 各写自己的区域，不能只让 sub0 写
                 if (effSeg_ > 1u) {
-                    WriteSentinelSlot(taskIdx);
+                    WriteSentinelSlot(taskIdx, d);
                 }
                 continue;
             }
@@ -913,7 +896,7 @@ public:
         }
 
         if (effSeg_ > 1u) {
-            // Paired with the AIC side: AIC + AIV global barrier so every core's merge slots have landed
+            // 与 AIC 侧成对出现：AIC+AIV 全局栅栏，保证各核 merge 槽已落地
             AscendC::SyncAll<false>();
             for (uint32_t taskIdx = coreIdx_; taskIdx < tiling_->totalTaskNum; taskIdx += tiling_->usedCoreNum) {
                 CaTaskDesc d;
@@ -926,7 +909,7 @@ public:
     }
 
 private:
-    // ---- UB views (all built from byte offsets, no TPipe) ----
+    // ---- UB 视图（全部按字节偏移构造，不用 TPipe） ----
     __aicore__ inline __local_mem__ float* UbF32(uint32_t off) const
     {
         LocalTensor<float> t(TPosition::VECCALC, off, 8);
@@ -949,7 +932,7 @@ private:
         return LocalTensor<T>(TPosition::VECCALC, off, elems);
     }
 
-    // ---- AIV side cross-core handshake (mode 4 intra block, own sub id only) ----
+    // ---- AIV 侧核间握手（mode 4 intra block，只用自己的 sub id） ----
     __aicore__ inline void WaitSReady()
     {
         CrossCoreWaitFlag<4>(CA_FLAG_S_READY + static_cast<uint16_t>(subIdx_) * CA_FLAG_SUB_STRIDE);
@@ -960,8 +943,7 @@ private:
         CrossCoreSetFlag<4, PIPE_MTE3>(CA_FLAG_P_READY + static_cast<uint16_t>(subIdx_) * CA_FLAG_SUB_STRIDE);
     }
 
-    // The S slot has been read into UB and can be returned to AIC. The call site must sit after all
-    // vector reads of S have landed.
+    // S 槽已读进 UB，可以还给 AIC 覆写。调用点必须在 S 的向量读取全部落地之后。
     __aicore__ inline void NotifySFree()
     {
         CrossCoreSetFlag<4, PIPE_V>(CA_FLAG_S_FREE + static_cast<uint16_t>(subIdx_) * CA_FLAG_SUB_STRIDE);
@@ -969,21 +951,21 @@ private:
 
     __aicore__ inline void WaitPFree()
     {
-        // Stays on PIPE_S (attaching it to PIPE_MTE3 deadlocks as well)
+        // 默认挂在 PIPE_S 上（同上：挂 MTE3 会引入死锁）。
         CrossCoreWaitFlag<4>(CA_FLAG_P_FREE + static_cast<uint16_t>(subIdx_) * CA_FLAG_SUB_STRIDE);
     }
 
-    __aicore__ inline void WaitOReady()
+    __aicore__ inline void WaitPvReady()
     {
-        CrossCoreWaitFlag<4>(CA_FLAG_O_READY + static_cast<uint16_t>(subIdx_) * CA_FLAG_SUB_STRIDE);
+        CrossCoreWaitFlag<4>(CA_FLAG_PV_READY + static_cast<uint16_t>(subIdx_) * CA_FLAG_SUB_STRIDE);
     }
-    // O has been read, AIC may overwrite this sub's O buffer
-    __aicore__ inline void NotifyOFree()
+    // 本拍 PV 已并入 O_run，AIC 可以覆写该 sub 的 PV 环槽
+    __aicore__ inline void NotifyPvFree()
     {
-        CrossCoreSetFlag<4, PIPE_V>(CA_FLAG_O_FREE + static_cast<uint16_t>(subIdx_) * CA_FLAG_SUB_STRIDE);
+        CrossCoreSetFlag<4, PIPE_V>(CA_FLAG_PV_FREE + static_cast<uint16_t>(subIdx_) * CA_FLAG_SUB_STRIDE);
     }
 
-    // ---- Scalar / vector helpers ----
+    // ---- 标量 + 向量混合工具 ----
     __aicore__ inline float ExpScalar(float x)
     {
         LocalTensor<float> red = UbF32Tensor(CA_UB_SCAL + CA_SCAL_RED, 64);
@@ -996,10 +978,21 @@ private:
         return red.GetValue(0);
     }
 
-    __aicore__ inline void ZeroLAcc()
+    __aicore__ inline void ZeroOAcc()
     {
-        LocalTensor<float> lacc = UbF32Tensor(CA_UB_LACC, CA_UB_ROWS * CA_HEAD_DIM);
-        Duplicate(lacc, 0.0f, CA_UB_ROWS * CA_HEAD_DIM);
+        LocalTensor<float> oAcc = UbF32Tensor(CA_UB_O, CA_UB_ROWS * CA_HEAD_DIM);
+        Duplicate(oAcc, 0.0f, CA_UB_ROWS * CA_HEAD_DIM);
+        PipeBarrier<PIPE_V>();
+    }
+
+    // 每任务的 online 行状态复位：gm 从 CA_MINV 起折，lsum 从 0 起累。
+    // 都用向量写（与 SoftmaxRows / StoreML 的 V_S 屏障口径一致，避免标量-向量跨管道竞态）。
+    __aicore__ inline void InitRowState()
+    {
+        LocalTensor<float> rowm = UbF32Tensor(CA_UB_ROWM, CA_UB_ROWM_ELEMS);
+        LocalTensor<float> lsum = UbF32Tensor(CA_UB_LSUM, CA_UB_ROWS * 64);
+        Duplicate(rowm, CA_MINV, CA_UB_ROWM_ELEMS);
+        Duplicate(lsum, 0.0f, CA_UB_ROWS * 64);
         PipeBarrier<PIPE_V>();
     }
 
@@ -1007,19 +1000,23 @@ private:
     {
         begin_ = CaSubBegin(d.rows, subIdx_);
         nRows_ = CaSubRows(d.rows, subIdx_);
-        ZeroLAcc();
+        ZeroOAcc();
+        InitRowState();
         const uint32_t loops = d.kvLoops;
+        // 本任务首拍的跨任务全局拍号（与 AIC 的 pSeq_ 同源，用于 PV / dm 环槽配对）
+        const uint32_t pvBase = pUbSeq_;
         for (uint32_t i = 0; i < loops; ++i) {
             SoftmaxBeat(d, i);
         }
-        // AIC produces one P_FREE per beat and this side only consumes the ones beyond the ring depth, so
-        // top up the remainder at the end of the task
+        // 收尾：任务最后一拍的 PV 必须并进 O_run——它既补全 O_run / PV_READY / PV_FREE
+        // 的配对，又是 AIC 任务末 PV_FREE 补齐能收齐信用的前提。
+        OUpdateBeat(pvBase + loops - 1u);
+        // P_FREE 是 AIC 每拍产出一份、本侧只在超出环深时消费，任务末补齐
         const uint32_t drainP = loops < CA_P_RING ? loops : CA_P_RING;
         for (uint32_t k = 0; k < drainP; ++k) {
             WaitPFree();
         }
 
-        WaitOReady();
         if (effSeg_ == 1u) {
             WriteOutput(d);
         } else {
@@ -1027,23 +1024,25 @@ private:
         }
     }
 
-    // Mask row: columns [0, nReal) get clampVal (upper clamp), the rest get CA_MINV so exp() returns 0
-    __aicore__ inline void BuildMaskRow(uint32_t nReal, float clampVal)
+    // 掩码行：列 [0, nReal) 置 clampVal，其余列置 CA_MINV。每拍建两份：
+    //   CA_UB_MASKB（clampVal=CA_BIGV）：max pass 用，无效列压成 CA_MINV 不参与取最大
+    //   CA_UB_MASK （clampVal=SoftClampV）：P pass 用，减完 gm 后上钳（online 下恒不生效，纯保险）
+    __aicore__ inline void BuildMaskRow(uint32_t ubOff, uint32_t nReal, float clampVal)
     {
-        __local_mem__ float* maskPtr = UbF32(CA_UB_MASK);
+        __local_mem__ float* maskPtr = UbF32(ubOff);
         __VEC_SCOPE__
         {
             Mapi::RegTensor<float> vA, vB;
             uint32_t cFull = 64u;
-            // UpdateMask takes the remaining count and post-decrements; beyond one vector width the result is
-            // undefined, so clamp explicitly to <= 64.
+            // UpdateMask 是「取剩余个数并后置递减」，超过一个向量宽度时行为不确定，
+            // 这里显式限幅到 <= 64。
             uint32_t c0 = (nReal < 64u) ? nReal : 64u;
             uint32_t c1 = (nReal > 64u) ? (nReal - 64u) : 0u;
             Mapi::MaskReg mFull = Mapi::UpdateMask<float>(cFull);
             Mapi::MaskReg m0 = Mapi::UpdateMask<float>(c0);
             Mapi::MaskReg m1 = Mapi::UpdateMask<float>(c1);
-            // Note: a masked Duplicate defaults to ZEROING (unselected lanes cleared) and would wipe the CA_MINV
-            // laid down above; MERGING is required to keep the previous dst values.
+            // 注意：Duplicate 带 mask 时默认是 ZEROING（未选中 lane 清零），会把
+            // 前一次铺好的 CA_MINV 抹成 0；必须显式用 MERGING 保留 dst 的旧值。
             Mapi::Duplicate(vA, CA_MINV, mFull);
             Mapi::Duplicate<float, Mapi::MaskMergeMode::MERGING>(vA, clampVal, m0);
             Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(maskPtr, vA, mFull);
@@ -1053,63 +1052,74 @@ private:
         }
     }
 
-    // Beat 0 per-row maximum with scale and mask applied; the result lands in CA_UB_ROWM, one vector per
-    // row, and is broadcast back on every beat. Per row rather than per tile is what keeps P representable:
-    // with a single tile-wide offset, rows sitting more than ~16.6 below the tile maximum underflow to 0 in
-    // fp16, and a later beat exceeding it by more than ~11.1 overflows to inf.
-    __aicore__ inline void ComputeRowMax(__local_mem__ float* sPtr)
-    {
-        __local_mem__ float* maskPtr = UbF32(CA_UB_MASK);
-        __local_mem__ float* rowmPtr = UbF32(CA_UB_ROWM);
-        const uint16_t nRows = static_cast<uint16_t>(nRows_);
-        const float scale = scaleV_;
-        __VEC_SCOPE__
-        {
-            Mapi::RegTensor<float> vS0, vS1, vN0, vN1, vR;
-            uint32_t cFull = 64u;
-            Mapi::MaskReg mFull = Mapi::UpdateMask<float>(cFull);
-            // The mask row holds CA_BIGV/CA_MINV here: valid columns pass through, invalid ones collapse to
-            // CA_MINV and never win the maximum
-            Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vN0, maskPtr);
-            Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vN1, maskPtr + 64);
-            for (uint16_t r = 0; r < nRows; ++r) {
-                const uint32_t ro = static_cast<uint32_t>(r) * CA_HEAD_DIM;
-                Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vS0, sPtr + ro);
-                Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vS1, sPtr + ro + 64);
-                Mapi::Muls(vS0, vS0, scale, mFull);
-                Mapi::Muls(vS1, vS1, scale, mFull);
-                Mapi::Min(vS0, vS0, vN0, mFull);
-                Mapi::Min(vS1, vS1, vN1, mFull);
-                Mapi::Max(vS0, vS0, vS1, mFull);
-                Mapi::ReduceMax(vR, vS0, mFull);
-                Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(rowmPtr + static_cast<uint32_t>(r) * 64, vR, mFull);
-            }
-        }
-        SetFlag<HardEvent::V_S>(EVENT_ID0);
-        WaitFlag<HardEvent::V_S>(EVENT_ID0);
-    }
-
-    // Upper clamp span for this dtype: the largest exp argument, relative to a row's own m, that still fits P.
+    // 本 dtype 的 P 保险钳位：online 口径下减完运行 gm 后有效列的自变量恒 <= 0，
+    // 这个上钳只在异常路径兜底（见公共头），不再是截断手段。
     __aicore__ inline float SoftClampV() const
     {
         return AscendC::IsSameType<T, half>::value ? CA_SOFT_CLAMP_FP16 : CA_SOFT_CLAMP_BF16;
     }
 
-    // One softmax beat: exp(s*scale - m_row) accumulated into l and cast to T into the P UB buffer.
-    // The subtraction uses each row's own m (broadcast from CA_UB_ROWM) and the mask Min runs afterwards, so
-    // that single Min both masks the tail block (invalid columns become CA_MINV, exp = 0) and clamps the
-    // result into the 16-bit window of P.
+    // 一拍 online softmax（FA2 口径，逐行折叠，含 1/scale 与两份掩码，见 SoftmaxBeat）：
+    //   1) 本拍行最大 lm（BIGV 掩码压无效列），gm = max(gm, lm) 写回 CA_UB_ROWM；
+    //      原始差值 (gm_old - gm_new) 按 lane 0 落 CA_UB_DM 环槽暂存；
+    //   2) scope 2 BRC 读回差值（跨 scope + V_S 屏障后可见，同旧版 ComputeRowMax ->
+    //      SoftmaxRows 读 ROWM 的口径），exp 得 dm，覆写回同一槽供隔拍 OUpdateBeat 广播读；
+    //   3) P = exp(scale*S - gm)（减完再 Min 掩码：无效列压 CA_MINV，exp 归零），
+    //      转 T 写 P 的 UB 环槽（与改动前口径一致）；
+    //   4) lsum = lsum * dm + rowsum(P)，直接落 CA_UB_LSUM（列 0，广播读写口径同 gm），
+    //      任务末不再有元素级 lacc / ReduceRows。
+    // 必须逐行而不是全块最大：P 是 16bit，块最大当整块偏移时，行间 logit 跨度超过约 16.6
+    // 会让整行的 exp 在 fp16 里下溢成 0。
     __aicore__ inline void SoftmaxRows(__local_mem__ float* sPtr, uint32_t pseq)
     {
-        __local_mem__ float* laccPtr = UbF32(CA_UB_LACC);
+        __local_mem__ float* lsumPtr = UbF32(CA_UB_LSUM);
         __local_mem__ float* maskPtr = UbF32(CA_UB_MASK);
+        __local_mem__ float* maskBPtr = UbF32(CA_UB_MASKB);
         __local_mem__ float* rowmPtr = UbF32(CA_UB_ROWM);
+        __local_mem__ float* dmPtr = UbF32(CA_UB_DM + (pseq % CA_DM_SLOTS) * CA_DM_SLOT_BYTES);
         __local_mem__ T* pPtr = UbT(CA_UB_P + (pseq % CA_P_UB_SLOTS) * CA_UB_P_SLOT_BYTES);
         const uint16_t nRows = static_cast<uint16_t>(nRows_);
         const float scale = scaleV_;
+        // scope 1：逐行折叠 gm 落 ROWM，(gm_old - gm_new) 的 lane 0 落 dm 槽暂存
         __VEC_SCOPE__
         {
-            Mapi::RegTensor<float> vS0, vS1, vL0, vL1, vM, vN0, vN1;
+            Mapi::RegTensor<float> vS0, vS1, vA0, vA1, vNB0, vNB1;
+            Mapi::RegTensor<float> vOld, vHm, vDraw, vR;
+            uint32_t cFull = 64u;
+            Mapi::MaskReg mFull = Mapi::UpdateMask<float>(cFull);
+            Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vNB0, maskBPtr);
+            Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vNB1, maskBPtr + 64);
+            for (uint16_t r = 0; r < nRows; ++r) {
+                const uint32_t ro = static_cast<uint32_t>(r) * CA_HEAD_DIM;
+                const uint32_t rm = static_cast<uint32_t>(r) * 64;
+                Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vS0, sPtr + ro);
+                Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vS1, sPtr + ro + 64);
+                Mapi::Muls(vS0, vS0, scale, mFull);
+                Mapi::Muls(vS1, vS1, scale, mFull);
+                // 本拍行最大：无效列压 CA_MINV，不参与
+                Mapi::Min(vA0, vS0, vNB0, mFull);
+                Mapi::Min(vA1, vS1, vNB1, mFull);
+                Mapi::Max(vA0, vA0, vA1, mFull);
+                Mapi::ReduceMax(vR, vA0, mFull);
+                // 折叠运行最大：vR 只有 lane 0 有效，vHm 的其余 lane 仍是 gm_old 的广播值；
+                // 落 ROWM 的 lane 0 即新 gm，BRC 读回口径只取 lane 0，scope 2 拿到的就是
+                // 干净的标量 gm 全 lane 广播。差值同理只保留 lane 0。
+                Mapi::DataCopy<float, Mapi::LoadDist::DIST_BRC_B32>(vOld, rowmPtr + rm);
+                Mapi::Max(vHm, vOld, vR, mFull);
+                Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(rowmPtr + rm, vHm, mFull);
+                Mapi::Sub(vDraw, vOld, vHm, mFull);
+                Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(dmPtr + rm, vDraw, mFull);
+            }
+        }
+        // scope 1 的写入要跨 scope 才对 scope 2 的 BRC 读可见：SetFlag/WaitFlag V_S 让标量
+        // 管道等向量管道排空，后续 vcopy 发射时数据已落地（旧版 ComputeRowMax 同款）。
+        SetFlag<HardEvent::V_S>(EVENT_ID0);
+        WaitFlag<HardEvent::V_S>(EVENT_ID0);
+        // scope 2：BRC 读回 gm/dm 标量广播，算 P、dm 覆写、lsum 折叠与 P 落 16bit 环槽
+        __VEC_SCOPE__
+        {
+            Mapi::RegTensor<float> vS0, vS1, vA0, vN0, vN1;
+            Mapi::RegTensor<float> vHm, vDm, vLs, vLo;
             Mapi::RegTensor<T> vT0, vT1;
             uint32_t cFull = 64u;
             Mapi::MaskReg mFull = Mapi::UpdateMask<float>(cFull);
@@ -1117,30 +1127,78 @@ private:
             Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vN1, maskPtr + 64);
             for (uint16_t r = 0; r < nRows; ++r) {
                 const uint32_t ro = static_cast<uint32_t>(r) * CA_HEAD_DIM;
+                const uint32_t rm = static_cast<uint32_t>(r) * 64;
+                Mapi::DataCopy<float, Mapi::LoadDist::DIST_BRC_B32>(vHm, rowmPtr + rm);
+                Mapi::DataCopy<float, Mapi::LoadDist::DIST_BRC_B32>(vDm, dmPtr + rm);
+                Mapi::Exp(vDm, vDm, mFull);
+                // dm 覆写回同槽：全 lane 一致，OUpdateBeat 的 BRC 读不受脏 lane 影响
+                Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(dmPtr + rm, vDm, mFull);
+                // P = exp(scale*S - gm)：有效列自变量恒 <= 0
                 Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vS0, sPtr + ro);
                 Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vS1, sPtr + ro + 64);
                 Mapi::Muls(vS0, vS0, scale, mFull);
                 Mapi::Muls(vS1, vS1, scale, mFull);
-                // One broadcast load per row is the only extra instruction versus a tile-wide m
-                Mapi::DataCopy<float, Mapi::LoadDist::DIST_BRC_B32>(vM, rowmPtr + static_cast<uint32_t>(r) * 64);
-                Mapi::Sub(vS0, vS0, vM, mFull);
-                Mapi::Sub(vS1, vS1, vM, mFull);
+                Mapi::Sub(vS0, vS0, vHm, mFull);
+                Mapi::Sub(vS1, vS1, vHm, mFull);
                 Mapi::Min(vS0, vS0, vN0, mFull);
                 Mapi::Min(vS1, vS1, vN1, mFull);
                 Mapi::Exp(vS0, vS0, mFull);
                 Mapi::Exp(vS1, vS1, mFull);
-                Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vL0, laccPtr + ro);
-                Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vL1, laccPtr + ro + 64);
-                Mapi::Add(vL0, vL0, vS0, mFull);
-                Mapi::Add(vL1, vL1, vS1, mFull);
-                Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(laccPtr + ro, vL0, mFull);
-                Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(laccPtr + ro + 64, vL1, mFull);
+                // lsum = lsum * dm + rowsum（ReduceSum 只有 lane 0 有效，落位后按列 0 广播读）
+                Mapi::Add(vA0, vS0, vS1, mFull);
+                Mapi::ReduceSum(vLs, vA0, mFull);
+                Mapi::DataCopy<float, Mapi::LoadDist::DIST_BRC_B32>(vLo, lsumPtr + rm);
+                Mapi::Mul(vLo, vLo, vDm, mFull);
+                Mapi::Add(vLo, vLo, vLs, mFull);
+                Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(lsumPtr + rm, vLo, mFull);
+                // P 转 16bit 进 UB 环槽
                 CaCastF32To(vT0, vS0, mFull);
                 CaCastF32To(vT1, vS1, mFull);
                 Mapi::DataCopy<T, Mapi::StoreDist::DIST_PACK_B32>(pPtr + ro, vT0, mFull);
                 Mapi::DataCopy<T, Mapi::StoreDist::DIST_PACK_B32>(pPtr + ro + 64, vT1, mFull);
             }
         }
+        // gm / lsum / dm 都在向量管道里写完：StoreML 与 OUpdateBeat 的后续读
+        // （标量 GetValue / 向量广播）依赖这次同步，口径与改动前的 ComputeRowMax 一致。
+        SetFlag<HardEvent::V_S>(EVENT_ID0);
+        WaitFlag<HardEvent::V_S>(EVENT_ID0);
+    }
+
+    // 隔拍合并：把 pvseq 那一拍的 PV（AIC 逐拍 fixpipe 进 CA_UB_PV 环槽）并入 O_run：
+    //   O_run = O_run * dm + PV，dm 用 SoftmaxRows 同拍号写好的 CA_UB_DM 环槽按行广播读。
+    // 空行 sub（rows <= 16 时的 sub1）没有向量工作，但 PV_READY / PV_FREE 必须照常消费 /
+    // 归还：AIC 的 NotifyPvReady / WaitPvFree 都是按 sub 成对发的，缺一份就会死锁。
+    __aicore__ inline void OUpdateBeat(uint32_t pvseq)
+    {
+        WaitPvReady();
+        if (nRows_ != 0u) {
+            __local_mem__ float* oPtr = UbF32(CA_UB_O);
+            __local_mem__ float* pvPtr = UbF32(CA_UB_PV + (pvseq % CA_PV_RING) * CA_PV_SLOT_BYTES);
+            __local_mem__ float* dmPtr = UbF32(CA_UB_DM + (pvseq % CA_DM_SLOTS) * CA_DM_SLOT_BYTES);
+            const uint16_t nRows = static_cast<uint16_t>(nRows_);
+            __VEC_SCOPE__
+            {
+                Mapi::RegTensor<float> vO0, vO1, vP0, vP1, vDm;
+                uint32_t cFull = 64u;
+                Mapi::MaskReg mFull = Mapi::UpdateMask<float>(cFull);
+                for (uint16_t r = 0; r < nRows; ++r) {
+                    const uint32_t ro = static_cast<uint32_t>(r) * CA_HEAD_DIM;
+                    Mapi::DataCopy<float, Mapi::LoadDist::DIST_BRC_B32>(vDm, dmPtr + static_cast<uint32_t>(r) * 64);
+                    Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vO0, oPtr + ro);
+                    Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vO1, oPtr + ro + 64);
+                    Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vP0, pvPtr + ro);
+                    Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vP1, pvPtr + ro + 64);
+                    Mapi::Mul(vO0, vO0, vDm, mFull);
+                    Mapi::Mul(vO1, vO1, vDm, mFull);
+                    Mapi::Add(vO0, vO0, vP0, mFull);
+                    Mapi::Add(vO1, vO1, vP1, mFull);
+                    Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(oPtr + ro, vO0, mFull);
+                    Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(oPtr + ro + 64, vO1, mFull);
+                }
+            }
+        }
+        // PV 槽与 dm 槽都已读完（PIPE_V 上置位保证向量读取完成），AIC 可以覆写
+        NotifyPvFree();
     }
 
     __aicore__ inline void CaCastF32To(Mapi::RegTensor<T>& dst, Mapi::RegTensor<float>& src, Mapi::MaskReg& mask)
@@ -1152,32 +1210,27 @@ private:
         }
     }
 
-    // P: UB row major -> L1 A1 ring slot over the A5 CV channel (hardware copy_ubuf_to_cbuf).
-    // No GM round trip and no TPipe: AIV's MTE3 writes the 32 B fragments straight into the L1 NZ fractal.
-    // In UB each 16-column group is one contiguous 32 B run and adjacent rows are CA_HEAD_DIM*2 = 256 B
-    // apart, see the per-column descriptor below.
-    // The landing layout is byte identical to what AIC's Nd2Nz used to produce, so AIC can drop the GM
-    // read back and the Nd2Nz and call SplitA directly.
-    __aicore__ inline void CopyPToL1(const CaTaskDesc& d, uint32_t pseq)
+    // P：UB 行主序 -> L1 的 A1 环槽，走 A5 的 CV 通道（UB -> L1，硬件是 copy_ubuf_to_cbuf）。
+    // 不经 GM、也不需要 TPipe：AIV 的 MTE3 直接把 32B 片段写进 L1 的 NZ 分形。
+    // UB 里每个 16 列组是一段连续 32B，相邻行隔 CA_HEAD_DIM*2 = 256B，画面见下面的按列描述符。
+    // 落点与改动前 AIC 侧 Nd2Nz 的输出布局逐字节一致，因此 AIC 侧去掉 GM 读回与 Nd2Nz，直接 SplitA。
+    __aicore__ inline void CopyPToL1(const CaTaskDesc& d, uint32_t beat, uint32_t pseq)
     {
-        // The slot index shares pSeq_ with AIC: continuous across tasks, otherwise single-beat tasks would
-        // keep overwriting slot 0.
+        // 槽号与 AIC 的 pSeq_ 同源：跨任务连续，否则单拍任务会反复压 0 号槽。
         const uint32_t slot = pseq % CA_P_RING;
         LocalTensor<T> pU(TPosition::VECCALC, CA_UB_P + (pseq % CA_P_UB_SLOTS) * CA_UB_P_SLOT_BYTES,
                           CA_UB_ROWS * CA_HEAD_DIM);
         LocalTensor<T> pL1(TPosition::A1, CA_A1_ADDR_P + slot * CA_P_SLOT_BYTES, CA_A_ELEMS);
         SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
         WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
-        // Issued per 16-column group: one descriptor covers one 16-column group of one 16-row block. On the
-        // source side adjacent rows are 8 x 32 B apart (CA_HEAD_DIM*2 = 256 B); on the destination side the
-        // 16 units of 32 B inside one fractal are contiguous (dstStride = 0) and the next column group moves
-        // to the next fractal (+512 B = 32 units of 32 B).
-        // Descriptor count = blocks x 8, half of the per-row form, while the MTE3 burst count is unchanged.
-        // The landing layout is byte identical, so AIC still calls SplitA directly.
-        // Large-M case (same condition as wideP in PvBeat): P's L1 layout becomes the interleaved panel, the
-        // fractal base of column group g is g*rows*16 and this sub's rows are contiguous inside a fractal.
-        // Each descriptor still stays within 16 rows (the hardware destination must be contiguous inside one
-        // fractal); only the base is laid out per column group.
+        // 按 16 列组下发：一条描述符 = 一个 16 行分块里的一个 16 列组。源侧相邻行隔
+        // 8 个 32B 块（CA_HEAD_DIM*2 = 256B），目的侧同一分形内 16 个 32B 连续
+        // （dstStride = 0），下一个列组换一个分形（+512B = 32 个 32B 块）。
+        // 描述符数 = 分块数 x 8，比逐行写法（行数 x 1）少一半，且 MTE3 的 burst 数不变。
+        // 落点与逐行写法逐字节一致，AIC 侧仍然直接 SplitA。
+        // 大 M 口径（与 PvBeat 的 wideP 同条件）：P 的 L1 布局改成整面板交错，第 g 个
+        // 16 列组的分形基址 = g*rows*16，本 sub 的行段在分形里连续。每条描述符仍不跨
+        // 16 行（硬件 dst 同分形内连续，跨分形块就要换基址），只是基址按列组整段排。
         const uint32_t nbCount = CaCeilDiv(d.rows, CA_BLOCK_CUBE);
         const bool wideP = (d.rows % CA_BLOCK_CUBE == 0u) && (nbCount > 1u);
         for (uint32_t c = 0; c < CaCeilDiv(nRows_, CA_BLOCK_CUBE); ++c) {
@@ -1187,103 +1240,81 @@ private:
             const uint32_t rowBase = begin_ + c * CA_BLOCK_CUBE;
             const uint32_t blkBase = wideP ? 0u : (rowBase / CA_BLOCK_CUBE) * CA_BLOCK_CUBE * CA_HEAD_DIM;
             DataCopyParams cp;
-            cp.blockCount = static_cast<uint16_t>(cnt);                              // rows of this block
-            cp.blockLen = 1u;                                                        // 32 B = 16 T
-            cp.srcStride = static_cast<uint16_t>(CA_HEAD_DIM / CA_C0 - 1u);           // 7 x 32 B between rows
-            cp.dstStride = 0u;                                                       // contiguous in a fractal
+            cp.blockCount = static_cast<uint16_t>(cnt);                              // 本分块的行数
+            cp.blockLen = 1u;                                                        // 32B = 16 个 T
+            cp.srcStride = static_cast<uint16_t>(CA_HEAD_DIM / CA_C0 - 1u);           // 跨行 7 个 32B
+            cp.dstStride = 0u;                                                       // 分形内连续
             for (uint32_t g = 0; g < CA_HEAD_DIM / CA_C0; ++g) {
                 const uint32_t dstOff = wideP ? (g * d.rows * CA_C0 + rowBase * CA_C0)
                                               : (blkBase + g * CA_BLOCK_CUBE * CA_C0);
                 DataCopy(pL1[dstOff], pU[ubBase + g * CA_C0], cp);
             }
         }
-        // P_READY is set only after all descriptors are issued; the flag rides on MTE3 and orders after them
+        // 8 条描述符全部发完才置 P_READY（flag 挂在 MTE3 上，天然排在它们之后）
         PipeBarrier<PIPE_MTE3>();
         NotifyPReady();
-        // This UB slot is only rewritten CA_P_UB_SLOTS beats later, so set the credit here and leave the MTE3
-        // copy under the next beat's vector work. The matching wait is in SoftmaxBeat.
-        // Ids 2/3 stay clear of the OUTPUT buffer's MTE3_V (EVENT_ID0); with one id two Sets and one Wait
-        // would merge.
+        // 该 UB 槽 CA_P_UB_SLOTS 拍之后才被向量覆写：这里只置信用，本拍不等，
+        // 让这笔 MTE3 压在下一拍的向量之下。等待点见 SoftmaxBeat。
+        // 用 id 2/3，避开 OUTPUT 缓冲的 MTE3_V(EVENT_ID0)，否则两次 Set 一次 Wait 会合并。
         SetFlag<HardEvent::MTE3_V>((pseq % CA_P_UB_SLOTS) == 0u ? CA_PUB_S0 : CA_PUB_S1);
     }
 
     __aicore__ inline void SoftmaxBeat(const CaTaskDesc& d, uint32_t beat)
     {
-        // P's UB slot index advances continuously across tasks: a single-beat task restarts beat at 0, so
-        // deriving the slot from beat would misalign the SetFlag / WaitFlag credits at task boundaries.
+        // P 的 UB 槽号跨任务连续递增：单拍任务下 beat 每任务从 0 重启，
+        // 若按 beat 取槽，信用（SetFlag/WaitFlag）会在任务边界上错位。
         const uint32_t pseq = pUbSeq_;
         ++pUbSeq_;
         WaitSReady();
         __local_mem__ float* sPtr = UbF32(CA_UB_S + (beat % CA_S_RING) * CA_S_SLOT_BYTES);
 
-        // Valid columns of this beat (the tail block needs a mask)
+        // 本拍的有效列数（尾块需要掩码）
         const uint32_t nRealBase = beat * CA_KV_TILE;
         uint32_t nReal = (d.segValid > nRealBase) ? (d.segValid - nRealBase) : 0u;
         if (nReal > CA_KV_TILE) {
             nReal = CA_KV_TILE;
         }
         if (nReal == 0u) {
-            nReal = 1u; // ParseTask keeps kvLoops consistent with segValid; this is only a guard
+            nReal = 1u; // ParseTask 保证 kvLoops 与 segValid 一致，这里只做兜底
         }
 
         if (nRows_ != 0u) {
-            if (beat == 0u) {
-                // m is computed once per task on the first beat: per-row maximum plus mask (invalid columns
-                // are set to CA_BIGV so they stay out of it)
-                BuildMaskRow(nReal, CA_BIGV);
-                ComputeRowMax(sPtr);
-            }
-            // Valid columns are clamped to this dtype's P window, invalid ones are set to CA_MINV
-            BuildMaskRow(nReal, SoftClampV());
-            // The MTE3 of the previous round must finish reading the P slot this beat writes (the credit was set
-            // CA_P_UB_SLOTS beats earlier)
+            // online 口径：每拍都要折行最大。两份掩码行各建一份：BIGV 版供 max pass
+            //（无效列压 CA_MINV 不参与取最大），SoftClamp 版供 P pass（无效列 exp 归零）
+            BuildMaskRow(CA_UB_MASKB, nReal, CA_BIGV);
+            BuildMaskRow(CA_UB_MASK, nReal, SoftClampV());
+            // 本拍要写的 P 槽上一轮的 MTE3 必须读完（信用在 CA_P_UB_SLOTS 拍之前置位）
             if (pseq >= CA_P_UB_SLOTS) {
                 WaitFlag<HardEvent::MTE3_V>((pseq % CA_P_UB_SLOTS) == 0u ? CA_PUB_S0 : CA_PUB_S1);
             }
             SoftmaxRows(sPtr, pseq);
         }
-        // The S slot has been read (set on PIPE_V, so the vector read is complete) and AIC may overwrite it
+        // S 槽已读完（PIPE_V 上置位，保证向量读取完成），AIC 可以覆写
         NotifySFree();
 
-        // The ring credit threshold must follow the per-task beat, not the continuous pseq. Task boundaries
-        // are already covered by the O_FREE barrier in FinishO: AIV answers O_FREE only after writing the
-        // last P of the task and AIC enters the next task only then, so no extra P_FREE guard is needed
-        // across tasks. Judging by pseq would create a cross-task wait that never completes, because a
-        // mode 4 flag is just an event register and AIC's early sets do not accumulate.
+        // 任务边界已由 RunTask 末尾的 S_FREE / PV_FREE 信用补齐兜住（AIV 把本任务最后一拍的
+        // S 与 PV 全部消费完才归还最后的信用，AIC 收到才进下一个任务），所以跨任务不需要
+        // 额外的 P_FREE 保护；而按 pseq 判会在多任务之后触发跨任务的等待，mode 4 的 flag
+        // 只是事件寄存器，AIC 早期置的位不会累积，实测 b=8 kv=300 直接死锁。
         if (beat >= CA_P_RING) {
             WaitPFree();
         }
         if (nRows_ != 0u) {
-            CopyPToL1(d, pseq);
+            CopyPToL1(d, beat, pseq);
         } else {
             NotifyPReady();
         }
-    }
 
-    __aicore__ inline void ReduceRows()
-    {
-        __local_mem__ float* laccPtr = UbF32(CA_UB_LACC);
-        __local_mem__ float* lsumPtr = UbF32(CA_UB_LSUM);
-        const uint16_t nRows = static_cast<uint16_t>(nRows_);
-        __VEC_SCOPE__
-        {
-            Mapi::RegTensor<float> vL0, vL1, vR;
-            uint32_t cFull = 64u;
-            Mapi::MaskReg mFull = Mapi::UpdateMask<float>(cFull);
-            for (uint16_t r = 0; r < nRows; ++r) {
-                const uint32_t ro = static_cast<uint32_t>(r) * CA_HEAD_DIM;
-                Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vL0, laccPtr + ro);
-                Mapi::DataCopy<float, Mapi::LoadDist::DIST_NORM>(vL1, laccPtr + ro + 64);
-                Mapi::Add(vL0, vL0, vL1, mFull);
-                Mapi::ReduceSum(vR, vL0, mFull);
-                Mapi::DataCopy<float, Mapi::StoreDist::DIST_NORM>(lsumPtr + static_cast<uint32_t>(r) * 64, vR, mFull);
-            }
+        // 隔拍合并：本拍 P 已发出，把上一拍的 PV 并进 O_run——PV(beat-1) 的 Mmad + fixpipe
+        // 链与本拍 softmax 重叠，这里的等待通常已落地；最后一拍在 RunTask 收尾处补。
+        if (beat > 0u) {
+            OUpdateBeat(pseq - 1u);
         }
     }
 
-    // out = O / l, cast to T into CA_UB_OUT.
-    // 1/l is not computed per row as a scalar: l is broadcast per row and the division is done as a
-    // vector op, which removes the per-row GetValue / SetValue pairs and the extra V_S / S_V syncs.
+    // out = O / l，转 T 落到 CA_UB_OUT
+    // 1/l 不再用标量逐行求：直接按行广播 l 做向量 Div，省掉 StoreInverseL 的
+    // 32 次 GetValue/SetValue 与两对 V_S / S_V 同步。
     __aicore__ inline void ScaleAndCast()
     {
         __local_mem__ float* oPtr = UbF32(CA_UB_O);
@@ -1320,9 +1351,10 @@ private:
                tiling_->headDim;
     }
 
-    // Write the output rows back to GM: the g heads of one q row tile are adjacent in GM and adjacent
-    // q rows are qHeads heads apart, so the whole range fits one multi-block descriptor instead of one
-    // DataCopy per q row, each of which pays a fixed launch overhead.
+    // 输出行回写 GM：同一 q 行内的 groupSize 个 head 在 GM 里相邻，相邻 q 行之间固定跳
+    // qHeads 个 head，因此整段可以用一个多块描述符发完。原来每个 q 行单独一次 DataCopy，
+    // q=64 形状每任务 8~16 次 1 KB 小搬运，每次都要付固定的搬运启动开销（实测 0.07~0.2 µs/次），
+    // 这是 AIV 侧 MTE3 占比偏高的直接原因之一。
     __aicore__ inline void CopyRowsToGm(const CaTaskDesc& d, const LocalTensor<T>& src, uint32_t begin,
                                         uint32_t rows)
     {
@@ -1334,7 +1366,7 @@ private:
             DataCopyParams cp;
             cp.blockCount = static_cast<uint16_t>(rows / g);
             cp.blockLen = static_cast<uint16_t>(blkBytes / 32u);
-            cp.srcStride = 0; // blocks are contiguous in UB
+            cp.srcStride = 0; // UB 侧各块连续
             cp.dstStride = static_cast<uint16_t>(gapBytes / 32u);
             DataCopy(outGm_[OutputElem(d, begin)], src, cp);
             return;
@@ -1354,23 +1386,20 @@ private:
 
     __aicore__ inline void WriteOutput(const CaTaskDesc& d)
     {
+        // online：O_run / lsum 已由逐拍 SoftmaxRows + OUpdateBeat（含 RunTask 收尾补拍）备齐，
+        // 不再有 ReduceRows 与 O 缓冲信用；本 sub 分不到行时直接返回（PV 配对应 SoftmaxBeat /
+        // OUpdateBeat 已按拍成对处理完）。
         if (nRows_ == 0u) {
-            // This sub owns no rows (sub1 is empty when rows <= 16) but must still return the O buffer credit:
-            // AIC's WaitOFree expects one credit per sub and would block forever on the next task otherwise.
-            NotifyOFree();
             return;
         }
-        ReduceRows();
         ScaleAndCast();
         SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
         WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
-        // The buffer can be returned as soon as the vector read of O is done: O_FREE is set on PIPE_V
-        NotifyOFree();
         LocalTensor<T> outL = UbTTensor(CA_UB_OUT, CA_UB_ROWS * CA_HEAD_DIM);
-        // The groupSize heads of one q row are adjacent in GM and adjacent q rows are qHeads heads apart, so
-        // one multi-block descriptor covers the whole range (see CopyRowsToGm).
+        // 同一 q 行内的 groupSize 个 head 在 GM 里相邻，相邻 q 行之间固定跳 qHeads 个 head，
+        // 整段用一个多块描述符发完（见 CopyRowsToGm）。
         CopyRowsToGm(d, outL, begin_, nRows_);
-        // The OUT buffer is rewritten by the vector unit in the next task: wait for this MTE3 to finish
+        // OUT 缓冲下一任务要被向量覆写：等本轮 MTE3 读完
         SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
         WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
     }
@@ -1389,8 +1418,7 @@ private:
         return (static_cast<uint64_t>(taskIdx) * tiling_->mergeSlotBytes) / sizeof(float);
     }
 
-    // m/l area: each AIV sub owns 2*CA_MAX_R floats so sub0 / sub1 on the same core cannot overwrite
-    // each other
+    // m/l 区：两个 AIV sub 各有独立 2*CA_MAX_R 个 float，避免同核 sub0/sub1 互相覆盖
     __aicore__ inline uint64_t MLSlotElem(uint32_t taskIdx) const
     {
         const uint32_t rows = tiling_->rowsPerTask;
@@ -1398,11 +1426,12 @@ private:
                static_cast<uint64_t>(subIdx_) * 2ull * CA_MAX_R;
     }
 
-    __aicore__ inline void StoreML(uint32_t taskIdx)
+    __aicore__ inline void StoreML(uint32_t taskIdx, const CaTaskDesc& d)
     {
+        (void)d;
         LocalTensor<float> mL = UbF32Tensor(CA_UB_ML, 2 * CA_MAX_R);
         LocalTensor<float> lsum = UbF32Tensor(CA_UB_LSUM, CA_UB_ROWS * 64);
-        // Per-row m comes from this sub's CA_UB_ROWM, written on beat 0 and untouched for the rest of the task
+        // 每行的 m 取本 sub 的 CA_UB_ROWM（online 逐拍折叠后的最终运行最大）
         LocalTensor<float> rowm = UbF32Tensor(CA_UB_ROWM, CA_UB_ROWS * 64);
         SetFlag<HardEvent::V_S>(EVENT_ID0);
         WaitFlag<HardEvent::V_S>(EVENT_ID0);
@@ -1411,7 +1440,7 @@ private:
             if (r >= begin_ && (r - begin_) < nRows_) {
                 mv = rowm.GetValue((r - begin_) * 64);
             }
-            mL.SetValue(r, mv); // m: per row, the kSeg>1 merge keeps the group maximum
+            mL.SetValue(r, mv); // m：逐行独立，kSeg>1 合并时取组内最大
             float lv = 0.0f;
             if (r >= begin_ && (r - begin_) < nRows_) {
                 lv = lsum.GetValue((r - begin_) * 64);
@@ -1423,13 +1452,14 @@ private:
         SetFlag<HardEvent::S_MTE3>(EVENT_ID0);
         WaitFlag<HardEvent::S_MTE3>(EVENT_ID0);
         DataCopy(mergeGm_[MLSlotElem(taskIdx)], mL, 2 * CA_MAX_R);
-        // mL must land before the cross-core SyncAll, otherwise the merging side reads l = 0 and zeroes the row
+        // 必须在跨核 SyncAll 之前确保 mL 落地，否则合并方读到 l=0 会把整行清零
         SetFlag<HardEvent::MTE3_S>(EVENT_ID0);
         WaitFlag<HardEvent::MTE3_S>(EVENT_ID0);
     }
 
-    __aicore__ inline void WriteSentinelSlot(uint32_t taskIdx)
+    __aicore__ inline void WriteSentinelSlot(uint32_t taskIdx, const CaTaskDesc& d)
     {
+        (void)d;
         LocalTensor<float> mL = UbF32Tensor(CA_UB_ML, 2 * CA_MAX_R);
         for (uint32_t r = 0; r < CA_MAX_R; ++r) {
             mL.SetValue(r, CA_MINV);
@@ -1444,34 +1474,30 @@ private:
 
     __aicore__ inline void WriteMergeSlot(const CaTaskDesc& d)
     {
-        ReduceRows();
         const uint64_t base = MergeSlotElem(TaskIdxOfSeg(d, d.kvSegIdx));
         SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
         WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
-        // The buffer can be returned as soon as the vector read of O is done
-        NotifyOFree();
         LocalTensor<float> oL = UbF32Tensor(CA_UB_O, CA_UB_ROWS * CA_HEAD_DIM);
-        // This sub's rows are contiguous inside the merge slot, one DataCopy covers them
+        // merge 槽里本 sub 的行是连续的，一次 DataCopy 搬完
         DataCopy(mergeGm_[base + static_cast<uint64_t>(begin_) * CA_HEAD_DIM], oL, nRows_ * CA_HEAD_DIM);
         SetFlag<HardEvent::MTE3_S>(EVENT_ID0);
         WaitFlag<HardEvent::MTE3_S>(EVENT_ID0);
-        StoreML(TaskIdxOfSeg(d, d.kvSegIdx));
+        StoreML(TaskIdxOfSeg(d, d.kvSegIdx), d);
     }
 
-    // kSeg > 1: merge the O / l of all segments of one (batch, kvHead, qRowTile) after normalising with
-    // the group maximum m*
+    // kSeg > 1：把一个 (batch, kvHead, qRowTile) 下各 segment 的 O / l 用组内最大 m* 归一后合并
     __aicore__ inline void MergeTask(const CaTaskDesc& d)
     {
         const uint32_t begin = CaSubBegin(d.rows, subIdx_);
         const uint32_t nRows = CaSubRows(d.rows, subIdx_);
         LocalTensor<float> mL = UbF32Tensor(CA_UB_ML, 2 * CA_MAX_R);
-        // The merge accumulator is sized by this sub's nRows and indexed with sub-local row numbers
+        // merge 累加器按本 sub 的 nRows 分配，行号用本 sub 内局部下标
         LocalTensor<float> totO = UbF32Tensor(CA_UB_MRG, CA_UB_ROWS * CA_HEAD_DIM);
         LocalTensor<float> oL = UbF32Tensor(CA_UB_O, CA_UB_ROWS * CA_HEAD_DIM);
         LocalTensor<float> mStar = UbF32Tensor(CA_UB_SCAL + CA_SCAL_MRG, CA_MAX_R);
         LocalTensor<float> denL = UbF32Tensor(CA_UB_SCAL + CA_SCAL_TMP, 32);
 
-        // 1) group maximum m*
+        // 1) 组内最大值 m*
         for (uint32_t i = 0; i < nRows; ++i) {
             mStar.SetValue(i, CA_MINV);
         }
@@ -1488,7 +1514,8 @@ private:
             }
         }
 
-        // 2) accumulate O and the denominator
+        // 2) 累加 O 与分母
+        // 累加 O 与分母
         Duplicate(totO, 0.0f, CA_UB_ROWS * CA_HEAD_DIM);
         for (uint32_t i = 0; i < nRows; ++i) {
             denL.SetValue(i, 0.0f);
@@ -1520,15 +1547,15 @@ private:
             PipeBarrier<PIPE_V>();
             Add(totO, totO, oL, nRows * CA_HEAD_DIM);
             PipeBarrier<PIPE_V>();
-            // oL is overwritten by the next DataCopy round: wait for this round's V read, otherwise data is lost
+            // oL 在下一轮被重新 DataCopy 覆盖：必须等本轮 V 读完，否则丢数据
             SetFlag<HardEvent::V_MTE2>(EVENT_ID0);
             WaitFlag<HardEvent::V_MTE2>(EVENT_ID0);
         }
 
-        // 3) normalise and write back
+        // 3) 归一化并写回
         LocalTensor<T> outL = UbTTensor(CA_UB_OUT, CA_UB_ROWS * CA_HEAD_DIM);
-        // Normalise and cast every row of this sub in UB first and synchronise with MTE3 once, instead of one
-        // V_MTE3 / MTE3_V pair per row.
+        // 先在 UB 里把本 sub 的所有行都归一化/转型完，再一次性同步给 MTE3：
+        // 原来每行一对 V_MTE3 / MTE3_V，32 行就是 64 次往返。
         for (uint32_t i = 0; i < nRows; ++i) {
             const float den = denL.GetValue(i);
             const float inv = den > 0.0f ? (1.0f / den) : 0.0f;
@@ -1537,8 +1564,7 @@ private:
         }
         SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
         WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
-        // Adjacent q rows are a fixed distance apart in GM, one multi-block descriptor covers the range (see
-        // CopyRowsToGm)
+        // 相邻 q 行在 GM 里按固定间隔排布，整段用一个多块描述符发完（见 CopyRowsToGm）
         CopyRowsToGm(d, outL, begin, nRows);
         SetFlag<HardEvent::MTE3_S>(EVENT_ID0);
         WaitFlag<HardEvent::MTE3_S>(EVENT_ID0);
@@ -1553,15 +1579,14 @@ private:
     uint32_t begin_;
     uint32_t nRows_;
     float scaleV_;
-    uint32_t effSeg_;  // effective segment count from the actual kvLen (1 = no merge)
-    // P UB double-slot credit: event ids 2/3 keep it separate from the OUTPUT buffer's MTE3_V (EVENT_ID0).
-    // Set and Wait on one id must alternate strictly, so the slot index uses the continuous pUbSeq_
-    // rather than beat.
+    uint32_t effSeg_;  // 按实际 kvLen 推出的生效段数（1 = 不需要 merge）
+    // P 的 UB 双槽信用：事件 id 用 2/3，与 OUTPUT 缓冲的 MTE3_V(EVENT_ID0) 隔离。
+    // 同一 id 上 Set/Wait 必须严格交替，所以槽号用跨任务连续的 pUbSeq_ 而不是 beat。
     static constexpr int32_t CA_PUB_S0 = 2;
     static constexpr int32_t CA_PUB_S1 = 3;
-    uint32_t pUbSeq_ = 0u;  // P beat counter, continuous across tasks
+    uint32_t pUbSeq_ = 0u;  // 跨任务连续的 P 拍号
 };
 
-} // namespace Xllm
+} // namespace ca
 
-#endif // CROSS_ATTENTION_KERNEL_H
+#endif // CROSS_ATTN_ARCH35_FUSION_KERNEL_H

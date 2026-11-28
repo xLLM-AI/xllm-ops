@@ -21,7 +21,7 @@ endif()
 # CV channel; the Atlas A2/A3 path keeps 2201.
 add_ops_compile_options(
     OP_NAME CrossAttention
-    COMPUTE_UNIT "ascend910b;ascend910_93"
+    COMPUTE_UNIT "ascend910b;ascend910_9391;ascend910_9381;ascend910_9372;ascend910_9392;ascend910_9382;ascend910_9362"
     OPTIONS --cce-auto-sync=on
             -Wno-deprecated-declarations
             -Werror
@@ -46,6 +46,14 @@ add_ops_compile_options(
             -I${CANN_3RD_LIB_PATH}/catlass/include
             -I${CMAKE_CURRENT_LIST_DIR}/../third_party/catlass/include
             -I${CMAKE_CURRENT_LIST_DIR}/../../../
+)
+
+# Ascend950 kernel json 以 tilingKey 3510 注册，匹配 CrossAttention_3510 的
+# 128B tiling 数据（默认 key 0 沿用 A2 catlass 的 112B 布局）
+add_ops_tiling_keys(
+    OP_NAME CrossAttention
+    COMPUTE_UNIT ascend950
+    TILING_KEYS 3510
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
