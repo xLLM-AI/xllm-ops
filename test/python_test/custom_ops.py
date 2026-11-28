@@ -160,6 +160,51 @@ def layer_norm_fwd_npu(x, weight, bias=None, z=None, eps=1e-6, group_size=-1,
         x, weight, bias, z, eps, group_size, norm_before_gate, is_rms_norm)
 
 
+# ecr_routing_normalize_compact (S4 top-p selection + weight normalization)
+#   prob [E,S] fp32, tau_val/tau_idx [E,B], sums/cnts [S]; returns
+#   (ids int32 [E,C], weights fp32 [E,C]) with unused slots -1/0.
+#   Positions are written per sample slice in token order; tauIdx is
+#   sample-local. Zero/one seq_lengths entry means one global sample whose
+#   single value is ignored; otherwise nonnegative lengths sum to S.
+def ecr_routing_normalize_compact_npu(prob, tau_val, tau_idx, sums, cnts,
+                                      seq_lengths=(), top_p=1.0, eps=1e-9):
+    if isinstance(seq_lengths, torch.Tensor):
+        seq_lengths = seq_lengths.detach().cpu().tolist()
+    else:
+        seq_lengths = [int(item) for item in seq_lengths]
+    return custom_ops_lib.ecr_routing_normalize_compact(
+        prob, tau_val, tau_idx, sums, cnts, seq_lengths, top_p, eps)
+
+
+# ecr_expert_selection_threshold (S2 top-p threshold detection)
+#   prob [E,S] fp32; returns (tau_val fp32 [E,B], tau_idx int32 [E,B],
+#   n_gt int32 [E,B]). tauIdx is sample-local, ties go to the smaller token.
+#   Empty samples are thresholded as (2.0, -1, 0). Zero/one seq_lengths entry
+#   means one global sample whose single value is ignored; otherwise
+#   nonnegative lengths sum to S.
+def ecr_expert_selection_threshold_npu(prob, seq_lengths=(), top_p=1.0):
+    if isinstance(seq_lengths, torch.Tensor):
+        seq_lengths = seq_lengths.detach().cpu().tolist()
+    else:
+        seq_lengths = [int(item) for item in seq_lengths]
+    return custom_ops_lib.ecr_expert_selection_threshold(
+        prob, seq_lengths, top_p)
+
+
+# ecr_token_routing_statistics (S3 per-token selection statistics)
+#   prob [E,S] fp32, tau_val fp32 [E,B], tau_idx int32 [E,B]; returns
+#   (sums fp32 [S], cnts fp32 [S]). A token counts for an expert when its
+#   probability is above tau_val, or equal to it with a sample-local index not
+#   past tau_idx. Lengths follow the S2 convention.
+def ecr_token_routing_statistics_npu(prob, tau_val, tau_idx, seq_lengths=()):
+    if isinstance(seq_lengths, torch.Tensor):
+        seq_lengths = seq_lengths.detach().cpu().tolist()
+    else:
+        seq_lengths = [int(item) for item in seq_lengths]
+    return custom_ops_lib.ecr_token_routing_statistics(
+        prob, tau_val, tau_idx, seq_lengths)
+
+
 # moe_fused_add_topk (MoE fused sigmoid + group topk routing)
 def moe_fused_add_topk_npu(x, add_num, group_num, group_topk, top_n, top_k,
                            mapping_num=None, mapping_table=None,

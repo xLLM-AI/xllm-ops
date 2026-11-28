@@ -16,6 +16,7 @@ limitations under the License.
 #include <dlfcn.h>
 #include <torch/library.h>
 
+#include <algorithm>
 #include <cmath>
 
 #include "acl/acl_rt.h"
@@ -748,6 +749,174 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> layer_norm_fwd_impl_npu(
                mean,
                rstd);
   return std::make_tuple(y, mean, rstd);
+}
+
+// Output capacity of ecr_routing_normalize_compact: C = sum over samples of
+// ceil(len * float32(top_p) - 1e-12) clamped to [1, len] (0 for an empty
+// sample). Mirrors the host tiling so outputs are allocated before the launch.
+static int64_t EcrCompactCapacity(const at::Tensor& prob,
+                                  at::IntArrayRef seq_lengths,
+                                  double top_p) {
+  TORCH_CHECK(prob.dim() == 2, "prob must be rank two [E,S], got ",
+              prob.dim());
+  const int64_t s = prob.size(1);
+  const int64_t b = seq_lengths.size() <= 1 ? 1 : seq_lengths.size();
+  TORCH_CHECK(b <= 32, "seq_lengths supports at most 32 samples, got ", b);
+  const double p = static_cast<double>(static_cast<float>(top_p));
+  int64_t base = 0;
+  int64_t capacity = 0;
+  for (int64_t sample = 0; sample < b; ++sample) {
+    const int64_t len = seq_lengths.size() <= 1 ? s : seq_lengths[sample];
+    TORCH_CHECK(len >= 0, "seq_lengths entries must be nonnegative, got ",
+                len);
+    base += len;
+    if (len == 0) {
+      continue;
+    }
+    const double rounded = std::ceil(static_cast<double>(len) * p - 1e-12);
+    capacity += static_cast<int64_t>(
+        std::min(static_cast<double>(len), std::max(1.0, rounded)));
+  }
+  TORCH_CHECK(base == s, "seq_lengths must sum to prob.size(1)=", s, ", got ",
+              base);
+  return capacity;
+}
+
+std::tuple<at::Tensor, at::Tensor> ecr_routing_normalize_compact_impl_npu(
+    const at::Tensor& prob,
+    const at::Tensor& tau_val,
+    const at::Tensor& tau_idx,
+    const at::Tensor& sums,
+    const at::Tensor& cnts,
+    at::IntArrayRef seq_lengths,
+    double top_p,
+    double eps) {
+  const int64_t capacity = EcrCompactCapacity(prob, seq_lengths, top_p);
+  const int64_t e = prob.size(0);
+  at::Tensor ids =
+      at::empty({e, capacity}, prob.options().dtype(at::ScalarType::Int));
+  at::Tensor weights = at::empty({e, capacity}, prob.options());
+  // Capacity 0 can only mean S == 0; the source extension skipped the launch
+  // there and so does this binding (there is no slot to write).
+  if (capacity == 0) {
+    return std::make_tuple(ids, weights);
+  }
+  // aclnn signature: (prob, tauVal, tauIdx, sums, cnts, seqLengths, topP, eps,
+  // ids, weights). Unused slots are written as -1/0 by the kernel.
+  // A zero-entry list means one global sample; spell it as [S] so the attr
+  // array is never empty, which the aclnn attr conversion rejects.
+  const std::vector<int64_t> global_lengths{prob.size(1)};
+  const at::IntArrayRef lengths_arg =
+      seq_lengths.size() <= 1 ? at::IntArrayRef(global_lengths) : seq_lengths;
+  EXEC_NPU_CMD(aclnnEcrRoutingNormalizeCompact,
+               prob,
+               tau_val,
+               tau_idx,
+               sums,
+               cnts,
+               lengths_arg,
+               top_p,
+               eps,
+               ids,
+               weights);
+  return std::make_tuple(ids, weights);
+}
+
+// Threshold outputs are [E,B]: the sample-local k-th value, its token index
+// and the count of strictly greater values. Validate the sampling layout here
+// so the launch matches the host tiling contract.
+std::tuple<at::Tensor, at::Tensor, at::Tensor>
+ecr_expert_selection_threshold_impl_npu(const at::Tensor& prob,
+                                        at::IntArrayRef seq_lengths,
+                                        double top_p) {
+  TORCH_CHECK(prob.dim() == 2, "prob must be rank two [E,S], got ",
+              prob.dim());
+  const int64_t e = prob.size(0);
+  const int64_t s = prob.size(1);
+  TORCH_CHECK(e >= 1 && e <= 64, "prob.size(0) must be in [1,64], got ", e);
+  const int64_t b = seq_lengths.size() <= 1 ? 1 : seq_lengths.size();
+  TORCH_CHECK(b <= 32, "seq_lengths supports at most 32 samples, got ", b);
+  int64_t base = 0;
+  for (int64_t sample = 0; sample < b; ++sample) {
+    const int64_t len = seq_lengths.size() <= 1 ? s : seq_lengths[sample];
+    TORCH_CHECK(len >= 0, "seq_lengths entries must be nonnegative, got ",
+                len);
+    base += len;
+  }
+  TORCH_CHECK(base == s, "seq_lengths must sum to prob.size(1)=", s, ", got ",
+              base);
+  at::Tensor tau_val = at::empty({e, b}, prob.options());
+  at::Tensor tau_idx =
+      at::empty({e, b}, prob.options().dtype(at::ScalarType::Int));
+  at::Tensor n_gt =
+      at::empty({e, b}, prob.options().dtype(at::ScalarType::Int));
+  // A zero-entry list means one global sample; spell it as [S] so the attr
+  // array is never empty, which the aclnn attr conversion rejects.
+  const std::vector<int64_t> global_lengths{s};
+  const at::IntArrayRef lengths_arg =
+      seq_lengths.size() <= 1 ? at::IntArrayRef(global_lengths) : seq_lengths;
+  // aclnn signature: (prob, seqLengths, topP, tauVal, tauIdx, nGt). Empty
+  // samples still launch so the kernel writes the 2/-1/0 sentinels.
+  EXEC_NPU_CMD(aclnnEcrExpertSelectionThreshold,
+               prob,
+               lengths_arg,
+               top_p,
+               tau_val,
+               tau_idx,
+               n_gt);
+  return std::make_tuple(tau_val, tau_idx, n_gt);
+}
+
+// Token statistics consume the S2 thresholds: sums/cnts are [S], accumulated
+// over experts per token. Threshold shapes must be [E,B] so the kernel's
+// [expert, sample] table walk stays inside the inputs.
+std::tuple<at::Tensor, at::Tensor> ecr_token_routing_statistics_impl_npu(
+    const at::Tensor& prob,
+    const at::Tensor& tau_val,
+    const at::Tensor& tau_idx,
+    at::IntArrayRef seq_lengths) {
+  TORCH_CHECK(prob.dim() == 2, "prob must be rank two [E,S], got ",
+              prob.dim());
+  const int64_t e = prob.size(0);
+  const int64_t s = prob.size(1);
+  TORCH_CHECK(e >= 1 && e <= 64, "prob.size(0) must be in [1,64], got ", e);
+  const int64_t b = seq_lengths.size() <= 1 ? 1 : seq_lengths.size();
+  TORCH_CHECK(b <= 32, "seq_lengths supports at most 32 samples, got ", b);
+  int64_t base = 0;
+  for (int64_t sample = 0; sample < b; ++sample) {
+    const int64_t len = seq_lengths.size() <= 1 ? s : seq_lengths[sample];
+    TORCH_CHECK(len >= 0, "seq_lengths entries must be nonnegative, got ",
+                len);
+    TORCH_CHECK(len <= 2097152, "seq_lengths entries must be at most 2097152");
+    base += len;
+  }
+  TORCH_CHECK(base == s, "seq_lengths must sum to prob.size(1)=", s, ", got ",
+              base);
+  TORCH_CHECK(tau_val.dim() == 2 && tau_val.size(0) == e &&
+                  tau_val.size(1) == b,
+              "tau_val must be [E,B]=[", e, ",", b, "]");
+  TORCH_CHECK(tau_idx.dim() == 2 && tau_idx.size(0) == e &&
+                  tau_idx.size(1) == b,
+              "tau_idx must be [E,B]=[", e, ",", b, "]");
+  at::Tensor sums = at::empty({s}, prob.options());
+  at::Tensor cnts = at::empty({s}, prob.options());
+  if (s == 0) {
+    return std::make_tuple(sums, cnts);
+  }
+  // A zero-entry list means one global sample; spell it as [S] so the attr
+  // array is never empty, which the aclnn attr conversion rejects.
+  const std::vector<int64_t> global_lengths{s};
+  const at::IntArrayRef lengths_arg =
+      seq_lengths.size() <= 1 ? at::IntArrayRef(global_lengths) : seq_lengths;
+  // aclnn signature: (prob, tauVal, tauIdx, seqLengths, sums, cnts).
+  EXEC_NPU_CMD(aclnnEcrTokenRoutingStatistics,
+               prob,
+               tau_val,
+               tau_idx,
+               lengths_arg,
+               sums,
+               cnts);
+  return std::make_tuple(sums, cnts);
 }
 
 std::tuple<at::Tensor, at::Tensor> moe_fused_add_topk_impl_npu(
@@ -2834,6 +3003,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &mega_gdn_prefill_op,
         "mega_gdn_prefill_op");
   m.def("layer_norm_fwd", &layer_norm_fwd_impl_npu, "layer_norm_fwd");
+  m.def("ecr_routing_normalize_compact", &ecr_routing_normalize_compact_impl_npu,
+        "ecr_routing_normalize_compact");
+  m.def("ecr_expert_selection_threshold",
+        &ecr_expert_selection_threshold_impl_npu,
+        "ecr_expert_selection_threshold");
+  m.def("ecr_token_routing_statistics",
+        &ecr_token_routing_statistics_impl_npu,
+        "ecr_token_routing_statistics");
   m.def("moe_fused_add_topk", &moe_fused_add_topk_impl_npu, "moe_fused_add_topk");
   m.def("moe_fused_reducesum_div", &moe_fused_reducesum_div_impl_npu, "moe_fused_reducesum_div");
   m.def("replace_token", &replace_token_impl_npu, "replace_token");
