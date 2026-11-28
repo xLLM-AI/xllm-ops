@@ -112,6 +112,7 @@ def _get_device():
 # (batch, seq, nq, nkv, stride_tail, rope_stride, gqa_expand, layout_bnsd, head_dim)
 CASES = [
     (1, 512, 6, 2, 6, 64, False, False, 128),   # JoyOV2 DiT main scenario
+    (1, 128, 64, 16, 0, 64, False, False, 128),  # Nq+Nk=80 > 64 (dynamic sumsq bound)
     (1, 512, 6, 2, 6, 64, False, True, 128),    # BNSD layout
     (1, 512, 6, 2, 6, 64, True, False, 128),    # GQA inline expand
     (1, 512, 6, 2, 0, 64, False, False, 128),   # no tail columns
