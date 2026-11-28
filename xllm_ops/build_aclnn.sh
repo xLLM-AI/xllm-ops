@@ -173,6 +173,7 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
         "mega_chunk_gdn"
         "laser_attention"
         "layer_norm_fwd"
+        "sigmoid_mul"
         "xllm_chunk_kda_fwd_prepare"
         "pre_process_fwd_kernel_merged"
         "merge_fwd_bwd_kernel"
@@ -269,6 +270,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "rec_constrained_top_k"
         "laser_attention"
         "layer_norm_fwd"
+        "sigmoid_mul"
     )
     CANN_TOOLKIT_VERSION="$(get_cann_toolkit_version || true)"
     if [[ "${CANN_TOOLKIT_VERSION}" =~ ^([0-9]+)\.([0-9]+) ]]; then

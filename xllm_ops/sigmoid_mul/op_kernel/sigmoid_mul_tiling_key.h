@@ -1,0 +1,30 @@
+/*!
+ * \file sigmoid_mul_tiling_key.h
+ * \brief Tiling template params for SigmoidMul
+ */
+#ifndef __SIGMOID_MUL_TILING_KEY_H__
+#define __SIGMOID_MUL_TILING_KEY_H__
+
+#include "ascendc/host_api/tiling/template_argument.h"
+
+ASCENDC_TPL_ARGS_DECL(SigmoidMul,
+    ASCENDC_TPL_DATATYPE_DECL(D_T_X, C_DT_BF16, C_DT_FLOAT16, C_DT_FLOAT, ASCENDC_TPL_INPUT(0)),
+    ASCENDC_TPL_UINT_DECL(MODE, 8, ASCENDC_TPL_UI_LIST, 0, 1)
+);
+
+ASCENDC_TPL_SEL(
+    ASCENDC_TPL_ARGS_SEL(
+        ASCENDC_TPL_DATATYPE_SEL(D_T_X, C_DT_BF16),
+        ASCENDC_TPL_UINT_SEL(MODE, ASCENDC_TPL_UI_LIST, 0, 1)
+    ),
+    ASCENDC_TPL_ARGS_SEL(
+        ASCENDC_TPL_DATATYPE_SEL(D_T_X, C_DT_FLOAT16),
+        ASCENDC_TPL_UINT_SEL(MODE, ASCENDC_TPL_UI_LIST, 0, 1)
+    ),
+    ASCENDC_TPL_ARGS_SEL(
+        ASCENDC_TPL_DATATYPE_SEL(D_T_X, C_DT_FLOAT),
+        ASCENDC_TPL_UINT_SEL(MODE, ASCENDC_TPL_UI_LIST, 0, 1)
+    ),
+);
+
+#endif
