@@ -38,6 +38,12 @@ static bool IsAiCoreSupport(const aclTensor* x, const aclTensor* gate)
     return true;
 }
 
+// bf16: 32B == 16 elements. The trailing axis supports 128 .. 16K, 32B aligned.
+static bool IsSupportedTailDim(int64_t n)
+{
+    return n >= 128 && n <= 16384 && (n % 16) == 0;
+}
+
 // Only 2-D element-wise (same shape) or trailing-dim-1 row broadcast [M, 1].
 static bool IsSupportedGateLayout(const op::Shape& xShape, const op::Shape& gateShape)
 {
@@ -48,8 +54,8 @@ static bool IsSupportedGateLayout(const op::Shape& xShape, const op::Shape& gate
     const int64_t N = xShape.GetDim(1);
     const int64_t gM = gateShape.GetDim(0);
     const int64_t gN = gateShape.GetDim(1);
-    if (N != 2048) {
-        return false;  // tail dim is strictly 2048
+    if (!IsSupportedTailDim(N)) {
+        return false;  // trailing dim must be 32B aligned and within [128, 16384]
     }
     const bool sameShape = (M == gM && N == gN);
     const bool rowBroadcast = (gN == 1 && gM == M);

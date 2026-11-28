@@ -66,8 +66,10 @@ static ge::graphStatus GetShapeAttrsInfo(gert::TilingContext* context, int64_t* 
         OP_CHECK_IF(!(gShape.GetDim(0) == xShape.GetDim(0) && gShape.GetDim(1) == xShape.GetDim(1)),
                     OP_LOGE(context, "SigmoidMul: element-wise gate must match x shape"), return ge::GRAPH_FAILED);
     }
-    // Tail (trailing) dim is strictly 2048; no generalization.
-    OP_CHECK_IF(*rowWidth != 2048, OP_LOGE(context, "SigmoidMul: tail dim N must be 2048"), return ge::GRAPH_FAILED);
+    // Trailing dim: 32B aligned (16 bf16 elements) and within [128, 16384].
+    OP_CHECK_IF(*rowWidth < 128 || *rowWidth > 16384 || (*rowWidth % 16) != 0,
+                OP_LOGE(context, "SigmoidMul: tail dim N must be 32B aligned and in [128, 16384]"),
+                return ge::GRAPH_FAILED);
 
     auto inputDesc = context->GetInputDesc(0);
     OP_CHECK_NULL_WITH_CONTEXT(context, inputDesc);

@@ -11,6 +11,12 @@ using namespace ge;
 
 namespace ops {
 
+// bf16: 32B == 16 elements. The trailing axis supports 128 .. 16K, 32B aligned.
+static bool IsSupportedTailDim(int64_t n)
+{
+    return n >= 128 && n <= 16384 && (n % 16) == 0;
+}
+
 static ge::graphStatus InferShape4SigmoidMul(gert::InferShapeContext* context)
 {
     const gert::Shape* xShape = context->GetInputShape(0);
@@ -29,17 +35,19 @@ static ge::graphStatus InferShape4SigmoidMul(gert::InferShapeContext* context)
     const int64_t gN = gateShape->GetDim(1);
     // Treat an unknown dim (<0, e.g. -1 in dynamic graphs) as compatible.
     auto dimEq = [](int64_t a, int64_t b) { return a < 0 || b < 0 || a == b; };
-    // A known gate width must be 1 (row broadcast) or 2048; reject others even
-    // when x's trailing dim is dynamic.
-    OP_CHECK_IF(gN >= 0 && gN != 1 && gN != 2048,
-                OP_LOGE(context, "SigmoidMul: known gate width must be 1 or 2048"), return ge::GRAPH_FAILED);
+    // A known gate width must be 1 (row broadcast) or a supported element-wise
+    // width; reject others even when x's trailing dim is dynamic.
+    OP_CHECK_IF(gN >= 0 && gN != 1 && !IsSupportedTailDim(gN),
+                OP_LOGE(context, "SigmoidMul: known gate width must be 1 or in [128, 16384] (32B aligned)"),
+                return ge::GRAPH_FAILED);
     const bool sameShape = (dimEq(M, gM) && dimEq(N, gN));
     const bool rowBroadcast = (gN == 1 && dimEq(M, gM));
     OP_CHECK_IF(!(sameShape || rowBroadcast),
                 OP_LOGE(context, "SigmoidMul: gate must be same shape as x or [M, 1]"),
                 return ge::GRAPH_FAILED);
-    // Tail dim is 2048 (unknown N allowed here; tiling enforces 2048 at runtime).
-    OP_CHECK_IF(N >= 0 && N != 2048, OP_LOGE(context, "SigmoidMul: tail dim N must be 2048"),
+    // Unknown N is allowed here; tiling re-checks it at runtime.
+    OP_CHECK_IF(N >= 0 && !IsSupportedTailDim(N),
+                OP_LOGE(context, "SigmoidMul: tail dim N must be 32B aligned and in [128, 16384]"),
                 return ge::GRAPH_FAILED);
 
     // Output always follows x.

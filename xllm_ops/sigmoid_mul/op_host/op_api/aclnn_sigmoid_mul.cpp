@@ -1,6 +1,6 @@
 /**
  * @file aclnn_sigmoid_mul.cpp
- * @brief ACLNN L2 API implementation - SigmoidMul (bf16, 2-D, tail 2048).
+ * @brief ACLNN L2 API implementation - SigmoidMul (bf16, 2-D, tail 128..16K, 32B aligned).
  */
 #include "aclnn_sigmoid_mul.h"
 #include "sigmoid_mul.h"
@@ -15,7 +15,9 @@
 using namespace op;
 
 #define ACLNN_MAX_SHAPE_RANK 8
-#define SIGMOID_MUL_TAIL 2048
+#define SIGMOID_MUL_MIN_TAIL 128
+#define SIGMOID_MUL_MAX_TAIL 16384
+#define SIGMOID_MUL_TAIL_ALIGN 16  // 32B for bf16
 
 static const std::initializer_list<op::DataType> AICORE_DTYPE_SUPPORT_LIST = {
     DataType::DT_BF16
@@ -64,7 +66,8 @@ static bool CheckFormat(const aclTensor* x, const aclTensor* gate, const aclTens
     return true;
 }
 
-// Contract: 2-D tensors, tail dim == 2048, gate same-shape or [M,1], out == x shape.
+// Contract: 2-D tensors, tail dim in [128, 16384] and 32B aligned, gate
+// same-shape or [M,1], out == x shape.
 // Validated here (before the empty shortcut and before dispatch) so unsupported
 // shapes surface as ACLNN_ERR_PARAM_INVALID instead of an internal error.
 static bool CheckContract(const aclTensor* x, const aclTensor* gate, const aclTensor* out)
@@ -76,8 +79,10 @@ static bool CheckContract(const aclTensor* x, const aclTensor* gate, const aclTe
              OP_LOGE(ACLNN_ERR_PARAM_INVALID, "SigmoidMul: only 2-D tensors supported"), return false);
     const int64_t M = xs.GetDim(0);
     const int64_t N = xs.GetDim(1);
-    OP_CHECK(N == SIGMOID_MUL_TAIL,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "SigmoidMul: tail dim N must be 2048, got %ld", N),
+    OP_CHECK(N >= SIGMOID_MUL_MIN_TAIL && N <= SIGMOID_MUL_MAX_TAIL &&
+                 (N % SIGMOID_MUL_TAIL_ALIGN) == 0,
+             OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                     "SigmoidMul: tail dim N must be 32B aligned and in [128, 16384], got %ld", N),
              return false);
     const int64_t gM = gs.GetDim(0);
     const int64_t gN = gs.GetDim(1);

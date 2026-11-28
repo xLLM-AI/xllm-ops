@@ -3,6 +3,7 @@
 //     bf16 tolerance rtol=1/64 atol=1/256.
 //   - accuracy (relative): fused out vs unfused aclnnSigmoid + aclnnMul result.
 //   - perf: fused aclnnSigmoidMul vs unfused aclnnSigmoid + aclnnMul (re-plan/call).
+//   - contract: tail dim must be 32B aligned (16 bf16 elements) and in [128, 16384].
 // aclnn status codes are checked; the bench exits non-zero on any failure.
 // Build (example):
 //   OPP=<opp>/vendors/<vendor>; A=$ASCEND_HOME_PATH/aarch64-linux
@@ -34,13 +35,13 @@ template<class F> static double timed(F f,aclrtStream s,int it,int warm,int rep)
 int main(){
   CK(aclInit(nullptr));CK(aclrtSetDevice(0));aclrtStream s=nullptr;CK(aclrtCreateStream(&s));void*wb=nullptr;CK(aclrtMalloc(&wb,8u<<20,ACL_MEM_MALLOC_NORMAL_ONLY));
   const double RTOL=1.0/64, ATOL=1.0/256;
-  struct C{const char*n;long M;bool bc;};
-  C cs[]={{"广播 [4,2048]",4,true},{"广播 [16,2048]",16,true},{"广播 [32,2048]",32,true},
-          {"逐元素 [4,2048]",4,false},{"逐元素 [8,2048]",8,false},{"逐元素 [16,2048]",16,false},{"逐元素 [32,2048]",32,false}};
-  printf("%-16s %9s %8s %7s | %-24s | %-24s\n","case","unfused","fused","speedup","acc vs unfused","acc vs fp64 golden");
-  printf("---------------------------------------------------------------------------------------------------------------\n");
+  struct C{const char*n;long M;long N;bool bc;};
+  C cs[]={{"广播 [4,128]",4,128,true},{"广播 [4,2048]",4,2048,true},{"广播 [16,4096]",16,4096,true},{"广播 [4,16384]",4,16384,true},
+          {"逐元素 [4,128]",4,128,false},{"逐元素 [16,2048]",16,2048,false},{"逐元素 [8,8192]",8,8192,false},{"逐元素 [4,16384]",4,16384,false}};
+  printf("%-18s %9s %8s %7s | %-24s | %-24s\n","case","unfused","fused","speedup","acc vs unfused","acc vs fp64 golden");
+  printf("-----------------------------------------------------------------------------------------------------------------\n");
   for(auto&c:cs){
-    long M=c.M,N=2048; std::vector<int64_t> xs{M,N}, gs=c.bc?std::vector<int64_t>{M,1}:std::vector<int64_t>{M,N};
+    long M=c.M,N=c.N; std::vector<int64_t> xs{M,N}, gs=c.bc?std::vector<int64_t>{M,1}:std::vector<int64_t>{M,N};
     std::vector<uint16_t> hx(M*N),hg(c.bc?M:M*N);
     for(long i=0;i<M*N;i++)hx[i]=f2bf(std::sin(0.013f*i)*3.0f);
     for(long i=0;i<(long)hg.size();i++)hg[i]=f2bf(std::cos(0.021f*i)*2.0f);
@@ -69,8 +70,20 @@ int main(){
     char a1[40],a2[40];
     snprintf(a1,sizeof(a1),"MERE=%.1e MARE=%.1e bad=%ld",m1,x1,b1);
     snprintf(a2,sizeof(a2),"MERE=%.1e MARE=%.1e bad=%ld",m2,x2,b2);
-    printf("%-16s %8.2fus %7.2fus %6.2fx | %-24s | %-24s\n",c.n,tu,tf,tu/tf,a1,a2);
+    printf("%-18s %8.2fus %7.2fus %6.2fx | %-24s | %-24s\n",c.n,tu,tf,tu/tf,a1,a2);
   }
-  if(g_err){printf("\nBENCH FAILED: an aclnn call returned an error\n");return 1;}
+  // contract: out-of-range / misaligned tail dims must be rejected
+  {
+    struct R{const char*n;long N;};
+    R rs[]={{"拒绝 N=64 (<128)",64},{"拒绝 N=1000 (非16对齐)",1000},{"拒绝 N=17408 (>16384)",17408}};
+    for(auto&r:rs){
+      long M=4,N=r.N; std::vector<int64_t> xs{M,N}, gs{M,N};
+      D x=alloc(xs),g=alloc(gs),o=alloc(xs); uint64_t w=0; aclOpExecutor* e=nullptr;
+      auto st=aclnnSigmoidMulGetWorkspaceSize(x.t,g.t,o.t,&w,&e);
+      printf("%-24s -> %s (%d)\n", r.n, st==ACL_SUCCESS?"ACCEPTED(unexpected)":"rejected", (int)st);
+      if(st==ACL_SUCCESS) g_err=1;
+    }
+  }
+  if(g_err){printf("\nBENCH FAILED\n");return 1;}
   aclrtDestroyStream(s);aclrtResetDevice(0);aclFinalize();return 0;
 }
